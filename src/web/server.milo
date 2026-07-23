@@ -28,7 +28,7 @@ from "std/net" import {
     TcpListener, TcpStream
 }
 from "std/os" import {
-    read, write, close, pipe
+    read, write, close, pipe, getpid
 }
 from "std/io" import {
     readFile, fdChannel
@@ -70,7 +70,7 @@ from "std/process" import {
     Child
 }
 from "std/fs" import {
-    pathExists, makeDir, writeFile, currentDir
+    pathExists, makeDir, writeFile, removeFile, currentDir
 }
 from "std/uuid" import {
     uuidV4
@@ -88,7 +88,7 @@ from "std/path" import {
     pathBasename, pathDirname, pathJoin
 }
 from "std/string" import {
-    strPadEnd, strSplit, strSplitWhitespace, strIndexOf, strStartsWith, strTrim
+    strPadEnd, strSplit, strSplitWhitespace, strIndexOf, strStartsWith, strTrim, strParseInt
 }
 
 from "../dap/client" import {
@@ -1559,6 +1559,539 @@ fn startRun(bus: Channel<string>, busWakeWr: i32, pendCh: Channel<Pending>): boo
     return false
 }
 
+// One client command (the `{"cmd": ...}` JSON the browser sends over WS).
+// Factored out of the WS reader so the HTTP API can drive the exact same verbs:
+// one vocabulary, so `dapweb api` cannot drift from what the UI does.
+fn dispatchClientCmd(payload: string, peerKind: string, bus: Channel<string>, busWakeWr: i32, pendCh: Channel<Pending>): void {
+    let c = jStr(payload, "cmd")
+    if c == "setBreakpoint" || c == "clearBreakpoint" {
+        let line = jI64(payload, "line", 0 as i64)
+        var path = jStr(payload, "path")
+        if path.len == 0 {
+            path = srcPath.clone()
+        }
+        // Upsert: drop any existing bp at (path, line), then re-add for
+        // "set" (a condition edit is a set on an existing line).
+        var keep: Vec<Bp> = []
+        for bp in gBps {
+            if bp.line != line || bp.path != path {
+                keep.push(cloneBp(bp))
+            }
+        }
+        gBps = keep
+        if c == "setBreakpoint" {
+            gBps.push(Bp {
+                path: path.clone(),
+                line: line,
+                condition: jStr(payload, "condition"),
+                hitCondition: jStr(payload, "hitCondition"),
+                logMessage: jStr(payload, "logMessage"),
+                enabled: jBool(payload, "enabled", true),
+            }
+            )
+        }
+        wsPush(bus, busWakeWr, bpAckMsg(line, c == "setBreakpoint"))
+        if gStarted && gDapIn >= 0 {
+            gOddSeq = gOddSeq + 2
+            // Register before sending (here and below): D drains pendings
+            // after each recv, so the entry must exist before the adapter
+            // can possibly reply or the response is dropped unmatched.
+            let _p = pendCh.trySend(Pending {
+                seq: gOddSeq, kind: "bpLive", id: 0, extra: ""
+            }
+            )
+            sendReqFd(gDapIn, gOddSeq, "setBreakpoints", buildBpArgsForPath(gBps, path))
+        }
+    } else if c == "run" {
+        // The editor is the source of truth: an inline `config` object rides
+        // the run and is applied just before launch — no staging. A live
+        // session requires force:true (the client confirms with the user),
+        // which kills it and reruns with the new config after teardown.
+        let cfgRaw = jObjRaw(payload, "config")
+        if gStarted {
+            if jBool(payload, "force", false) && gDapIn >= 0 {
+                gPendingRun = true
+                gPendingConfig = cfgRaw
+                gPendingStopAtMain = jBool(payload, "stopAtMain", gConfigStopAtMain)
+                logEvent("run killed", $"forced by {peerKind} peer — relaunching")
+                gOddSeq = gOddSeq + 2
+                let _p = pendCh.trySend(Pending {
+                    seq: gOddSeq, kind: "disc", id: 0, extra: ""
+                }
+                )
+                sendReqFd(gDapIn, gOddSeq, "disconnect", jsonObj().bool("terminateDebuggee", true).build())
+            } else {
+                wsPush(bus, busWakeWr, configErrMsg("a debug session is already active — run with force:true to kill and relaunch"))
+            }
+        } else {
+            var cfgErr: string = ""
+            if cfgRaw.len > 0 {
+                cfgErr = applyConfig(cfgRaw, "")
+                if cfgErr.len == 0 {
+                    logEvent("target changed", $"{binPath}  (by {peerKind} peer)")
+                    wsPush(bus, busWakeWr, helloMsg())
+                    if srcPath.len > 0 {
+                        wsPush(bus, busWakeWr, sourceMsg(srcPath))
+                    }
+                }
+            }
+            if cfgErr.len > 0 {
+                wsPush(bus, busWakeWr, configErrMsg(cfgErr))
+            } else if binPath.len == 0 && gRequest != "attach" {
+                // Booted idle with no target: nudge to the config drawer instead
+                // of spawning the adapter with an empty program path.
+                wsPush(bus, busWakeWr, configErrMsg("no program configured — set a debug target (⚙) before running"))
+            } else {
+                stopAtMain = jBool(payload, "stopAtMain", gConfigStopAtMain)
+                let _ok = startRun(bus, busWakeWr, pendCh)
+            }
+        }
+    } else if c == "continue" || c == "stepOver" || c == "stepIn" || c == "stepOut" || c == "pause" {
+        if c != "pause" {
+            gStopMsg = ""
+            gThreadsMsg = ""
+            gRegionsMsg = ""
+        } // resumed: snapshots are stale for late joiners
+        if gDapIn >= 0 {
+            var dapCmd: string = "continue"
+            if c == "stepOver" {
+                dapCmd = "next"
+            } 
+            else if c == "stepIn" {
+                dapCmd = "stepIn"
+            } 
+            else if c == "stepOut" {
+                dapCmd = "stepOut"
+            } 
+            else if c == "pause" {
+                dapCmd = "pause"
+            }
+            let t = jI64(payload, "tid", 1 as i64)
+            if c == "pause" && t < 0 {
+                // Attach flow: Pause can arrive before any stop, so
+                // there's no tid yet — ask for threads and pause the first.
+                gOddSeq = gOddSeq + 2
+                let _p = pendCh.trySend(Pending {
+                    seq: gOddSeq, kind: "thrPause", id: 0, extra: ""
+                }
+                )
+                sendReqFd(gDapIn, gOddSeq, "threads", "{}")
+            } else {
+                var b = jsonObj().int("threadId", t)
+                // instruction-granularity stepping from the asm pane.
+                let gran = jStr(payload, "granularity")
+                if gran.len > 0 {
+                    b = b.str("granularity", gran)
+                }
+                gOddSeq = gOddSeq + 2
+                sendReqFd(gDapIn, gOddSeq, dapCmd, b.build())
+            }
+        }
+    } else if c == "restart" {
+        gStopMsg = ""
+        gThreadsMsg = ""
+        gRegionsMsg = ""
+        // native restart — adapter re-launches with the same launch
+        // config; gBps and the stop-at-main function bp persist. UI gates
+        // this on supportsRestartRequest (kill+rerun is its fallback). A
+        // config change is a Run (force-kills), not a restart.
+        if gDapIn >= 0 {
+            gOddSeq = gOddSeq + 2
+            let _p = pendCh.trySend(Pending {
+                seq: gOddSeq, kind: "restartR", id: 0, extra: ""
+            }
+            )
+            sendReqFd(gDapIn, gOddSeq, "restart", jsonObj().build())
+        }
+    } else if c == "kill" {
+        // End the session: adapter tears down the debuggee and exits; the
+        // reader loop's terminated/EOF path re-arms `run` via endCh.
+        logEvent("kill requested", $"(by {peerKind} peer)")
+        if gDapIn >= 0 {
+            gOddSeq = gOddSeq + 2
+            let _p = pendCh.trySend(Pending {
+                seq: gOddSeq, kind: "disc", id: 0, extra: ""
+            }
+            )
+            sendReqFd(gDapIn, gOddSeq, "disconnect", jsonObj().bool("terminateDebuggee", true).build())
+        }
+    } else if c == "evaluate" {
+        if gDapIn >= 0 {
+            let id = jI64(payload, "id", 0 as i64)
+            let frameId = jI64(payload, "frameId", -1 as i64)
+            var b = jsonObj().str("expression", jStr(payload, "expr"))
+                .str("context", jStr(payload, "context"))
+            if frameId >= 0 {
+                b = b.int("frameId", frameId)
+            }
+            gOddSeq = gOddSeq + 2
+            let _p = pendCh.trySend(Pending {
+                seq: gOddSeq, kind: "eval", id: id, extra: ""
+            }
+            )
+            sendReqFd(gDapIn, gOddSeq, "evaluate", b.build())
+        }
+    } else if c == "expand" {
+        if gDapIn >= 0 {
+            let id = jI64(payload, "id", 0 as i64)
+            gOddSeq = gOddSeq + 2
+            let _p = pendCh.trySend(Pending {
+                seq: gOddSeq, kind: "expand", id: id, extra: ""
+            }
+            )
+            sendReqFd(gDapIn, gOddSeq, "variables", jsonObj().int("variablesReference", jI64(payload, "ref", 0 as i64)).build())
+        }
+    } else if c == "threadStack" {
+        // stack for a clicked thread; the UI then drives frameScopes
+        // for its locals like any other frame selection.
+        if gDapIn >= 0 {
+            let id = jI64(payload, "id", 0 as i64)
+            let t = jI64(payload, "tid", 1 as i64)
+            gOddSeq = gOddSeq + 2
+            let _p = pendCh.trySend(Pending {
+                seq: gOddSeq, kind: "tst", id: id, extra: t.toString()
+            }
+            )
+            sendReqFd(gDapIn, gOddSeq, "stackTrace", jsonObj().int("threadId", t).int("startFrame", 0).int("levels", 20).build())
+        }
+    } else if c == "frameScopes" {
+        // locals for a user-selected stack frame.
+        if gDapIn >= 0 {
+            let id = jI64(payload, "id", 0 as i64)
+            gOddSeq = gOddSeq + 2
+            let _p = pendCh.trySend(Pending {
+                seq: gOddSeq, kind: "fsc", id: id, extra: ""
+            }
+            )
+            sendReqFd(gDapIn, gOddSeq, "scopes", jsonObj().int("frameId", jI64(payload, "frameId", 0 as i64)).build())
+        }
+    } else if c == "setExceptions" {
+        // selected exception filter ids. Stored globally so session
+        // init applies them; live-applied when a session is running.
+        var arr = jsonArr()
+        match jsonParse(payload.clone()) {
+            Result.Ok(doc) => {
+                match doc.get("filters") {
+                    Option.Some(f) => {
+                        let n = f.len()
+                        var i: i64 = 0
+                        while i < n {
+                            match f.at(i) {
+                                Option.Some(el) => {
+                                    arr = arr.str(el.asStr() ?? "")
+                                }
+                                Option.None => {
+                                }
+                            }
+                            i = i + 1
+                        }
+                    }
+                    Option.None => {
+                    }
+                }
+            }
+            Result.Err(_e) => {
+            }
+        }
+        excFiltersJson = arr.build()
+        if gStarted && gDapIn >= 0 {
+            gOddSeq = gOddSeq + 2
+            let _p = pendCh.trySend(Pending {
+                seq: gOddSeq, kind: "ebLive", id: 0, extra: ""
+            }
+            )
+            sendReqFd(gDapIn, gOddSeq, "setExceptionBreakpoints", excArgs())
+        }
+    } else if c == "complete" {
+        // debug-console completions.
+        if gDapIn >= 0 {
+            let id = jI64(payload, "id", 0 as i64)
+            let frameId = jI64(payload, "frameId", -1 as i64)
+            var b = jsonObj().str("text", jStr(payload, "text"))
+                .int("column", jI64(payload, "column", 1 as i64))
+            if frameId >= 0 {
+                b = b.int("frameId", frameId)
+            }
+            gOddSeq = gOddSeq + 2
+            let _p = pendCh.trySend(Pending {
+                seq: gOddSeq, kind: "cmpl", id: id, extra: ""
+            }
+            )
+            sendReqFd(gDapIn, gOddSeq, "completions", b.build())
+        }
+    } else if c == "readMem" {
+        // raw memory window. memoryReference is whatever the UI got
+        // from a value/ipRef; lldb-dap accepts plain hex addresses.
+        if gDapIn >= 0 {
+            let id = jI64(payload, "id", 0 as i64)
+            gOddSeq = gOddSeq + 2
+            let _p = pendCh.trySend(Pending {
+                seq: gOddSeq, kind: "readmem", id: id, extra: ""
+            }
+            )
+            sendReqFd(gDapIn, gOddSeq, "readMemory", jsonObj().str("memoryReference", jStr(payload, "memoryReference")).int("offset", jI64(payload, "offset", 0 as i64)).int("count", jI64(payload, "count", 256 as i64)).build())
+        }
+    } else if c == "setVar" {
+        // edit a variable. ref = parent container (scope ref for
+        // top-level locals, the variable's own ref for expanded children).
+        if gDapIn >= 0 {
+            let id = jI64(payload, "id", 0 as i64)
+            gOddSeq = gOddSeq + 2
+            let _p = pendCh.trySend(Pending {
+                seq: gOddSeq, kind: "setv", id: id, extra: ""
+            }
+            )
+            sendReqFd(gDapIn, gOddSeq, "setVariable", jsonObj().int("variablesReference", jI64(payload, "ref", 0 as i64)).str("name", jStr(payload, "name")).str("value", jStr(payload, "value")).build())
+        }
+    } else if c == "disassemble" {
+        // window of instructions around a frame's pc (memoryReference =
+        // the frame's instructionPointerReference from stackTrace).
+        if gDapIn >= 0 {
+            let id = jI64(payload, "id", 0 as i64)
+            gOddSeq = gOddSeq + 2
+            let _p = pendCh.trySend(Pending {
+                seq: gOddSeq, kind: "disasm", id: id, extra: ""
+            }
+            )
+            sendReqFd(gDapIn, gOddSeq, "disassemble", jsonObj().str("memoryReference", jStr(payload, "memoryReference")).int("instructionOffset", -16).int("instructionCount", 64).bool("resolveSymbols", true).build())
+        }
+    } else if c == "openSource" {
+        // show the file a clicked frame lives in. sourceMsg itself
+        // handles unreadable pseudo-paths (dyld etc.) with a placeholder.
+        let p = jStr(payload, "path")
+        if p.len > 0 {
+            wsPush(bus, busWakeWr, sourceMsg(p))
+        }
+    } else if c == "stdin" {
+        let data = jStr(payload, "data")
+        if gPtyFd >= 0 {
+            unsafe {
+                let _n = write(gPtyFd, data, data.len)
+            }
+        } else {
+            gStdinBuf = gStdinBuf + data
+        }
+    } else if c == "setConfig" {
+        // config = a VS Code launch-configuration object (see applyConfig).
+        // The browser applies configs inline on Run; setConfig is the
+        // programmatic path (MCP peers). Idle-only — a live session must be
+        // force-run to change target (setConfig never kills a debuggee).
+        if gStarted {
+            wsPush(bus, busWakeWr, configErrMsg("a debug session is active — stop it (or Run with force) to change the target"))
+        } else {
+            let err = applyConfig(payload, "")
+            if err.len > 0 {
+                wsPush(bus, busWakeWr, configErrMsg(err))
+            } else {
+                logEvent("target changed", $"{binPath}  (by {peerKind} peer)")
+                wsPush(bus, busWakeWr, helloMsg())
+                if srcPath.len > 0 {
+                    wsPush(bus, busWakeWr, sourceMsg(srcPath))
+                }
+            }
+        }
+    } else if c == "importHistory" {
+        // One-shot localStorage migration: fold the client's legacy entries
+        // into the server store, then the client stops sending (server is the
+        // sole writer thereafter). Idempotent — dedup collapses re-imports.
+        match jsonParse(payload.clone()) {
+            Result.Ok(d) => {
+                match d.get("entries") {
+                    Option.Some(e) => {
+                        if e.isArray() {
+                            gHistory = histMergeMany(gHistory, e.rawStr(), 10 as i64)
+                            persistHistory()
+                            wsPush(bus, busWakeWr, historyChangedMsg())
+                        }
+                    }
+                    Option.None => {
+                    }
+                }
+            }
+            Result.Err(_e) => {
+            }
+        }
+    } else if c == "newSession" {
+        // Deliberate fresh start (a reload reconnects to the live session
+        // by design): end any running debuggee via the kill path, drop bps
+        // and the late-join replay snapshots, mint a new id, and re-hello
+        // every peer — each resets its client state on the id change.
+        // Target config survives; the ⚙ drawer changes it.
+        if gStarted && gDapIn >= 0 {
+            gOddSeq = gOddSeq + 2
+            let _p = pendCh.trySend(Pending {
+                seq: gOddSeq, kind: "disc", id: 0, extra: ""
+            }
+            )
+            sendReqFd(gDapIn, gOddSeq, "disconnect", jsonObj().bool("terminateDebuggee", true).build())
+        }
+        gBps = []
+        gStopMsg = ""
+        gThreadsMsg = ""
+        gRegionsMsg = ""
+        gOutputLog = []
+        gSessionId = uuidV4()
+        logEvent("session reset", $"new session {gSessionId}")
+        wsPush(bus, busWakeWr, helloMsg())
+        if srcPath.len > 0 {
+            wsPush(bus, busWakeWr, sourceMsg(srcPath))
+        }
+    }
+}
+
+// ── session registry ──
+//
+// One `dapweb web` process hosts one session, so a session is identified by the
+// server that owns it. Each server drops a descriptor here at startup and removes
+// it at exit; `dapweb api list` reads the directory and prunes descriptors whose
+// pid is gone (a killed server never gets to clean up after itself).
+fn sessionsDir(): string {
+    return histDir() + "/sessions"
+}
+
+fn sessionFilePath(id: &string): string {
+    return sessionsDir() + "/" + id + ".json"
+}
+
+fn registerSession(port: i64): void {
+    ensureDir(sessionsDir())
+    let doc = jsonObj()
+        .str("id", gSessionId.clone())
+        .int("pid", getpid() as i64)
+        .int("port", port)
+        .str("program", binPath.clone())
+        .str("adapter", adapterId())
+        .int("startedAt", epochMillis())
+        .build()
+    match writeFile(sessionFilePath(gSessionId), doc) {
+        Result.Ok(_n) => {
+        }
+        Result.Err(_e) => {
+        }
+    }
+}
+
+fn unregisterSession(): void {
+    match removeFile(sessionFilePath(gSessionId)) {
+        Result.Ok(_x) => {
+        }
+        Result.Err(_e) => {
+        }
+    }
+}
+
+// ── HTTP API ──
+//
+// Snapshot of everything a caller needs to decide what to do next. Built from the
+// same globals the WS replay uses, so `api state` and a freshly-opened browser tab
+// always agree.
+fn apiStateJson(): string {
+    var phase = "idle"
+    if gStarted {
+        phase = "running"
+    }
+    if gStopMsg.len > 0 {
+        phase = "stopped"
+    }
+    var bps = jsonArr()
+    for bp in gBps {
+        bps = bps.raw(jsonObj().str("path", bp.path.clone()).int("line", bp.line)
+            .str("condition", bp.condition.clone()).bool("enabled", bp.enabled).build())
+    }
+    var b = jsonObj().str("type", "state")
+        .str("sessionId", gSessionId.clone())
+        .str("phase", phase)
+        .str("program", binPath.clone())
+        .str("sourcePath", srcPath.clone())
+        .str("adapter", adapterId())
+        .int("peers", gPeers)
+        .arr("breakpoints", bps)
+    if gStopMsg.len > 0 {
+        b = b.raw("stopped", gStopMsg.clone())
+    }
+    if gThreadsMsg.len > 0 {
+        b = b.raw("threads", gThreadsMsg.clone())
+    }
+    return b.build()
+}
+
+// Value of `key` in a raw query string ("a=1&b=2"); "" when absent.
+fn queryParam(query: &string, key: &string): string {
+    var i: i64 = 0
+    var cur: string = ""
+    while i <= query.len {
+        if i == query.len || query[i] == '&' {
+            var eq: i64 = 0
+            while eq < cur.len && cur[eq] != '=' {
+                eq = eq + 1
+            }
+            if eq < cur.len && cur.substr(0, eq) == key {
+                return cur.substr(eq + 1, cur.len)
+            }
+            cur = ""
+        } else {
+            cur.push(query[i])
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// Run one command and, when `awaitType` is set, block until a broadcast of that
+// type arrives (or the deadline passes). Registering as a Sink first means no
+// reply can slip through between dispatch and listening.
+fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, bus: Channel<string>, busWakeWr: i32, pendCh: Channel<Pending>, regCh: Channel<Sink>): string {
+    if awaitType.len == 0 {
+        dispatchClientCmd(body, "api", bus, busWakeWr, pendCh)
+        return jsonObj().bool("ok", true).build()
+    }
+    let ch = Channel<string>.new(256)!
+    var wake: [i32; 2] = [0; 2]
+    unsafe {
+        if pipe(wake as *u8) != 0 {
+            return jsonObj().bool("ok", false).str("error", "pipe failed").build()
+        }
+    }
+    let clientId = gNextClient
+    gNextClient = gNextClient + 1
+    let _r = regCh.trySend(Sink {
+        id: clientId, ch: ch, wakeWr: wake[1], alive: true
+    }
+    )
+    var one: [u8; 1] = [110; 1]
+    unsafe {
+        let _w = write(busWakeWr, one as *u8, 1)
+    }
+    dispatchClientCmd(body, "api", bus, busWakeWr, pendCh)
+
+    let deadline = epochMillis() + timeoutMs
+    var out: string = ""
+    while epochMillis() < deadline {
+        match ch.tryRecv() {
+            Option.Some(m) => {
+                if jStr(m, "type") == awaitType {
+                    out = m.clone()
+                    break
+                }
+            }
+            Option.None => {
+                sleepMs(10)
+            }
+        }
+    }
+    let _u = regCh.trySend(Sink {
+        id: clientId, ch: ch, wakeWr: wake[1], alive: false
+    }
+    )
+    unsafe {
+        let _w2 = write(busWakeWr, one as *u8, 1)
+    }
+    if out.len == 0 {
+        return jsonObj().bool("ok", false).str("error", "timeout").str("awaited", awaitType).build()
+    }
+    return out
+}
+
 // ── R: the WS-reader task (entry point per debug WebSocket) ──
 
 fn handleDebugWs(ws: WsConn, peerKind: string, bus: Channel<string>, busWakeWr: i32, pendCh: Channel<Pending>, regCh: Channel<Sink>): void {
@@ -1632,380 +2165,7 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: Channel<string>, busWakeWr: 
             }
         }
 
-        let c = jStr(payload, "cmd")
-        if c == "setBreakpoint" || c == "clearBreakpoint" {
-            let line = jI64(payload, "line", 0 as i64)
-            var path = jStr(payload, "path")
-            if path.len == 0 {
-                path = srcPath.clone()
-            }
-            // Upsert: drop any existing bp at (path, line), then re-add for
-            // "set" (a condition edit is a set on an existing line).
-            var keep: Vec<Bp> = []
-            for bp in gBps {
-                if bp.line != line || bp.path != path {
-                    keep.push(cloneBp(bp))
-                }
-            }
-            gBps = keep
-            if c == "setBreakpoint" {
-                gBps.push(Bp {
-                    path: path.clone(),
-                    line: line,
-                    condition: jStr(payload, "condition"),
-                    hitCondition: jStr(payload, "hitCondition"),
-                    logMessage: jStr(payload, "logMessage"),
-                    enabled: jBool(payload, "enabled", true),
-                }
-                )
-            }
-            wsPush(bus, busWakeWr, bpAckMsg(line, c == "setBreakpoint"))
-            if gStarted && gDapIn >= 0 {
-                gOddSeq = gOddSeq + 2
-                // Register before sending (here and below): D drains pendings
-                // after each recv, so the entry must exist before the adapter
-                // can possibly reply or the response is dropped unmatched.
-                let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "bpLive", id: 0, extra: ""
-                }
-                )
-                sendReqFd(gDapIn, gOddSeq, "setBreakpoints", buildBpArgsForPath(gBps, path))
-            }
-        } else if c == "run" {
-            // The editor is the source of truth: an inline `config` object rides
-            // the run and is applied just before launch — no staging. A live
-            // session requires force:true (the client confirms with the user),
-            // which kills it and reruns with the new config after teardown.
-            let cfgRaw = jObjRaw(payload, "config")
-            if gStarted {
-                if jBool(payload, "force", false) && gDapIn >= 0 {
-                    gPendingRun = true
-                    gPendingConfig = cfgRaw
-                    gPendingStopAtMain = jBool(payload, "stopAtMain", gConfigStopAtMain)
-                    logEvent("run killed", $"forced by {peerKind} peer — relaunching")
-                    gOddSeq = gOddSeq + 2
-                    let _p = pendCh.trySend(Pending {
-                        seq: gOddSeq, kind: "disc", id: 0, extra: ""
-                    }
-                    )
-                    sendReqFd(gDapIn, gOddSeq, "disconnect", jsonObj().bool("terminateDebuggee", true).build())
-                } else {
-                    wsPush(bus, busWakeWr, configErrMsg("a debug session is already active — run with force:true to kill and relaunch"))
-                }
-            } else {
-                var cfgErr: string = ""
-                if cfgRaw.len > 0 {
-                    cfgErr = applyConfig(cfgRaw, "")
-                    if cfgErr.len == 0 {
-                        logEvent("target changed", $"{binPath}  (by {peerKind} peer)")
-                        wsPush(bus, busWakeWr, helloMsg())
-                        if srcPath.len > 0 {
-                            wsPush(bus, busWakeWr, sourceMsg(srcPath))
-                        }
-                    }
-                }
-                if cfgErr.len > 0 {
-                    wsPush(bus, busWakeWr, configErrMsg(cfgErr))
-                } else if binPath.len == 0 && gRequest != "attach" {
-                    // Booted idle with no target: nudge to the config drawer instead
-                    // of spawning the adapter with an empty program path.
-                    wsPush(bus, busWakeWr, configErrMsg("no program configured — set a debug target (⚙) before running"))
-                } else {
-                    stopAtMain = jBool(payload, "stopAtMain", gConfigStopAtMain)
-                    let _ok = startRun(bus, busWakeWr, pendCh)
-                }
-            }
-        } else if c == "continue" || c == "stepOver" || c == "stepIn" || c == "stepOut" || c == "pause" {
-            if c != "pause" {
-                gStopMsg = ""
-                gThreadsMsg = ""
-                gRegionsMsg = ""
-            } // resumed: snapshots are stale for late joiners
-            if gDapIn >= 0 {
-                var dapCmd: string = "continue"
-                if c == "stepOver" {
-                    dapCmd = "next"
-                } 
-                else if c == "stepIn" {
-                    dapCmd = "stepIn"
-                } 
-                else if c == "stepOut" {
-                    dapCmd = "stepOut"
-                } 
-                else if c == "pause" {
-                    dapCmd = "pause"
-                }
-                let t = jI64(payload, "tid", 1 as i64)
-                if c == "pause" && t < 0 {
-                    // Attach flow: Pause can arrive before any stop, so
-                    // there's no tid yet — ask for threads and pause the first.
-                    gOddSeq = gOddSeq + 2
-                    let _p = pendCh.trySend(Pending {
-                        seq: gOddSeq, kind: "thrPause", id: 0, extra: ""
-                    }
-                    )
-                    sendReqFd(gDapIn, gOddSeq, "threads", "{}")
-                } else {
-                    var b = jsonObj().int("threadId", t)
-                    // instruction-granularity stepping from the asm pane.
-                    let gran = jStr(payload, "granularity")
-                    if gran.len > 0 {
-                        b = b.str("granularity", gran)
-                    }
-                    gOddSeq = gOddSeq + 2
-                    sendReqFd(gDapIn, gOddSeq, dapCmd, b.build())
-                }
-            }
-        } else if c == "restart" {
-            gStopMsg = ""
-            gThreadsMsg = ""
-            gRegionsMsg = ""
-            // native restart — adapter re-launches with the same launch
-            // config; gBps and the stop-at-main function bp persist. UI gates
-            // this on supportsRestartRequest (kill+rerun is its fallback). A
-            // config change is a Run (force-kills), not a restart.
-            if gDapIn >= 0 {
-                gOddSeq = gOddSeq + 2
-                let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "restartR", id: 0, extra: ""
-                }
-                )
-                sendReqFd(gDapIn, gOddSeq, "restart", jsonObj().build())
-            }
-        } else if c == "kill" {
-            // End the session: adapter tears down the debuggee and exits; the
-            // reader loop's terminated/EOF path re-arms `run` via endCh.
-            logEvent("kill requested", $"(by {peerKind} peer)")
-            if gDapIn >= 0 {
-                gOddSeq = gOddSeq + 2
-                let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "disc", id: 0, extra: ""
-                }
-                )
-                sendReqFd(gDapIn, gOddSeq, "disconnect", jsonObj().bool("terminateDebuggee", true).build())
-            }
-        } else if c == "evaluate" {
-            if gDapIn >= 0 {
-                let id = jI64(payload, "id", 0 as i64)
-                let frameId = jI64(payload, "frameId", -1 as i64)
-                var b = jsonObj().str("expression", jStr(payload, "expr"))
-                    .str("context", jStr(payload, "context"))
-                if frameId >= 0 {
-                    b = b.int("frameId", frameId)
-                }
-                gOddSeq = gOddSeq + 2
-                let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "eval", id: id, extra: ""
-                }
-                )
-                sendReqFd(gDapIn, gOddSeq, "evaluate", b.build())
-            }
-        } else if c == "expand" {
-            if gDapIn >= 0 {
-                let id = jI64(payload, "id", 0 as i64)
-                gOddSeq = gOddSeq + 2
-                let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "expand", id: id, extra: ""
-                }
-                )
-                sendReqFd(gDapIn, gOddSeq, "variables", jsonObj().int("variablesReference", jI64(payload, "ref", 0 as i64)).build())
-            }
-        } else if c == "threadStack" {
-            // stack for a clicked thread; the UI then drives frameScopes
-            // for its locals like any other frame selection.
-            if gDapIn >= 0 {
-                let id = jI64(payload, "id", 0 as i64)
-                let t = jI64(payload, "tid", 1 as i64)
-                gOddSeq = gOddSeq + 2
-                let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "tst", id: id, extra: t.toString()
-                }
-                )
-                sendReqFd(gDapIn, gOddSeq, "stackTrace", jsonObj().int("threadId", t).int("startFrame", 0).int("levels", 20).build())
-            }
-        } else if c == "frameScopes" {
-            // locals for a user-selected stack frame.
-            if gDapIn >= 0 {
-                let id = jI64(payload, "id", 0 as i64)
-                gOddSeq = gOddSeq + 2
-                let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "fsc", id: id, extra: ""
-                }
-                )
-                sendReqFd(gDapIn, gOddSeq, "scopes", jsonObj().int("frameId", jI64(payload, "frameId", 0 as i64)).build())
-            }
-        } else if c == "setExceptions" {
-            // selected exception filter ids. Stored globally so session
-            // init applies them; live-applied when a session is running.
-            var arr = jsonArr()
-            match jsonParse(payload.clone()) {
-                Result.Ok(doc) => {
-                    match doc.get("filters") {
-                        Option.Some(f) => {
-                            let n = f.len()
-                            var i: i64 = 0
-                            while i < n {
-                                match f.at(i) {
-                                    Option.Some(el) => {
-                                        arr = arr.str(el.asStr() ?? "")
-                                    }
-                                    Option.None => {
-                                    }
-                                }
-                                i = i + 1
-                            }
-                        }
-                        Option.None => {
-                        }
-                    }
-                }
-                Result.Err(_e) => {
-                }
-            }
-            excFiltersJson = arr.build()
-            if gStarted && gDapIn >= 0 {
-                gOddSeq = gOddSeq + 2
-                let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "ebLive", id: 0, extra: ""
-                }
-                )
-                sendReqFd(gDapIn, gOddSeq, "setExceptionBreakpoints", excArgs())
-            }
-        } else if c == "complete" {
-            // debug-console completions.
-            if gDapIn >= 0 {
-                let id = jI64(payload, "id", 0 as i64)
-                let frameId = jI64(payload, "frameId", -1 as i64)
-                var b = jsonObj().str("text", jStr(payload, "text"))
-                    .int("column", jI64(payload, "column", 1 as i64))
-                if frameId >= 0 {
-                    b = b.int("frameId", frameId)
-                }
-                gOddSeq = gOddSeq + 2
-                let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "cmpl", id: id, extra: ""
-                }
-                )
-                sendReqFd(gDapIn, gOddSeq, "completions", b.build())
-            }
-        } else if c == "readMem" {
-            // raw memory window. memoryReference is whatever the UI got
-            // from a value/ipRef; lldb-dap accepts plain hex addresses.
-            if gDapIn >= 0 {
-                let id = jI64(payload, "id", 0 as i64)
-                gOddSeq = gOddSeq + 2
-                let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "readmem", id: id, extra: ""
-                }
-                )
-                sendReqFd(gDapIn, gOddSeq, "readMemory", jsonObj().str("memoryReference", jStr(payload, "memoryReference")).int("offset", jI64(payload, "offset", 0 as i64)).int("count", jI64(payload, "count", 256 as i64)).build())
-            }
-        } else if c == "setVar" {
-            // edit a variable. ref = parent container (scope ref for
-            // top-level locals, the variable's own ref for expanded children).
-            if gDapIn >= 0 {
-                let id = jI64(payload, "id", 0 as i64)
-                gOddSeq = gOddSeq + 2
-                let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "setv", id: id, extra: ""
-                }
-                )
-                sendReqFd(gDapIn, gOddSeq, "setVariable", jsonObj().int("variablesReference", jI64(payload, "ref", 0 as i64)).str("name", jStr(payload, "name")).str("value", jStr(payload, "value")).build())
-            }
-        } else if c == "disassemble" {
-            // window of instructions around a frame's pc (memoryReference =
-            // the frame's instructionPointerReference from stackTrace).
-            if gDapIn >= 0 {
-                let id = jI64(payload, "id", 0 as i64)
-                gOddSeq = gOddSeq + 2
-                let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "disasm", id: id, extra: ""
-                }
-                )
-                sendReqFd(gDapIn, gOddSeq, "disassemble", jsonObj().str("memoryReference", jStr(payload, "memoryReference")).int("instructionOffset", -16).int("instructionCount", 64).bool("resolveSymbols", true).build())
-            }
-        } else if c == "openSource" {
-            // show the file a clicked frame lives in. sourceMsg itself
-            // handles unreadable pseudo-paths (dyld etc.) with a placeholder.
-            let p = jStr(payload, "path")
-            if p.len > 0 {
-                wsPush(bus, busWakeWr, sourceMsg(p))
-            }
-        } else if c == "stdin" {
-            let data = jStr(payload, "data")
-            if gPtyFd >= 0 {
-                unsafe {
-                    let _n = write(gPtyFd, data, data.len)
-                }
-            } else {
-                gStdinBuf = gStdinBuf + data
-            }
-        } else if c == "setConfig" {
-            // config = a VS Code launch-configuration object (see applyConfig).
-            // The browser applies configs inline on Run; setConfig is the
-            // programmatic path (MCP peers). Idle-only — a live session must be
-            // force-run to change target (setConfig never kills a debuggee).
-            if gStarted {
-                wsPush(bus, busWakeWr, configErrMsg("a debug session is active — stop it (or Run with force) to change the target"))
-            } else {
-                let err = applyConfig(payload, "")
-                if err.len > 0 {
-                    wsPush(bus, busWakeWr, configErrMsg(err))
-                } else {
-                    logEvent("target changed", $"{binPath}  (by {peerKind} peer)")
-                    wsPush(bus, busWakeWr, helloMsg())
-                    if srcPath.len > 0 {
-                        wsPush(bus, busWakeWr, sourceMsg(srcPath))
-                    }
-                }
-            }
-        } else if c == "importHistory" {
-            // One-shot localStorage migration: fold the client's legacy entries
-            // into the server store, then the client stops sending (server is the
-            // sole writer thereafter). Idempotent — dedup collapses re-imports.
-            match jsonParse(payload.clone()) {
-                Result.Ok(d) => {
-                    match d.get("entries") {
-                        Option.Some(e) => {
-                            if e.isArray() {
-                                gHistory = histMergeMany(gHistory, e.rawStr(), 10 as i64)
-                                persistHistory()
-                                wsPush(bus, busWakeWr, historyChangedMsg())
-                            }
-                        }
-                        Option.None => {
-                        }
-                    }
-                }
-                Result.Err(_e) => {
-                }
-            }
-        } else if c == "newSession" {
-            // Deliberate fresh start (a reload reconnects to the live session
-            // by design): end any running debuggee via the kill path, drop bps
-            // and the late-join replay snapshots, mint a new id, and re-hello
-            // every peer — each resets its client state on the id change.
-            // Target config survives; the ⚙ drawer changes it.
-            if gStarted && gDapIn >= 0 {
-                gOddSeq = gOddSeq + 2
-                let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "disc", id: 0, extra: ""
-                }
-                )
-                sendReqFd(gDapIn, gOddSeq, "disconnect", jsonObj().bool("terminateDebuggee", true).build())
-            }
-            gBps = []
-            gStopMsg = ""
-            gThreadsMsg = ""
-            gRegionsMsg = ""
-            gOutputLog = []
-            gSessionId = uuidV4()
-            logEvent("session reset", $"new session {gSessionId}")
-            wsPush(bus, busWakeWr, helloMsg())
-            if srcPath.len > 0 {
-                wsPush(bus, busWakeWr, sourceMsg(srcPath))
-            }
-        }
+        dispatchClientCmd(payload.clone(), peerKind.clone(), bus, busWakeWr, pendCh)
     }
 
     // Leave the shared session. The broadcaster closes our wake fd when the
@@ -2365,6 +2525,62 @@ fn handleConnection(fd: i32, bus: Channel<string>, busWakeWr: i32, pendCh: Chann
             return
         }
 
+        // ── HTTP API (same command vocabulary as the WS the browser speaks) ──
+        var apiPath = rl.path.clone()
+        var apiQuery: string = ""
+        var qi3: i64 = 0
+        while qi3 < apiPath.len {
+            if apiPath[qi3] == '?' {
+                apiQuery = apiPath.substr(qi3 + 1, apiPath.len)
+                apiPath = apiPath.substr(0, qi3)
+                break
+            }
+            qi3 = qi3 + 1
+        }
+        if apiPath == "/api/state" {
+            sendHttp(fd, 200, "application/json", apiStateJson())
+            close(fd)
+            return
+        }
+        if apiPath == "/api/cmd" {
+            if rl.method != "POST" {
+                sendHttp(fd, 405, "application/json", jsonObj().bool("ok", false).str("error", "POST required").build())
+                close(fd)
+                return
+            }
+            // Body follows the header terminator. Small JSON commands arrive in the
+            // first read; keep pulling while the declared length is short.
+            var body: string = ""
+            var hi: i64 = 0
+            while hi + 3 < raw.len {
+                if raw[hi] == '\r' && raw[hi + 1] == '\n' && raw[hi + 2] == '\r' && raw[hi + 3] == '\n' {
+                    body = raw.substr(hi + 4, raw.len)
+                    break
+                }
+                hi = hi + 1
+            }
+            let want = strParseInt(headerVal(raw, "content-length"))
+            while body.len < want {
+                var more: [u8; 8192] = [0; 8192]
+                schedulerWaitRead(fd)
+                let n2 = read(fd, more as *u8, 8192)
+                if n2 <= 0 {
+                    break
+                }
+                for j in 0..n2 {
+                    body.push(more[j])
+                }
+            }
+            var timeoutMs = strParseInt(queryParam(apiQuery, "timeout"))
+            if timeoutMs <= 0 {
+                timeoutMs = 5000
+            }
+            let reply = apiRunCmd(body, queryParam(apiQuery, "await"), timeoutMs, bus, busWakeWr, pendCh, regCh)
+            sendHttp(fd, 200, "application/json", reply)
+            close(fd)
+            return
+        }
+
         if rl.method == "GET" {
             var host = headerVal(raw, "host")
             if host.len == 0 {
@@ -2608,6 +2824,7 @@ fn webMain(argv: Vec<string>): i32 {
                 print("  target:   (none — configure in the browser via the ⚙ drawer)")
             }
             print($"  co-debug: dapweb mcp --attach localhost:{port}   (AI joins this session)")
+            registerSession(port)
             if gLogLevel >= 1 {
                 print("")
             }
@@ -2627,5 +2844,6 @@ fn webMain(argv: Vec<string>): i32 {
     // drive the scheduler so the accept/broadcast/reaper loops keep running.
     // The server blocks here until the process is signalled.
     schedulerRunToCompletion()
+    unregisterSession()
     return 0
 }
