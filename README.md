@@ -9,6 +9,22 @@ Web + AI interface for any DAP debugger. Written in [Milo](https://github.com/mi
 **[Documentation](https://milo-language.github.io/milo/)** ·
 **[Download a release](https://github.com/milo-language/dapweb/releases/tag/latest)**
 
+## Install
+
+```sh
+curl -fsSL https://github.com/milo-language/dapweb/releases/download/latest/dapweb-darwin-arm64.tar.gz | tar xz
+cd dapweb-darwin-arm64
+./dapweb /path/to/your-binary
+```
+
+Swap `darwin-arm64` for `linux-x64` or `linux-arm64`. The web UI is embedded in the binary. Download through a browser
+instead and macOS quarantines the archive: the unsigned binary is killed on first run
+and moved to the Trash. Either install with `curl` as above, or clear the flag with
+`xattr -dr com.apple.quarantine <dir>` before running.
+
+`--version` prints the commit the binary was built from. Releases roll on the `latest`
+tag, so re-running the install command is the update path.
+
 One binary, two subcommands:
 
 - **`dapweb web`** — React + Monaco + xterm.js served by a Milo HTTP/WebSocket server that drives a DAP adapter (lldb-dap, debugpy, delve). Breakpoints (Monaco glyph gutter), stepping, threads, call stack, expandable locals, watch expressions, a debug console (full lldb command access), and a real PTY terminal — type into your program *while it runs*. Fully self-hosted: no CDN assets. Boots idle: open the UI and set the target in the ⚙ drawer — a VS Code launch-configuration JSON with per-debugger schema autocomplete (templates seed a starter config; the last 10 targets are one click away).
@@ -22,7 +38,7 @@ src/web/ui/build.sh                                  # bundle UI → src/web/ui/
 bun run ../milo/src/main.ts build src/main.milo -o dapweb
 ```
 
-The server serves the UI from disk (`--webroot`) — UI changes only need `build.sh` + a browser refresh, no server rebuild. If `--webroot` isn't given (or its path has no `index.html`), the server walks up from the cwd to find `src/web/ui/dist`, so `dapweb web` runs from anywhere in the tree, not just the dapweb root.
+`build.sh` must run before `milo build`: the UI bundle is compiled into the binary with `embedFile()`, so a release is a single self-contained file that runs from any directory. For UI work, `--webroot src/web/ui/dist` serves from disk instead — `build.sh` + a browser refresh, no server rebuild.
 
 ## Run
 

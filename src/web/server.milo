@@ -2103,9 +2103,38 @@ fn sendHttp(fd: i32, status: i32, contentType: &string, body: &string): void {
     }
 }
 
-// UI assets are served from disk (--webroot) rather than embedFile: the Monaco
-// bundle is ~4.5MB and embedFile's byte-array emission dominates compile time
-// (papercut #7). Bonus: UI iteration is build.sh + refresh, no server rebuild.
+// UI assets are embedded, so the binary is self-contained: a downloaded release
+// runs from any cwd with nothing next to it. Embedding the whole ~5.8MB bundle
+// costs ~0.4s of build time — the old "byte-array emission dominates compile
+// time" concern (papercut #7) no longer holds. --webroot still overrides for UI
+// iteration: rebuild the bundle, refresh the page, no server rebuild.
+//
+// A renamed build.sh output breaks the build here rather than at runtime, which
+// is the point: a missing asset is a compile error, not a 404 in the browser.
+fn embeddedAsset(p: &string): Option<string> {
+    if p == "/index.html" {
+        return Option.Some(embedFile("ui/dist/index.html"))
+    }
+    if p == "/app.js" {
+        return Option.Some(embedFile("ui/dist/app.js"))
+    }
+    if p == "/app.css" {
+        return Option.Some(embedFile("ui/dist/app.css"))
+    }
+    if p == "/editor.worker.js" {
+        return Option.Some(embedFile("ui/dist/editor.worker.js"))
+    }
+    if p == "/json.worker.js" {
+        return Option.Some(embedFile("ui/dist/json.worker.js"))
+    }
+    if p == "/favicon.svg" {
+        return Option.Some(embedFile("ui/dist/favicon.svg"))
+    }
+    if p == "/og.png" {
+        return Option.Some(embedFile("ui/dist/og.png"))
+    }
+    return Option.None
+}
 fn mimeFor(path: &string): string {
     var ext: string = ""
     var i: i64 = path.len - 1
@@ -2230,20 +2259,37 @@ fn serveStatic(fd: i32, reqPath: &string, origin: &string): void {
         }
         di = di + 1
     }
-    match readFile(webroot + p) {
-        Result.Ok(body) => {
-            if p == "/index.html" {
-                // og:image/og:url need absolute URLs (unfurlers reject
-                // relative) but the host varies (localhost/LAN/tunnel):
-                // inject the request's own origin.
-                sendHttp(fd, 200, mimeFor(p), replaceAll(body, "__ORIGIN__", origin))
-            } else {
-                sendHttp(fd, 200, mimeFor(p), body)
+    // --webroot wins when set, so UI work does not need a server rebuild;
+    // otherwise serve the copy compiled into this binary.
+    var body: string = ""
+    if webroot.len > 0 {
+        match readFile(webroot + p) {
+            Result.Ok(disk) => {
+                body = disk
+            }
+            Result.Err(_e) => {
+                sendHttp(fd, 404, "text/plain", "not found")
+                return
             }
         }
-        Result.Err(_e) => {
-            sendHttp(fd, 404, "text/plain", "not found")
+    } else {
+        match embeddedAsset(p) {
+            Option.Some(embedded) => {
+                body = embedded
+            }
+            Option.None => {
+                sendHttp(fd, 404, "text/plain", "not found")
+                return
+            }
         }
+    }
+    if p == "/index.html" {
+        // og:image/og:url need absolute URLs (unfurlers reject
+        // relative) but the host varies (localhost/LAN/tunnel):
+        // inject the request's own origin.
+        sendHttp(fd, 200, mimeFor(p), replaceAll(body, "__ORIGIN__", origin))
+    } else {
+        sendHttp(fd, 200, mimeFor(p), body)
     }
 }
 
@@ -2373,37 +2419,6 @@ fn openBrowser(url: &string): void {
     }
 }
 
-// The UI bundle lives at a fixed spot inside the source tree. When --webroot is left
-// at its cwd-relative default, walk up from the cwd looking for it, so `dapweb web` runs
-// from any directory in the repo (or the dapweb subdir) instead of only its own root.
-// Milo has no self-exe-path API, so this is a cwd walk, not a binary-relative one.
-fn findWebroot(): Option<string> {
-    var dir = match currentDir() {
-        Result.Ok(d) => {
-            d
-        }
-        Result.Err(_e) => {
-            return Option.None
-        }
-    }
-    // Markers cover both cases: cwd at/under the dapweb dir, and cwd at/under the repo root.
-    let rels = ["src/web/ui/dist", "examples/tools/dapweb/src/web/ui/dist"]
-    while true {
-        for rel in rels {
-            let cand = pathJoin(dir, rel)
-            let idx = cand + "/index.html"
-            if pathExists(idx) {
-                return Option.Some(cand)
-            }
-        }
-        let parent = pathDirname(dir)
-        if parent == dir {
-            return Option.None // reached the filesystem root
-        }
-        dir = parent
-    }
-    return Option.None
-}
 
 // Subcommand entrypoint: dispatched from src/main.milo as `dapweb web ...`.
 // argv[0] is the display name (skipped by parseFrom); the rest are the web flags.
@@ -2420,7 +2435,7 @@ fn webMain(argv: Vec<string>): i32 {
     parser.addString("dapPath", "a", "DAP adapter command (stdio); a launch config's \"dapPath\" overrides", "lldb-dap")
     parser.addI64("port", "", "listen port", 8080)
     parser.addI64("idle-ttl", "", "end the debug session after this many seconds with no ws peers attached (0 = never)", 86400)
-    parser.addString("webroot", "w", "UI bundle dir (build with src/web/ui/build.sh)", "src/web/ui/dist")
+    parser.addString("webroot", "w", "serve the UI from this dir instead of the copy embedded in the binary (UI dev: src/web/ui/build.sh)", "")
     parser.addBool("quiet", "q", "suppress session event log lines (banner only)")
     parser.addBool("verbose", "v", "log stops and steps too (noisy)")
     // A full VS Code launch configuration (inline JSON object or a file path —
@@ -2468,19 +2483,9 @@ fn webMain(argv: Vec<string>): i32 {
             }
         }
     }
-    // Honor an explicit/working --webroot; otherwise walk up from the cwd to find the
-    // bundle so the command isn't pinned to the dapweb root directory.
-    if !pathExists(webroot + "/index.html") {
-        match findWebroot() {
-            Option.Some(found) => {
-                webroot = found
-            }
-            Option.None => {
-            }
-        }
-    }
-    if !pathExists(webroot + "/index.html") {
-        eprint($"error: UI bundle not found (looked for {webroot}/index.html and walked up from the cwd) — run src/web/ui/build.sh or pass --webroot\n")
+    // An explicit --webroot must exist; without one the embedded bundle always does.
+    if webroot.len > 0 && !pathExists(webroot + "/index.html") {
+        eprint($"error: --webroot {webroot} has no index.html — run src/web/ui/build.sh, or drop the flag to use the embedded UI\n")
         return 1
     }
     let adapterArg = args.getString("dapPath")

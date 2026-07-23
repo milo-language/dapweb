@@ -30,6 +30,9 @@ from "web/server" import {
 from "mcp/main" import {
     mcpMain
 }
+from "version" import {
+    versionText
+}
 
 // argparse has flags + positionals but no git-style subcommands, so the command
 // roster + examples live in the description; `command` is a trailing positional
@@ -42,6 +45,17 @@ fn topParser(): ArgParser {
 }
 
 fn main(): i32 {
+    // Before the parser: `--version` is not a subcommand, and the trailing-args
+    // parser would forward it to one.
+    let argv = args()
+    var vi: i64 = 1
+    while vi < argv.len {
+        if argv[vi] == "--version" || argv[vi] == "-V" {
+            print(versionText())
+            return 0
+        }
+        vi = vi + 1
+    }
     var parser = topParser()
     let top = parser.parseFrom(args()) // auto-handles a leading --help
     let pos = top.positional

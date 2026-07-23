@@ -1,0 +1,17 @@
+// Build identity. `.version` is committed as "dev" and overwritten by release CI
+// with the commit sha + build date. Without it a binary from the rolling `latest`
+// tag cannot say what it is, which makes bug reports unattributable.
+
+from "std/string" import {
+    trim
+}
+
+fn versionLine(): string {
+    return "dapweb " + trim(embedFile("../.version"))
+}
+
+// Rolling `latest` means re-running the install is the update path; there is no
+// in-place upgrade to point at, so print where to get a newer build.
+fn versionText(): string {
+    return versionLine() + "\nhttps://github.com/milo-language/dapweb/releases — rolling `latest`; re-run the install command to update"
+}

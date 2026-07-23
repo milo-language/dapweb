@@ -63,6 +63,20 @@ jobs:
             brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
           fi
 
+      # Stamp build identity into the binary. `.version` is embedded via embedFile(),
+      # so this must happen before the build; the committed value is "dev".
+      - name: stamp version
+        run: printf '%s (%s)' "$(git rev-parse --short HEAD)" "$(date -u +%Y-%m-%d)" > .version
+
+      # Must run before `milo build`: the UI bundle is embedded via embedFile(),
+      # so it has to exist on disk at compile time. A missing bundle fails the
+      # build here rather than shipping a binary that 404s in the browser.
+      - name: build web UI
+        working-directory: src/web/ui
+        run: |
+          bun install --frozen-lockfile
+          ./build.sh
+
       - name: build server
         run: milo build src/main.milo -o dapweb --release --static-deps
 
@@ -74,14 +88,6 @@ jobs:
           fi
           echo "dapweb is OpenSSL-free"
 
-      # The UI is served from disk via --webroot, so the bundle ships alongside
-      # the binary rather than being embedded.
-      - name: build web UI
-        working-directory: src/web/ui
-        run: |
-          bun install --frozen-lockfile
-          ./build.sh
-
       - name: smoke test
         run: ./dapweb --help > /dev/null && echo "binary runs"
 
@@ -89,8 +95,6 @@ jobs:
         run: |
           mkdir -p "pkg/dapweb-${{ matrix.target }}"
           cp dapweb README.md "pkg/dapweb-${{ matrix.target }}/"
-          mkdir -p "pkg/dapweb-${{ matrix.target }}/webroot"
-          cp -R src/web/ui/dist/. "pkg/dapweb-${{ matrix.target }}/webroot/"
           tar czf "dapweb-${{ matrix.target }}.tar.gz" -C pkg "dapweb-${{ matrix.target }}"
 
       - uses: actions/upload-artifact@v4
@@ -113,8 +117,15 @@ jobs:
           body: |
             Rolling release from the latest passing commit on main.
 
-            Each archive holds the `dapweb` binary plus the `webroot/` UI bundle.
-            Run `./dapweb web --program <binary> --webroot webroot`.
+            Install (curl, not the browser — a browser download carries macOS's
+            quarantine flag, which kills and trashes the unsigned binary):
+
+            ```
+            curl -fsSL https://github.com/milo-language/dapweb/releases/download/latest/dapweb-<platform>.tar.gz | tar xz
+            cd dapweb-<platform> && ./dapweb web
+            ```
+
+            The UI is embedded in the binary — nothing to install, runs from any directory.
           prerelease: false
           make_latest: true
           files: dapweb-*.tar.gz
