@@ -53,8 +53,26 @@ jobs:
           chmod +x milo
           echo "$PWD" >> "$GITHUB_PATH"
 
+      # The HTTP/WebSocket layer links OpenSSL, so a plain build leaves the binary
+      # needing libssl.so.3 and it will not start on a machine without it.
+      - name: install openssl static archives
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y libssl-dev
+          else
+            brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          fi
+
       - name: build server
-        run: milo build src/main.milo -o dapweb --release
+        run: milo build src/main.milo -o dapweb --release --static-deps
+
+      - name: verify no openssl runtime dependency
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then deps=$(otool -L dapweb); else deps=$(ldd dapweb); fi
+          if printf '%s' "$deps" | grep -qiE 'libssl|libcrypto'; then
+            echo "ERROR: dapweb still needs OpenSSL at runtime"; printf '%s\n' "$deps"; exit 1
+          fi
+          echo "dapweb is OpenSSL-free"
 
       # The UI is served from disk via --webroot, so the bundle ships alongside
       # the binary rather than being embedded.
