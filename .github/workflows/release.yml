@@ -1,0 +1,84 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: darwin-arm64
+          - os: ubuntu-latest
+            target: linux-x64
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+
+      - name: install milo
+        run: |
+          curl -fsSL -o milo.tar.gz \
+            "https://github.com/milo-language/milo/releases/download/latest/milo-${{ matrix.target }}.tar.gz"
+          tar xzf milo.tar.gz
+          chmod +x milo
+          echo "$PWD" >> "$GITHUB_PATH"
+
+      - name: build server
+        run: milo build src/main.milo -o dapweb --release
+
+      # The UI is served from disk via --webroot, so the bundle ships alongside
+      # the binary rather than being embedded.
+      - name: build web UI
+        working-directory: src/web/ui
+        run: |
+          bun install --frozen-lockfile
+          ./build.sh
+
+      - name: smoke test
+        run: ./dapweb --help > /dev/null && echo "binary runs"
+
+      - name: package
+        run: |
+          mkdir -p "pkg/dapweb-${{ matrix.target }}"
+          cp dapweb README.md "pkg/dapweb-${{ matrix.target }}/"
+          mkdir -p "pkg/dapweb-${{ matrix.target }}/webroot"
+          cp -R src/web/ui/dist/. "pkg/dapweb-${{ matrix.target }}/webroot/"
+          tar czf "dapweb-${{ matrix.target }}.tar.gz" -C pkg "dapweb-${{ matrix.target }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dapweb-${{ matrix.target }}
+          path: dapweb-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: ls -lh dapweb-*.tar.gz
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Build
+          body: |
+            Rolling release from the latest passing commit on main.
+
+            Each archive holds the `dapweb` binary plus the `webroot/` UI bundle.
+            Run `./dapweb web --program <binary> --webroot webroot`.
+          prerelease: true
+          make_latest: true
+          files: dapweb-*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

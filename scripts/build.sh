@@ -13,8 +13,14 @@
 set -e
 cd "$(dirname "$0")/.."
 
-# milo compiler checkout; override with MILO=/path/to/milo/src/main.ts
+# milo compiler; override with MILO=/path/to/milo/src/main.ts or a milo binary.
+# A .ts path needs "bun run" in front; a compiled binary (what the CI downloads
+# from the compiler's releases) is invoked directly.
 MILO="${MILO:-../milo/src/main.ts}"
+case "$MILO" in
+    *.ts) MILO_RUN="bun run $MILO" ;;
+    *)    MILO_RUN="$MILO" ;;
+esac
 
 # echo each command with wall-clock timing
 run() {
@@ -26,8 +32,8 @@ run() {
 
 what="${1:-all}"
 case "$what" in
-    all|bin)  run bun run "$MILO" build src/main.milo --debug -o dapweb ;;
-    release)  run bun run "$MILO" build src/main.milo -o dapweb ;;
+    all|bin)  run $MILO_RUN build src/main.milo --debug -o dapweb ;;
+    release)  run $MILO_RUN build src/main.milo -o dapweb ;;
 esac
 case "$what" in
     all|release|ui)  run src/web/ui/build.sh ;;
