@@ -1,6 +1,13 @@
 # dapweb
 
+<p align="center">
+  <img src="docs/images/debugging.png" alt="dapweb stopped at a breakpoint: source view, call stack, locals, and an lldb terminal" width="900">
+</p>
+
 Web + AI interface for any DAP debugger. Written in [Milo](https://github.com/milo-language/milo).
+
+**[Documentation](https://milo-language.github.io/milo/)** ·
+**[Download a release](https://github.com/milo-language/dapweb/releases/tag/latest)**
 
 One binary, two subcommands:
 
