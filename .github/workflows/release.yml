@@ -121,11 +121,10 @@ jobs:
             quarantine flag, which kills and trashes the unsigned binary):
 
             ```
-            curl -fsSL https://github.com/milo-language/dapweb/releases/download/latest/dapweb-<platform>.tar.gz | tar xz
-            cd dapweb-<platform> && ./dapweb web
+            P=$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')
+            curl -fsSL https://github.com/milo-language/dapweb/releases/download/latest/dapweb-$P.tar.gz | tar xz
+            cd dapweb-$P && ./dapweb web
             ```
-
-            The UI is embedded in the binary — nothing to install, runs from any directory.
           prerelease: false
           make_latest: true
           files: dapweb-*.tar.gz

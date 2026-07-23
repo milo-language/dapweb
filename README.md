@@ -12,15 +12,15 @@ Web + AI interface for any DAP debugger. Written in [Milo](https://github.com/mi
 ## Install
 
 ```sh
-curl -fsSL https://github.com/milo-language/dapweb/releases/download/latest/dapweb-darwin-arm64.tar.gz | tar xz
-cd dapweb-darwin-arm64
+P=$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')
+curl -fsSL https://github.com/milo-language/dapweb/releases/download/latest/dapweb-$P.tar.gz | tar xz
+cd dapweb-$P
 ./dapweb /path/to/your-binary
 ```
 
-Swap `darwin-arm64` for `linux-x64` or `linux-arm64`. The web UI is embedded in the binary. Download through a browser
-instead and macOS quarantines the archive: the unsigned binary is killed on first run
-and moved to the Trash. Either install with `curl` as above, or clear the flag with
-`xattr -dr com.apple.quarantine <dir>` before running.
+Download through a browser instead and macOS quarantines the archive: the unsigned
+binary is killed on first run and moved to the Trash. Either install with `curl` as
+above, or clear the flag with `xattr -dr com.apple.quarantine <dir>` before running.
 
 `--version` prints the commit the binary was built from. Releases roll on the `latest`
 tag, so re-running the install command is the update path.
