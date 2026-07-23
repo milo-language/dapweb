@@ -28,8 +28,8 @@ tag, so re-running the install command is the update path.
 One binary, two subcommands:
 
 - **`dapweb web`** — React + Monaco + xterm.js served by a Milo HTTP/WebSocket server that drives a DAP adapter (lldb-dap, debugpy, delve). Breakpoints (Monaco glyph gutter), stepping, threads, call stack, expandable locals, watch expressions, a debug console (full lldb command access), and a real PTY terminal — type into your program *while it runs*. Fully self-hosted: no CDN assets. Boots idle: open the UI and set the target in the ⚙ drawer — a VS Code launch-configuration JSON with per-debugger schema autocomplete (templates seed a starter config; the last 10 targets are one click away).
-- **`dapweb mcp`** — the same debugger driven by an AI: launch, step, inspect, evaluate, all over MCP stdio.
-- **Co-debug** — `dapweb web` hosts ONE shared session; every browser tab and every `dapweb mcp --attach` peer sees and drives the same debuggee. Stop in the browser, ask Claude what it sees, watch it step.
+- **`dapweb api`** — drive that same session from the CLI. Every verb is the exact `{"cmd": ...}` JSON the browser sends, so an agent, a shell script, or plain `curl` can list sessions, set breakpoints, run, step, and evaluate — no browser, no MCP. `dapweb api request` forwards arbitrary DAP-shaped JSON, so any adapter capability works with no new subcommand.
+- **Shared session** — `dapweb web` hosts ONE session; every browser tab and every `dapweb api` call see and drive the same debuggee. Stop in the browser, have an agent evaluate an expression over `dapweb api`, watch the result appear in the UI.
 
 ## Build
 
@@ -62,22 +62,30 @@ clang -g -O0 examples/interactive.c -o /tmp/demo
 # …or a whole .vscode/launch.json; pick an entry by name
 ./dapweb web --launch .vscode/launch.json --config "debug tests"
 
-# AI standalone: register with Claude Code
-claude mcp add dapweb -- $PWD/dapweb mcp --program /tmp/demo
+# Drive a running session from the CLI (an agent, a script, or you).
+./dapweb api list                          # live sessions (auto-prunes dead ones)
+./dapweb api break --line 12               # set a breakpoint
+./dapweb api run                           # launch; blocks until the first stop
+./dapweb api eval 'x + 1'                  # evaluate in the current stop frame
+./dapweb api state                         # JSON snapshot (phase, stop, stack, bps)
 
-# AI co-debug: join the web session above as a second peer — you debug in the
-# browser, Claude reads/drives the same session over MCP
-claude mcp add dapweb-live -- $PWD/dapweb mcp --attach localhost:8080
+# Raw passthrough: any DAP-shaped command, block for a reply type of your choosing.
+./dapweb api request --await stopped '{"cmd":"continue"}'
 ```
 
-Run `dapweb <command> --help` for a command's options.
+With one live session, `api` finds it automatically; with several, pass `--session <id>`
+or `--port <n>`. Run `dapweb <command> --help` (or `dapweb api`) for the full command list.
+
+> The API and WebSocket bind to whatever `dapweb web` listens on and are unauthenticated —
+> `eval` reaches the debugger, so treat an exposed port as remote code execution. Keep it on
+> localhost unless you intend otherwise.
 
 ## Tests
 
 ```sh
 bun tests/e2e.ts        # full web-session flow against a live server (start one on 8091 first)
 bun tests/e2e-config.ts # launch-config redesign: inline run config, force-kill, history (self-spawns)
-bun tests/mcp.ts        # MCP stdio flow (spawns ./dapweb mcp)
+bun tests/api.ts        # HTTP API flow: list/state/run/step/eval (self-spawns a server)
 ```
 
 Architecture and roadmap: `docs/design.md`.

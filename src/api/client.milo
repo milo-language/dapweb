@@ -1,0 +1,144 @@
+// Minimal HTTP/1.1 client for talking to a local `dapweb web` server. std/http is
+// server-only and std has no HTTP client, but the API is localhost request/response
+// with tiny JSON bodies, so a hand-rolled one-shot request over TcpStream is smaller
+// than pulling in a dependency — and it keeps `dapweb api` free of TLS/keep-alive.
+
+from "std/net" import {
+    TcpStream, ip4
+}
+from "std/os" import {
+    kill
+}
+from "std/fs" import {
+    readDir, removeFile
+}
+from "std/json" import {
+    jsonParse, Json
+}
+from "std/env" import {
+    getEnv, getEnvOr
+}
+from "std/io" import {
+    readFile
+}
+from "std/string" import {
+    strEndsWith
+}
+
+// One request/response against 127.0.0.1:port. `body` empty ⇒ GET. Returns the
+// response body (headers stripped), or an error string prefixed "error:".
+fn httpRequest(port: i64, method: string, path: string, body: string): Result<string> {
+    let stream = match TcpStream.connect(ip4(127, 0, 0, 1), port as u16) {
+        Result.Ok(s) => {
+            s
+        }
+        Result.Err(_e) => {
+            return Result.Err($"no server on port {port} (is `dapweb web` running there?)")
+        }
+    }
+    var s = stream
+    var req = $"{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+    if body.len > 0 {
+        req = req + $"Content-Type: application/json\r\nContent-Length: {body.len}\r\n"
+    }
+    req = req + "\r\n" + body
+    match s.send(req) {
+        Result.Ok(_n) => {
+        }
+        Result.Err(_e) => {
+            return Result.Err("send failed")
+        }
+    }
+    // Connection: close ⇒ read until EOF, so a body larger than one segment
+    // (a big stack/disasm dump) is not truncated.
+    var raw: string = ""
+    while true {
+        match s.recv() {
+            Result.Ok(chunk) => {
+                if chunk.len == 0 {
+                    break
+                }
+                raw = raw + chunk
+            }
+            Result.Err(_e) => {
+                break
+            }
+        }
+    }
+    var i: i64 = 0
+    while i + 3 < raw.len {
+        if raw[i] == '\r' && raw[i + 1] == '\n' && raw[i + 2] == '\r' && raw[i + 3] == '\n' {
+            return Result.Ok(raw.substr(i + 4, raw.len))
+        }
+        i = i + 1
+    }
+    return Result.Err("malformed HTTP response")
+}
+
+struct SessionRow {
+    id: string,
+    pid: i64,
+    port: i64,
+    program: string,
+    alive: bool,
+}
+
+fn sessionsDirPath(): string {
+    // Mirror the server (histDir): XDG_STATE_HOME or ~/.local/state.
+    match getEnv("XDG_STATE_HOME") {
+        Option.Some(x) => {
+            if x.len > 0 {
+                return x + "/dapweb/sessions"
+            }
+        }
+        Option.None => {
+        }
+    }
+    return getEnvOr("HOME", "") + "/.local/state/dapweb/sessions"
+}
+
+// Read the registry, probing each pid with kill(pid, 0). A server that was
+// signal-killed never removed its own descriptor, so prune the dead ones here —
+// `api list` is the lazy GC for the registry.
+fn loadSessions(prune: bool): Vec<SessionRow> {
+    var rows: Vec<SessionRow> = []
+    let dir = sessionsDirPath()
+    for ent in readDir(dir) {
+        if !strEndsWith(ent.name, ".json") {
+            continue
+        }
+        let path = dir + "/" + ent.name
+        let text = match readFile(path) {
+            Result.Ok(t) => {
+                t
+            }
+            Result.Err(_e) => {
+                continue
+            }
+        }
+        let doc = match jsonParse(text) {
+            Result.Ok(d) => {
+                d
+            }
+            Result.Err(_e) => {
+                continue
+            }
+        }
+        let pid = doc.i64("pid") ?? (0 as i64)
+        // kill(pid, 0): 0 ⇒ alive, -1/ESRCH ⇒ gone. No signal is delivered.
+        let alive = pid > 0 && kill(pid as i32, 0) == 0
+        if !alive && prune {
+            let _r = removeFile(path)
+            continue
+        }
+        rows.push(SessionRow {
+            id: doc.str("id") ?? "",
+            pid: pid,
+            port: doc.i64("port") ?? (0 as i64),
+            program: doc.str("program") ?? "",
+            alive: alive,
+        }
+        )
+    }
+    return rows
+}

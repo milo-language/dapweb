@@ -1,8 +1,8 @@
 // Shared debug-session core: config canonicalization (VS Code launch.json
 // dialect), the adapter dialect registry, adapter resolution/probing, and
-// launch/initialize body construction. Consumed by both drivers — the web
-// server (green-task, WS-broadcast) and standalone mcp (turn-based) — so
-// neither hardcodes an adapter. Pure over values: callers hold their own
+// launch/initialize body construction. Consumed by the web server (green-task,
+// WS-broadcast) and kept driver-agnostic so nothing hardcodes an adapter. Pure
+// over values: callers hold their own
 // LaunchSpec; nothing here reads or writes global state.
 
 from "std/json" import {
