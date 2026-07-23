@@ -1,9 +1,14 @@
-// Dapweb — web + AI interface for any DAP debugger.
+// Dapweb — web + programmatic interface for any DAP debugger.
 //
 // Single front-door binary. Subcommands dispatch into the real entrypoints,
 // each of which still lives in its own module so it stays single-purpose:
 //   dapweb web    — browser UI + shared co-debug session server  (web/server.milo)
-//   dapweb mcp    — MCP server (standalone, or --attach as a co-debug peer)  (mcp/main.milo)
+//   dapweb api    — drive a running session from the CLI (api/main.milo)
+//
+// `api` replaced an MCP subcommand: both drove the same session, but MCP
+// reimplemented every debug verb twice (standalone + attach). `api` instead
+// forwards the browser's own {"cmd":...} vocabulary over HTTP, so there is one
+// command surface and it cannot drift from what the UI does.
 //
 // The top-level parser owns the command roster + usage/--help rendering; each
 // subcommand's own parser owns its flags (`dapweb <cmd> --help`). No hand-rolled
@@ -27,8 +32,8 @@ from "std/json" import {
 from "web/server" import {
     webMain
 }
-from "mcp/main" import {
-    mcpMain
+from "api/main" import {
+    apiMain
 }
 from "version" import {
     versionText
@@ -38,8 +43,8 @@ from "version" import {
 // roster + examples live in the description; `command` is a trailing positional
 // whose remaining tokens are forwarded verbatim to the chosen subcommand.
 fn topParser(): ArgParser {
-    var p = newParser("dapweb", "web + AI interface for any DAP debugger\n\n" + "commands:\n" + "  web     browser debugger UI + shared co-debug session server\n" + "  mcp     MCP debug server (standalone, or --attach to join a web session)\n\n" + "run 'dapweb <command> --help' for that command's options\n\n" + "quick start (the 90% invocation — path to a binary implies `web`):\n" + "  dapweb /tmp/a.out --those --args\n" + "or boot idle and configure the target in the browser:\n" + "  dapweb web --port 8080\n" + "co-debug (human in the browser + AI on the same session):\n" + "  claude mcp add dapweb-live -- $PWD/dapweb mcp --attach localhost:8080")
-    p.addOptionalPositional("command", "web | mcp")
+    var p = newParser("dapweb", "web + programmatic interface for any DAP debugger\n\n" + "commands:\n" + "  web     browser debugger UI + shared co-debug session server\n" + "  api     drive a running session from the CLI (list/state/request/eval/...)\n\n" + "run 'dapweb <command> --help' for that command's options\n\n" + "quick start (the 90% invocation — path to a binary implies `web`):\n" + "  dapweb /tmp/a.out --those --args\n" + "or boot idle and configure the target in the browser:\n" + "  dapweb web --port 8080\n" + "coordinate from an agent or a shell (same live session the browser shows):\n" + "  dapweb api request --await stopped '{\"cmd\":\"run\"}'")
+    p.addOptionalPositional("command", "web | api")
     p.enableTrailingArgs() // stop parsing at the command; forward the rest as-is
     return p
 }
@@ -80,8 +85,8 @@ fn main(): i32 {
     if sub == "web" {
         return webMain(subArgv)
     }
-    if sub == "mcp" {
-        return mcpMain(subArgv)
+    if sub == "api" {
+        return apiMain(subArgv)
     }
 
     // `dapweb <program> [args...]` — the 90% invocation. A path that exists is a

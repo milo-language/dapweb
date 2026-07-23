@@ -135,7 +135,7 @@ var gRestored: bool = false // booted idle and staged history[0] (banner hint)
 var gPendingRun: bool = false
 
 // Shared session: ONE debug session per server process, any number of WS
-// peers (browser tabs + MCP co-debugger) all seeing identical broadcast state.
+// peers (browser tabs + `dapweb api` callers) all seeing identical broadcast state.
 // Green runtime = one OS thread, cooperative scheduling — plain globals are
 // race-free at yield-point granularity (same argument as the config globals).
 // All assigned in main() before any request is served (module init NYI).
@@ -160,7 +160,7 @@ let OUTLOG_MAX: i64 = 400
 var gNextClient: i64 = 1
 var gBps: Vec<Bp> = [] // shared breakpoint set (was per-connection before the shared session)
 var gSessionId: string = "" // uuid in hello — a reloaded tab detects same-vs-new session
-var gPeers: i64 = 0 // attached WS peers (browser tabs + MCP co-debuggers)
+var gPeers: i64 = 0 // attached WS peers (browser tabs; `api` callers are one-shot HTTP)
 var gLastDetachMs: i64 = 0 // epochMillis when the last peer left — idle-ttl clock
 var gIdleTtlSecs: i64 = 0 // --idle-ttl; 0 = never reap
 var gTickWr: i32 = -1 // reaper pipe write end (ticker OS thread → green task)
@@ -726,7 +726,7 @@ fn excArgs(): string {
 }
 
 // Session config + adapter dialect + launch/init bodies live in ../dap/session
-// (shared with standalone mcp). These wrappers bind the shared, value-based fns
+// (shared with the HTTP API path). These wrappers bind the shared, value-based fns
 // to this driver's session globals.
 fn adapterId(): string {
     return adapterIdForKind(adapterKind)
@@ -1874,7 +1874,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, bus: Channel<string>, bu
     } else if c == "setConfig" {
         // config = a VS Code launch-configuration object (see applyConfig).
         // The browser applies configs inline on Run; setConfig is the
-        // programmatic path (MCP peers). Idle-only — a live session must be
+        // programmatic path (`dapweb api` callers). Idle-only — a live session must be
         // force-run to change target (setConfig never kills a debuggee).
         if gStarted {
             wsPush(bus, busWakeWr, configErrMsg("a debug session is active — stop it (or Run with force) to change the target"))
@@ -2493,7 +2493,7 @@ fn handleConnection(fd: i32, bus: Channel<string>, busWakeWr: i32, pendCh: Chann
         let rl = parseRequestLine(raw)
         if isWsUpgrade(raw) {
             // Peer kind rides the upgrade path's query string: browsers
-            // hit /ws bare, `dapweb mcp --attach` hits /ws?client=mcp — known
+            // hit /ws bare, other clients pass ?client=<kind> — known
             // before the first frame, so connect logs carry the right kind.
             var wsPath = rl.path.clone()
             var query: string = ""
@@ -2508,8 +2508,8 @@ fn handleConnection(fd: i32, bus: Channel<string>, busWakeWr: i32, pendCh: Chann
             }
             if wsPath == "/ws" {
                 var kind: string = "browser"
-                if query == "client=mcp" {
-                    kind = "mcp"
+                if strStartsWith(query, "client=") {
+                    kind = query.substr(7, query.len)
                 }
                 match wsAccept(fd, raw) {
                     Result.Ok(ws) => {
@@ -2641,7 +2641,7 @@ fn openBrowser(url: &string): void {
 fn webMain(argv: Vec<string>): i32 {
     ignoreSignal(SIGPIPE)
     Q = "\""
-    var parser = newParser("dapweb web", "web UI for any DAP debugger. Serves a shared session: any number of browser tabs plus AI co-debug peers (dapweb mcp --attach host:port) see and drive the same debuggee.")
+    var parser = newParser("dapweb web", "web UI for any DAP debugger. Serves a shared session: any number of browser tabs see and drive the same debuggee, and `dapweb api` drives it from the CLI.")
     // No default target: boot idle and let the browser configure it (⚙ drawer).
     parser.addString("program", "p", "path to the debuggee binary (optional; configure in the browser if omitted)", "")
     // optional — the debuggee's DWARF knows its sources; the first stop's
@@ -2823,7 +2823,7 @@ fn webMain(argv: Vec<string>): i32 {
             } else {
                 print("  target:   (none — configure in the browser via the ⚙ drawer)")
             }
-            print($"  co-debug: dapweb mcp --attach localhost:{port}   (AI joins this session)")
+            print($"  drive:    dapweb api state --port {port}   (or: dapweb api run / step / eval ...)")
             registerSession(port)
             if gLogLevel >= 1 {
                 print("")

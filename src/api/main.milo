@@ -1,0 +1,302 @@
+// `dapweb api` — drive a running `dapweb web` session from the command line, so an
+// agent (or a shell script, or curl) coordinates a debug session without a browser
+// and without MCP. Every verb here maps to the SAME `{"cmd": ...}` JSON the browser
+// sends over its WebSocket, so the CLI cannot drift from what the UI does.
+//
+// The 90% shape is arbitrary JSON passthrough:
+//   dapweb api request --await stopped '{"cmd":"run"}'
+// with typed wrappers (state/continue/step/break/eval/...) as ergonomics on top.
+
+from "std/args" import {
+    args
+}
+from "std/argparse" import {
+    newParser, ArgParser
+}
+from "std/os" import {
+    exit
+}
+from "std/json" import {
+    jsonObj, jsonParse, Json
+}
+from "std/string" import {
+    strPadEnd, strStartsWith
+}
+from "std/time" import {
+    epochMillis
+}
+from "./client" import {
+    httpRequest, loadSessions, SessionRow
+}
+
+// Resolve which server to talk to. --port wins; else --session picks by id; else
+// the single live session is implied; ambiguity (0 or >1) is an error, not a guess.
+fn resolvePort(session: string, port: i64): Result<i64> {
+    if port > 0 {
+        return Result.Ok(port)
+    }
+    let live = loadSessions(true)
+    if session.len > 0 {
+        for r in live {
+            if r.id == session || (session.len >= 4 && strStartsWith(r.id, session)) {
+                return Result.Ok(r.port)
+            }
+        }
+        return Result.Err($"no live session matching '{session}' — run `dapweb api list`")
+    }
+    if live.len == 0 {
+        return Result.Err("no live dapweb sessions — start one with `dapweb web <binary>`")
+    }
+    if live.len > 1 {
+        return Result.Err($"{live.len} live sessions — pass --session <id> or --port <n> (see `dapweb api list`)")
+    }
+    return Result.Ok(live[0].port)
+}
+
+fn cmdList(): i32 {
+    let rows = loadSessions(true)
+    if rows.len == 0 {
+        print("no live dapweb sessions")
+        return 0
+    }
+    print(strPadEnd("ID", 10, " ") + strPadEnd("PORT", 7, " ") + strPadEnd("PID", 8, " ") + "PROGRAM")
+    for r in rows {
+        var id = r.id.clone()
+        if id.len > 8 {
+            id = id.substr(0, 8)
+        }
+        print(strPadEnd(id, 10, " ") + strPadEnd($"{r.port}", 7, " ") + strPadEnd($"{r.pid}", 8, " ") + r.program)
+    }
+    return 0
+}
+
+// POST a command body and print the reply. `awaitType` empty ⇒ fire-and-forget.
+fn postCmd(port: i64, body: string, awaitType: string, timeoutMs: i64): i32 {
+    var path = "/api/cmd"
+    if awaitType.len > 0 {
+        path = $"/api/cmd?await={awaitType}&timeout={timeoutMs}"
+    }
+    match httpRequest(port, "POST", path, body) {
+        Result.Ok(reply) => {
+            print(reply)
+            // A timeout reply is a non-zero exit so scripts can branch on it.
+            if let Result.Ok(doc) = jsonParse(reply.clone()) {
+                if (doc.str("error") ?? "") == "timeout" {
+                    return 2
+                }
+            }
+            return 0
+        }
+        Result.Err(e) => {
+            eprint($"error: {e}\n")
+            return 1
+        }
+    }
+}
+
+fn cmdState(port: i64): i32 {
+    match httpRequest(port, "GET", "/api/state", "") {
+        Result.Ok(reply) => {
+            print(reply)
+            return 0
+        }
+        Result.Err(e) => {
+            eprint($"error: {e}\n")
+            return 1
+        }
+    }
+}
+
+// Read the top frame id from the current stop, so `eval` works in the stopped
+// scope without the caller threading a frame id it would have to fetch itself.
+fn currentFrameId(port: i64): i64 {
+    match httpRequest(port, "GET", "/api/state", "") {
+        Result.Ok(reply) => {
+            if let Result.Ok(doc) = jsonParse(reply) {
+                if let Option.Some(stopped) = doc.get("stopped") {
+                    if let Option.Some(frames) = stopped.get("frames") {
+                        if let Option.Some(f0) = frames.at(0) {
+                            return f0.i64("id") ?? (-1 as i64)
+                        }
+                    }
+                }
+            }
+        }
+        Result.Err(_e) => {
+        }
+    }
+    return -1
+}
+
+// Thread id of the current stop. step/next requires the real thread id (unlike
+// continue, which the adapter applies to all threads), so the CLI reads it from
+// the stop snapshot rather than defaulting to 1 and silently stalling.
+fn currentTid(port: i64): i64 {
+    match httpRequest(port, "GET", "/api/state", "") {
+        Result.Ok(reply) => {
+            if let Result.Ok(doc) = jsonParse(reply) {
+                if let Option.Some(stopped) = doc.get("stopped") {
+                    return stopped.i64("tid") ?? (-1 as i64)
+                }
+            }
+        }
+        Result.Err(_e) => {
+        }
+    }
+    return -1
+}
+
+fn usage(): string {
+    return "dapweb api — drive a running dapweb session from the CLI\n\n" +
+        "commands:\n" +
+        "  list                     list live sessions (prunes dead ones)\n" +
+        "  state                    print the current session snapshot (JSON)\n" +
+        "  request <json>           send raw {\"cmd\":...} JSON; --await <type> blocks for a reply\n" +
+        "  continue | pause         resume / interrupt the debuggee\n" +
+        "  step [--over|--in|--out] single step (default: over)\n" +
+        "  break --line N [--path P]  set a breakpoint\n" +
+        "  eval <expr>              evaluate in the current stop frame\n" +
+        "  run                      launch/relaunch, blocking until the first stop\n" +
+        "  kill                     terminate the debuggee\n\n" +
+        "target selection (all commands except list):\n" +
+        "  --session <id>   pick a session by id prefix     --port <n>   pick by port\n" +
+        "  (with exactly one live session, both are optional)\n\n" +
+        "  --await <type>   block until a message of this type (default per command)\n" +
+        "  --timeout <ms>   how long to block (default 5000)\n"
+}
+
+// argparse has no git-style subcommands: the top parser owns the command roster +
+// target/await/timeout flags, `command` is a positional, and trailing tokens (the
+// raw JSON, an eval expression) are forwarded verbatim.
+fn apiMain(argv: Vec<string>): i32 {
+    var p = newParser("dapweb api", usage())
+    p.addOptionalPositional("command", "list | state | request | continue | ...")
+    p.addString("session", "", "session id (prefix ok)", "")
+    p.addString("await", "", "block until a message of this type", "")
+    p.addString("path", "", "source path for break", "")
+    p.addI64("port", "", "server port", 0 as i64)
+    p.addI64("timeout", "", "await timeout in ms", 5000 as i64)
+    p.addI64("line", "", "line number for break", 0 as i64)
+    p.addBool("over", "", "step over (default)")
+    p.addBool("in", "", "step into")
+    p.addBool("out", "", "step out")
+    // No enableTrailingArgs: the subcommand is a positional and flags may follow it
+    // (`break --line 2`), so parsing must not stop at the first positional. The raw
+    // JSON / eval-expr args are single quoted tokens, kept as positionals.
+    p.enableIgnoreUnknown()
+
+    let parsed = p.parseFrom(argv)
+    let pos = parsed.positional
+    if pos.len == 0 {
+        print(p.helpText())
+        return 0
+    }
+    let cmd = pos[0]
+
+    if cmd == "list" {
+        return cmdList()
+    }
+
+    let port = match resolvePort(parsed.getString("session"), parsed.getI64("port")) {
+        Result.Ok(pt) => {
+            pt
+        }
+        Result.Err(e) => {
+            eprint($"error: {e}\n")
+            return 1
+        }
+    }
+    let timeout = parsed.getI64("timeout")
+    let awaitFlag = parsed.getString("await")
+
+    if cmd == "state" {
+        return cmdState(port)
+    }
+
+    if cmd == "request" {
+        if pos.len < 2 {
+            eprint("error: request needs a JSON argument, e.g. request '{\"cmd\":\"run\"}'\n")
+            return 1
+        }
+        return postCmd(port, pos[1].clone(), awaitFlag, timeout)
+    }
+
+    if cmd == "run" {
+        var at = awaitFlag.clone()
+        if at.len == 0 {
+            at = "stopped"
+        }
+        return postCmd(port, jsonObj().str("cmd", "run").build(), at, timeout)
+    }
+
+    if cmd == "continue" {
+        var at = awaitFlag.clone()
+        if at.len == 0 {
+            at = "stopped"
+        }
+        return postCmd(port, jsonObj().str("cmd", "continue").build(), at, timeout)
+    }
+
+    if cmd == "pause" {
+        return postCmd(port, jsonObj().str("cmd", "pause").build(), awaitFlag, timeout)
+    }
+
+    if cmd == "step" {
+        var verb = "stepOver"
+        if parsed.getBool("in") {
+            verb = "stepIn"
+        }
+        if parsed.getBool("out") {
+            verb = "stepOut"
+        }
+        var at = awaitFlag.clone()
+        if at.len == 0 {
+            at = "stopped"
+        }
+        var b = jsonObj().str("cmd", verb)
+        let tid = currentTid(port)
+        if tid >= 0 {
+            b = b.int("tid", tid)
+        }
+        return postCmd(port, b.build(), at, timeout)
+    }
+
+    if cmd == "break" {
+        let line = parsed.getI64("line")
+        if line <= 0 {
+            eprint("error: break needs --line <n>\n")
+            return 1
+        }
+        var b = jsonObj().str("cmd", "setBreakpoint").int("line", line)
+        let path = parsed.getString("path")
+        if path.len > 0 {
+            b = b.str("path", path)
+        }
+        return postCmd(port, b.build(), awaitFlag, timeout)
+    }
+
+    if cmd == "eval" {
+        if pos.len < 2 {
+            eprint("error: eval needs an expression, e.g. eval 'x + 1'\n")
+            return 1
+        }
+        let fid = currentFrameId(port)
+        var b = jsonObj().str("cmd", "evaluate").str("expr", pos[1].clone()).str("context", "repl")
+        if fid >= 0 {
+            b = b.int("frameId", fid)
+        }
+        var at = awaitFlag.clone()
+        if at.len == 0 {
+            at = "evalResult"
+        }
+        return postCmd(port, b.build(), at, timeout)
+    }
+
+    if cmd == "kill" {
+        return postCmd(port, jsonObj().str("cmd", "kill").build(), awaitFlag, timeout)
+    }
+
+    eprint($"error: unknown api command '{cmd}'\n\n")
+    eprint(p.helpText() + "\n")
+    return 1
+}

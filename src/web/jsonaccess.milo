@@ -1,7 +1,8 @@
-// Shared DAP-response JSON accessors — imported by both web/server.milo and
-// mcp/main.milo. Milo mangles same-named fns across modules to one linkonce_odr
-// symbol, so keeping these in two files silently merged one body (and now errors
-// on drift); one definition removes that footgun. See docs/design.md.
+// Shared DAP-response JSON accessors. Milo mangles same-named fns across modules
+// to one linkonce_odr symbol, so keeping these in two files silently merged one
+// body (and now errors on drift); one definition removes that footgun. Kept
+// separate from web/server.milo so any future non-web driver reuses it verbatim.
+// See docs/design.md.
 
 from "std/json" import { jsonParse }
 
