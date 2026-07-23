@@ -1,0 +1,7 @@
+/target
+*.o
+dapweb
+.DS_Store
+dapweb-web
+node_modules/
+src/web/ui/dist/
