@@ -115,7 +115,7 @@ jobs:
 
             Each archive holds the `dapweb` binary plus the `webroot/` UI bundle.
             Run `./dapweb web --program <binary> --webroot webroot`.
-          prerelease: true
+          prerelease: false
           make_latest: true
           files: dapweb-*.tar.gz
         env:
