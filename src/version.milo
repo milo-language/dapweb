@@ -12,6 +12,6 @@ fn versionLine(): string {
 
 // Rolling `latest` means re-running the install is the update path; there is no
 // in-place upgrade to point at, so print where to get a newer build.
-fn versionText(): string {
+pub fn versionText(): string {
     return versionLine() + "\nhttps://github.com/milo-language/dapweb/releases — rolling `latest`; re-run the install command to update"
 }

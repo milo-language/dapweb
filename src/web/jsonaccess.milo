@@ -33,21 +33,21 @@ fn jsonEsc(s: &string): string {
     return out
 }
 
-fn bodyI64(raw: &string, key: &string, fallback: i64): i64 {
+pub fn bodyI64(raw: &string, key: &string, fallback: i64): i64 {
     if let Result.Ok(doc) = jsonParse(raw.clone()) {
         if let Option.Some(body) = doc.get("body") { return body.i64(key) ?? fallback }
     }
     return fallback
 }
 
-fn bodyStr(raw: &string, key: &string): string {
+pub fn bodyStr(raw: &string, key: &string): string {
     if let Result.Ok(doc) = jsonParse(raw.clone()) {
         if let Option.Some(body) = doc.get("body") { return body.str(key) ?? "" }
     }
     return ""
 }
 
-fn frame0Field(raw: &string, key: &string): i64 {
+pub fn frame0Field(raw: &string, key: &string): i64 {
     if let Result.Ok(doc) = jsonParse(raw.clone()) {
         if let Option.Some(body) = doc.get("body") { return body.childI64At("stackFrames", 0 as i64, key) ?? (0 as i64) }
     }
@@ -55,7 +55,7 @@ fn frame0Field(raw: &string, key: &string): i64 {
 }
 
 // stackTrace body → frame 0's source.path (nested object, so drill manually).
-fn frame0Path(raw: &string): string {
+pub fn frame0Path(raw: &string): string {
     if let Result.Ok(doc) = jsonParse(raw.clone()) {
         if let Option.Some(body) = doc.get("body") {
             if let Option.Some(frames) = body.get("stackFrames") {
@@ -68,7 +68,7 @@ fn frame0Path(raw: &string): string {
     return ""
 }
 
-fn scopes0Ref(raw: &string): i64 {
+pub fn scopes0Ref(raw: &string): i64 {
     if let Result.Ok(doc) = jsonParse(raw.clone()) {
         if let Option.Some(body) = doc.get("body") { return body.childI64At("scopes", 0 as i64, "variablesReference") ?? (0 as i64) }
     }

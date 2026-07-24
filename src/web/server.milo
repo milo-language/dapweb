@@ -2638,7 +2638,7 @@ fn openBrowser(url: &string): void {
 
 // Subcommand entrypoint: dispatched from src/main.milo as `dapweb web ...`.
 // argv[0] is the display name (skipped by parseFrom); the rest are the web flags.
-fn webMain(argv: Vec<string>): i32 {
+pub fn webMain(argv: Vec<string>): i32 {
     ignoreSignal(SIGPIPE)
     Q = "\""
     var parser = newParser("dapweb web", "web UI for any DAP debugger. Serves a shared session: any number of browser tabs see and drive the same debuggee, and `dapweb api` drives it from the CLI.")

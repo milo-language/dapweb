@@ -9,7 +9,7 @@ from "std/os" import { write }
 
 // Read one complete framed message off fd, returning the raw body.
 // Err on EOF or malformed header.
-fn readFrame(fd: i32): Result<string> {
+pub fn readFrame(fd: i32): Result<string> {
     let reader = fdReaderAttach(fd)
     let len = _readContentLength(reader)
     if len < 0 { return Result.Err("eof or bad header") }
@@ -21,7 +21,7 @@ fn readFrame(fd: i32): Result<string> {
 // can't interleave under the cooperative scheduler — a looping/partial write
 // could. A short write (nonblocking fd, full buffer) is reported as -1 rather
 // than retried, preserving that all-or-nothing framing.
-fn writeFrameFd(fd: i32, payload: &string): i64 {
+pub fn writeFrameFd(fd: i32, payload: &string): i64 {
     let msg = $"Content-Length: {payload.len}\r\n\r\n" + payload
     unsafe {
         let n = write(fd, msg, msg.len)

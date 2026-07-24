@@ -27,7 +27,7 @@ from "std/string" import {
 
 // One request/response against 127.0.0.1:port. `body` empty ⇒ GET. Returns the
 // response body (headers stripped), or an error string prefixed "error:".
-fn httpRequest(port: i64, method: string, path: string, body: string): Result<string> {
+pub fn httpRequest(port: i64, method: string, path: string, body: string): Result<string> {
     let stream = match TcpStream.connect(ip4(127, 0, 0, 1), port as u16) {
         Result.Ok(s) => {
             s
@@ -100,7 +100,7 @@ fn sessionsDirPath(): string {
 // Read the registry, probing each pid with kill(pid, 0). A server that was
 // signal-killed never removed its own descriptor, so prune the dead ones here —
 // `api list` is the lazy GC for the registry.
-fn loadSessions(prune: bool): Vec<SessionRow> {
+pub fn loadSessions(prune: bool): Vec<SessionRow> {
     var rows: Vec<SessionRow> = []
     let dir = sessionsDirPath()
     for ent in readDir(dir) {

@@ -29,7 +29,7 @@ from "std/process" import {
 // launchExtra, since it's a meta key stripped from the body). port>0 means
 // transport is TCP: connect to host:port instead of spawning adapterCmd over
 // stdio (the adapter is a server the user runs, e.g. `dlv dap --listen`).
-struct LaunchSpec {
+pub struct LaunchSpec {
     binPath: string,
     srcPath: string,
     adapterCmd: string,
@@ -337,7 +337,7 @@ fn kindForAdapterCmd(cmd: &string): string {
 }
 
 // Resolve an explicit adapter command → abs-path command + detected dialect kind.
-fn resolveAdapterCmd(cmd: &string): AdapterSel {
+pub fn resolveAdapterCmd(cmd: &string): AdapterSel {
     let head = cmdHead(cmd)
     let resolved = resolveInPath(head) + cmdTail(cmd)
     return AdapterSel {
@@ -434,7 +434,7 @@ fn selectAdapter(typ: &string, adapter: &string, prog: &string): Result<AdapterS
 
 // Split an adapter command line on spaces: first token is the executable
 // (already PATH-resolved), the rest are argv.
-fn adapterArgvOf(cmd: &string): Vec<string> {
+pub fn adapterArgvOf(cmd: &string): Vec<string> {
     var parts: Vec<string> = []
     var cur: string = ""
     for ch in cmd {
@@ -470,7 +470,7 @@ fn cfgHas(cfg: &Json, k: &string): bool {
     }
 }
 
-fn resolveConfig(raw: string, selectName: string): Result<LaunchSpec> {
+pub fn resolveConfig(raw: string, selectName: string): Result<LaunchSpec> {
     // JSONC, not strict JSON: launch.json files are commented in the wild (VS
     // Code's own dialect), and the drawer templates ship commented-out options.
     match jsoncParse(raw.clone()) {
@@ -616,7 +616,7 @@ fn resolveConfigDoc(doc: Json, selectName: string): Result<LaunchSpec> {
 
 // Short, generic name for the active debugger — the UI tags its output lines
 // with this so debugger chatter is distinguishable from program output.
-fn adapterIdForKind(kind: &string): string {
+pub fn adapterIdForKind(kind: &string): string {
     match dialectByKind(kind) {
         Option.Some(d) => {
             return d.adapterId
@@ -630,14 +630,14 @@ fn adapterIdForKind(kind: &string): string {
 // The symbol name for "stop at main" via a function breakpoint. Go's entry is
 // the package-qualified `main.main`; C/C++/Rust just `main`. (Python takes the
 // launch stopOnEntry path instead, so it never reaches here.)
-fn mainSymbolFor(kind: &string): string {
+pub fn mainSymbolFor(kind: &string): string {
     if kind == "go" {
         return "main.main"
     }
     return "main"
 }
 
-fn initArgsFor(kind: &string): string {
+pub fn initArgsFor(kind: &string): string {
     // supportsRunInTerminalRequest is what makes the adapter route the debuggee
     // through our pty instead of capturing its stdio itself.
     return jsonObj().str("adapterID", adapterIdForKind(kind))
@@ -675,7 +675,7 @@ fn extraHas(doc: &Option<Json>, key: &string): bool {
 // on the spec — it's a meta key, stripped from launchExtra, so it can't be
 // re-derived from the body (the flat-form attach bug: a body-only lookup saw
 // "launch" and silently launched with a pid).
-fn launchRequestOf(spec: &LaunchSpec): string {
+pub fn launchRequestOf(spec: &LaunchSpec): string {
     if spec.request == "attach" {
         return "attach"
     }
@@ -688,7 +688,7 @@ fn launchRequestOf(spec: &LaunchSpec): string {
 // same name. This is what lets argv ("args"), env, cwd and lldb hook commands
 // (initCommands/preRunCommands/stopCommands/...) flow with zero dapweb code.
 // stopAtMain is the per-run value (may override the spec's config default).
-fn launchArgsFor(spec: &LaunchSpec, stopMain: bool): string {
+pub fn launchArgsFor(spec: &LaunchSpec, stopMain: bool): string {
     let extra = launchExtraDoc(spec.launchExtra)
     var b = jsonObj()
     // attach targets a pid, not a program — never inject binPath into an attach
@@ -749,7 +749,7 @@ fn launchArgsFor(spec: &LaunchSpec, stopMain: bool): string {
 // a stored entry stays portable across machines. lastRunAt > 0 appends the
 // history run stamp. request/host/port are always kept so an attach or TCP
 // session round-trips as the same thing (else it becomes a broken stdio launch).
-fn specConfigJson(spec: &LaunchSpec, includeDapPath: bool, lastRunAt: i64): string {
+pub fn specConfigJson(spec: &LaunchSpec, includeDapPath: bool, lastRunAt: i64): string {
     var b = jsonObj().str("type", spec.adapterKind.clone())
     if spec.name.len > 0 {
         b = b.str("name", spec.name.clone())
@@ -797,7 +797,7 @@ fn specConfigJson(spec: &LaunchSpec, includeDapPath: bool, lastRunAt: i64): stri
     return b.build()
 }
 
-fn histEntryFor(spec: &LaunchSpec, lastRunAt: i64): string {
+pub fn histEntryFor(spec: &LaunchSpec, lastRunAt: i64): string {
     return specConfigJson(spec, false, lastRunAt)
 }
 
@@ -827,7 +827,7 @@ fn histIdentity(item: &string): string {
 
 // Prepend `entry` to the history JSON array, dropping any existing entry with the
 // same identity, capped at `cap` (newest first). Returns the new array JSON.
-fn histInsert(histJson: &string, item: &string, cap: i64): string {
+pub fn histInsert(histJson: &string, item: &string, cap: i64): string {
     let key = histIdentity(item)
     var arr = jsonArr().raw(item.clone())
     var count: i64 = 1
@@ -861,7 +861,7 @@ fn histInsert(histJson: &string, item: &string, cap: i64): string {
 // Merge legacy client entries (localStorage migration, one-shot) into the history
 // array: each is inserted oldest-first so the newest client entry ends up in
 // front, then the whole thing is de-duped/capped by histInsert.
-fn histMergeMany(histJson: &string, entriesJson: &string, cap: i64): string {
+pub fn histMergeMany(histJson: &string, entriesJson: &string, cap: i64): string {
     var out = histJson.clone()
     match jsonParse(entriesJson.clone()) {
         Result.Ok(d) => {

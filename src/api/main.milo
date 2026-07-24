@@ -168,7 +168,7 @@ fn usage(): string {
 // argparse has no git-style subcommands: the top parser owns the command roster +
 // target/await/timeout flags, `command` is a positional, and trailing tokens (the
 // raw JSON, an eval expression) are forwarded verbatim.
-fn apiMain(argv: Vec<string>): i32 {
+pub fn apiMain(argv: Vec<string>): i32 {
     var p = newParser("dapweb api", usage())
     p.addOptionalPositional("command", "list | state | request | continue | ...")
     p.addString("session", "", "session id (prefix ok)", "")

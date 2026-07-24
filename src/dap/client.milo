@@ -24,7 +24,7 @@ from "protocol" import {
 }
 
 // A decoded DAP message. Unused fields for a given kind stay at their defaults.
-struct DapMsg {
+pub struct DapMsg {
     kind: string, // "response" | "event" | "request"
     seq: i64,
     requestSeq: i64, // responses: the seq of the request this answers
@@ -34,7 +34,7 @@ struct DapMsg {
     raw: string, // full JSON body, for callers that want more
 }
 
-struct DapClient {
+pub struct DapClient {
     child: Child,
     seq: i64,
 }
