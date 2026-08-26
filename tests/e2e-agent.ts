@@ -98,7 +98,12 @@ try {
     const { port: p } = await serve();
     const ws = new WebSocket(`ws://localhost:${p}/ws`);
     const acts: any[] = [];
-    ws.onmessage = (e) => { const m = JSON.parse(String(e.data)); if (m.type === "activity") acts.push(m); };
+    const bpMsgs: any[] = [];
+    ws.onmessage = (e) => {
+      const m = JSON.parse(String(e.data));
+      if (m.type === "activity") acts.push(m);
+      if (m.type === "breakpoint") bpMsgs.push(m);
+    };
     await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
     await sleep(300);
 
@@ -109,6 +114,13 @@ try {
     ok(acts[0].cmd === "setBreakpoint", "it carries the raw command", acts[0]);
     ok(/attempting to set a breakpoint at line 23/.test(acts[0].text),
        "and a human-readable sentence naming the line", acts[0]);
+
+    // An already-open tab must be able to render the agent's breakpoint. The ack
+    // is keyed by path+line, so without a path it cannot be applied and the
+    // breakpoint stays invisible until the tab is reloaded.
+    ok(bpMsgs.length === 1, "the breakpoint change is broadcast to the browser peer", bpMsgs);
+    ok(bpMsgs[0].path === SRC && bpMsgs[0].line === 23 && bpMsgs[0].set === true,
+       "the ack carries the canonical path, the line and the set flag", bpMsgs[0]);
 
     // A browser's own commands are self-evident; announcing them would be noise.
     ws.send(JSON.stringify({ cmd: "setBreakpoint", path: SRC, line: 18 }));

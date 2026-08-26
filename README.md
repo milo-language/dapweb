@@ -27,7 +27,7 @@ tag, so re-running the install command is the update path.
 
 One binary, two subcommands:
 
-- **`dapweb web`** — React + Monaco + xterm.js served by a Milo HTTP/WebSocket server that drives a DAP adapter (lldb-dap, debugpy, delve). Breakpoints (Monaco glyph gutter), stepping, threads, call stack, expandable locals, watch expressions, a debug console (full lldb command access), and a real PTY terminal — type into your program *while it runs*. Fully self-hosted: no CDN assets. Boots idle: open the UI and set the target in the ⚙ drawer — a VS Code launch-configuration JSON with per-debugger schema autocomplete (templates seed a starter config; the last 10 targets are one click away).
+- **`dapweb web`** — React + Monaco + xterm.js served by a Milo HTTP/WebSocket server that drives a DAP adapter (lldb-dap, debugpy, delve). Breakpoints (Monaco glyph gutter), stepping, threads, call stack, expandable locals, watch expressions, a debug console (full lldb command access), and a real PTY terminal — type into your program *while it runs*. Fully self-hosted: no CDN assets, nothing fetched at runtime (`bun tests/hermetic.ts` enforces it). Say what to debug in the toolbar's target bar; the full VS Code launch-configuration JSON lives behind ⚙ for the cases the bar cannot express.
 - **`dapweb api`** — drive that same session from the CLI. Every verb is the exact `{"cmd": ...}` JSON the browser sends, so an agent, a shell script, or plain `curl` can list sessions, set breakpoints, run, step, and evaluate — no browser, no MCP. `dapweb api request` forwards arbitrary DAP-shaped JSON, so any adapter capability works with no new subcommand.
 - **Shared session** — `dapweb web` hosts ONE session; every browser tab and every `dapweb api` call see and drive the same debuggee. Stop in the browser, have an agent evaluate an expression over `dapweb api`, watch the result appear in the UI.
 
@@ -80,12 +80,95 @@ or `--port <n>`. Run `dapweb <command> --help` (or `dapweb api`) for the full co
 > `eval` reaches the debugger, so treat an exposed port as remote code execution. Keep it on
 > localhost unless you intend otherwise.
 
+## Using it
+
+### Launch a program
+
+Type the path in the target bar and press Enter. Arguments go on the same line,
+shell-style, so `--flag "two words"` survives as one argument:
+
+![the target bar in launch mode](docs/images/launch-args.png)
+
+Focus the bar to get the recent targets. Breakpoints are remembered per program
+and come back the next time you debug it, conditions included.
+
+### Attach to a running process
+
+Click **LAUNCH** to flip it to **ATTACH**. Nobody remembers a pid, so the bar
+lists the running processes and filters as you type — pick one and it fills in:
+
+![the target bar in attach mode](docs/images/attach.png)
+
+A pid works too. The bar writes the key the adapter actually wants (`pid` for
+lldb, `processId` for debugpy and delve), so the config stays a launch.json you
+could paste anywhere.
+
+### Anything the bar cannot say
+
+⚙ opens the launch configuration itself — env, cwd, `initCommands`, `justMyCode`,
+whatever your adapter takes. It is a verbatim VS Code launch config, so a config
+from your `.vscode/launch.json` or an answer on Stack Overflow works unchanged.
+Esc closes it.
+
+### Is this binary even debuggable?
+
+The commonest reason a session runs but shows no source is a binary built without
+`-g`, and nothing in a debugger usually tells you. Click **info** on the target
+bar:
+
+| carries DWARF | built without `-g` |
+|---|---|
+| ![binary with debug info](docs/images/binary-info.png) | ![binary without debug info](docs/images/binary-info-nodebug.png) |
+
+It reads the headers only (ELF, Mach-O, PE, universal) and reports format, arch,
+whether the symbol table survived, and where the debug info lives — including a
+companion `.dSYM`, which is where `clang -g` leaves it on macOS.
+
+### Let an agent drive while you watch
+
+`dapweb api` and your browser share one session. An agent's commands are
+announced in the debug console *before* they run, and its breakpoints show up in
+your gutter as it sets them — so a program that moves on its own is never
+unexplained:
+
+![an agent driving the session](docs/images/agent-activity.png)
+
+![zoom on the agent announcements](docs/images/agent-activity.gif)
+
+```sh
+dapweb api break --line 23 --path examples/nested/main.c
+dapweb api request --await stopped '{"cmd":"continue"}'
+dapweb api eval 'shapes[0].name'
+```
+
+The name in the console comes from `$DAPWEB_AGENT`, or `claude` when Claude Code
+set `CLAUDECODE` in the environment.
+
+### Down to the instructions
+
+Two disassembly views: a pane beside the source, or the generated instructions
+inline under each source line. Both track the pc, and instruction-level stepping
+appears in the toolbar while they are open.
+
+![inline disassembly](docs/images/asm-inline.png)
+
+### Milo
+
+Milo programs debug like any other native target — `milo build x.milo -o x -g
+--debug` emits DWARF — with syntax highlighting for `.milo` sources:
+
+![debugging a Milo program](docs/images/milo-source.png)
+
 ## Tests
 
 ```sh
-bun tests/e2e.ts        # full web-session flow against a live server (start one on 8091 first)
-bun tests/e2e-config.ts # launch-config redesign: inline run config, force-kill, history (self-spawns)
-bun tests/api.ts        # HTTP API flow: list/state/run/step/eval (self-spawns a server)
+scripts/build.sh        # dapweb binary + UI bundle
+scripts/test.sh         # every suite against that build, each on its own server
+scripts/test.sh agent   # one suite (substring match on the filename)
 ```
+
+`scripts/test.sh` compiles the debuggees from the repo root on purpose: lldb binds
+breakpoints on the full DWARF path, so a fixture built from anywhere else records
+a path nothing references and every breakpoint silently fails to bind.
 
 Architecture and roadmap: `docs/design.md`.

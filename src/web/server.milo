@@ -737,8 +737,19 @@ fn terminatedMsg(): string {
     return Json.obj().str("type", "terminated").build()
 }
 
-fn bpAckMsg(line: i64, set: bool): string {
-    return Json.obj().str("type", "breakpoint").int("line", line).bool("set", set).build()
+// Carries the canonical path and the full metadata, not just the line: every
+// peer applies this, including ones that did not send the command. Without the
+// path a receiving browser cannot key it (breakpoints are keyed by path+line),
+// so an agent's breakpoint used to be invisible in an already-open tab until it
+// was reloaded and picked the set up from the bpSync replay.
+fn bpAckMsg(b: &Bp, set: bool): string {
+    return Json.obj().str("type", "breakpoint")
+        .str("path", b.path.clone()).int("line", b.line)
+        .str("condition", b.condition.clone())
+        .str("hitCondition", b.hitCondition.clone())
+        .str("logMessage", b.logMessage.clone())
+        .bool("enabled", b.enabled)
+        .bool("set", set).build()
 }
 
 fn outputMsg(raw: &string): string {
@@ -1803,7 +1814,16 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             )
         }
         persistBps()
-        wsPush(bus, busWakeWr, bpAckMsg(line, c == "setBreakpoint"))
+        // Echo the resulting state: for a set that is the stored breakpoint, for
+        // a clear a bare (path, line) is all a peer needs to drop its own copy.
+        let ack = Bp {
+            path: path.clone(), line: line,
+            condition: jStr(payload, "condition"),
+            hitCondition: jStr(payload, "hitCondition"),
+            logMessage: jStr(payload, "logMessage"),
+            enabled: jBool(payload, "enabled", true),
+        }
+        wsPush(bus, busWakeWr, bpAckMsg(ack, c == "setBreakpoint"))
         if gStarted && gDapIn >= 0 {
             gOddSeq = gOddSeq + 2
             // Register before sending (here and below): D drains pendings

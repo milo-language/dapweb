@@ -459,6 +459,24 @@ export default function App() {
         // no --source — the first stop's frame fills the editor.
         else if (!m.sourcePath) setStatus({ text: "no source configured — Run stops at main and loads it", cls: "" });
       }
+      // Any peer's breakpoint change, including our own echo. Applying it here
+      // rather than only optimistically means a breakpoint an agent sets appears
+      // in the gutter of a tab that is already open, not just after a reload.
+      else if (m.type === "breakpoint" && m.path) {
+        setBps((b) => {
+          const next = new Map(b);
+          const k = bpKey(m.path, m.line);
+          if (m.set) {
+            next.set(k, {
+              ...(m.condition ? { condition: m.condition } : {}),
+              ...(m.hitCondition ? { hitCondition: m.hitCondition } : {}),
+              ...(m.logMessage ? { logMessage: m.logMessage } : {}),
+              ...(m.enabled === false ? { enabled: false } : {}),
+            });
+          } else next.delete(k);
+          return next;
+        });
+      }
       else if (m.type === "bpSync") {
         // Late-join replay: server's bp set is truth (acks are optimistic).
         setBps((b) => new Map(b).set(bpKey(m.path, m.line), {
@@ -798,6 +816,11 @@ export default function App() {
     else { delete c.request; delete c.pid; delete c.processId; }
     writeCfg(c);
     setTargetText("");
+    // The chip preventDefaults mousedown so the input keeps focus, which means
+    // focus never fires again and the picker would sit on its placeholder
+    // forever. Kick the load from here instead of relying on onFocus.
+    if (attach) { setProcs(null); loadProcs(); setTargetOpen(true); }
+    else { setProcs(null); setProcErr(""); setTargetOpen(false); }
   };
 
   const loadProcs = () => {
