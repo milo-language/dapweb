@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # dapweb breaks from commits to the COMPILER, not to dapweb, so a
+  # push-triggered gate alone would not have caught the std coherence
+  # overhaul that broke this build. Run nightly against milo main too.
+  schedule:
+    - cron: "0 7 * * *"
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+
+      # Build against milo MAIN, deliberately NOT the released tarball that
+      # release.yml pins. A pinned release can only tell us dapweb still works
+      # with the compiler of the day, and the breakage class this gate exists
+      # for is a stdlib change on milo main, which a pinned binary hides until
+      # after the next milo release ships. Releases keep using the pin; this
+      # job is the early-warning one.
+      - uses: actions/checkout@v4
+        with:
+          repository: milo-language/milo
+          path: .milo-src
+      - name: install milo deps
+        working-directory: .milo-src
+        run: bun install --frozen-lockfile
+
+      # milo needs clang 16+ (its IR uses element-type-free intrinsic mangling),
+      # and 22.04 ships 15. lldb-dap is the DAP adapter every e2e suite drives;
+      # apt names it lldb-dap-18, dapweb probes bare `lldb-dap` on PATH.
+      - name: install clang + lldb 18
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y lldb-18
+          sudo ln -sf /usr/bin/clang-18 /usr/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/bin/clang++
+          sudo ln -sf /usr/bin/lldb-dap-18 /usr/bin/lldb-dap
+          clang --version | head -1
+          lldb-dap --help > /dev/null && echo "lldb-dap runs"
+
+      - name: install openssl headers
+        run: sudo apt-get install -y libssl-dev
+
+      - name: build
+        run: MILO=.milo-src/src/main.ts scripts/build.sh
+
+      - name: gates
+        run: scripts/test.sh
+
+      - name: server logs on failure
+        if: failure()
+        run: for f in /tmp/dapweb_test_*.log; do echo "── $f"; tail -40 "$f"; done
