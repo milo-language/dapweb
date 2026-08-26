@@ -18,7 +18,7 @@ from "std/args" import {
     args
 }
 from "std/argparse" import {
-    newParser, ArgParser
+    ArgParser
 }
 from "std/os" import {
     exit
@@ -27,7 +27,7 @@ from "std/fs" import {
     pathExists
 }
 from "std/json" import {
-    jsonObj, jsonArr
+    Json
 }
 from "web/server" import {
     webMain
@@ -43,7 +43,7 @@ from "version" import {
 // roster + examples live in the description; `command` is a trailing positional
 // whose remaining tokens are forwarded verbatim to the chosen subcommand.
 fn topParser(): ArgParser {
-    var p = newParser("dapweb", "web + programmatic interface for any DAP debugger\n\n" + "commands:\n" + "  web     browser debugger UI + shared co-debug session server\n" + "  api     drive a running session from the CLI (list/state/request/eval/...)\n\n" + "run 'dapweb <command> --help' for that command's options\n\n" + "quick start (the 90% invocation — path to a binary implies `web`):\n" + "  dapweb /tmp/a.out --those --args\n" + "or boot idle and configure the target in the browser:\n" + "  dapweb web --port 8080\n" + "coordinate from an agent or a shell (same live session the browser shows):\n" + "  dapweb api request --await stopped '{\"cmd\":\"run\"}'")
+    var p = ArgParser.new("dapweb", "web + programmatic interface for any DAP debugger\n\n" + "commands:\n" + "  web     browser debugger UI + shared co-debug session server\n" + "  api     drive a running session from the CLI (list/state/request/eval/...)\n\n" + "run 'dapweb <command> --help' for that command's options\n\n" + "quick start (the 90% invocation — path to a binary implies `web`):\n" + "  dapweb /tmp/a.out --those --args\n" + "or boot idle and configure the target in the browser:\n" + "  dapweb web --port 8080\n" + "coordinate from an agent or a shell (same live session the browser shows):\n" + "  dapweb api request --await stopped '{\"cmd\":\"run\"}'")
     p.addOptionalPositional("command", "web | api")
     p.enableTrailingArgs() // stop parsing at the command; forward the rest as-is
     return p
@@ -98,14 +98,14 @@ fn main(): i32 {
         webArgv.push("--program")
         webArgv.push(sub.clone())
         if pos.len > 1 {
-            var arr = jsonArr()
+            var arr = Json.arr()
             var j: i64 = 1
             while j < pos.len {
                 arr = arr.str(pos[j].clone())
                 j = j + 1
             }
             webArgv.push("--launch")
-            webArgv.push(jsonObj().arr("args", arr).build())
+            webArgv.push(Json.obj().arr("args", arr).build())
         }
         return webMain(webArgv)
     }

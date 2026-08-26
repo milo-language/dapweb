@@ -11,16 +11,13 @@ from "std/args" import {
     args
 }
 from "std/argparse" import {
-    newParser, ArgParser
+    ArgParser
 }
 from "std/os" import {
     exit
 }
 from "std/json" import {
-    jsonObj, jsonParse, Json
-}
-from "std/string" import {
-    strPadEnd, strStartsWith
+    Json
 }
 from "std/time" import {
     epochMillis
@@ -38,7 +35,7 @@ fn resolvePort(session: string, port: i64): Result<i64> {
     let live = loadSessions(true)
     if session.len > 0 {
         for r in live {
-            if r.id == session || (session.len >= 4 && strStartsWith(r.id, session)) {
+            if r.id == session || (session.len >= 4 && r.id.startsWith(session)) {
                 return Result.Ok(r.port)
             }
         }
@@ -59,13 +56,13 @@ fn cmdList(): i32 {
         print("no live dapweb sessions")
         return 0
     }
-    print(strPadEnd("ID", 10, " ") + strPadEnd("PORT", 7, " ") + strPadEnd("PID", 8, " ") + "PROGRAM")
+    print("ID".padEnd(10, " ") + "PORT".padEnd(7, " ") + "PID".padEnd(8, " ") + "PROGRAM")
     for r in rows {
         var id = r.id.clone()
         if id.len > 8 {
             id = id.substr(0, 8)
         }
-        print(strPadEnd(id, 10, " ") + strPadEnd($"{r.port}", 7, " ") + strPadEnd($"{r.pid}", 8, " ") + r.program)
+        print(id.padEnd(10, " ") + ($"{r.port}").padEnd(7, " ") + ($"{r.pid}").padEnd(8, " ") + r.program)
     }
     return 0
 }
@@ -80,7 +77,7 @@ fn postCmd(port: i64, body: string, awaitType: string, timeoutMs: i64): i32 {
         Result.Ok(reply) => {
             print(reply)
             // A timeout reply is a non-zero exit so scripts can branch on it.
-            if let Result.Ok(doc) = jsonParse(reply.clone()) {
+            if let Result.Ok(doc) = Json.parse(reply.clone()) {
                 if (doc.str("error") ?? "") == "timeout" {
                     return 2
                 }
@@ -112,7 +109,7 @@ fn cmdState(port: i64): i32 {
 fn currentFrameId(port: i64): i64 {
     match httpRequest(port, "GET", "/api/state", "") {
         Result.Ok(reply) => {
-            if let Result.Ok(doc) = jsonParse(reply) {
+            if let Result.Ok(doc) = Json.parse(reply) {
                 if let Option.Some(stopped) = doc.get("stopped") {
                     if let Option.Some(frames) = stopped.get("frames") {
                         if let Option.Some(f0) = frames.at(0) {
@@ -134,7 +131,7 @@ fn currentFrameId(port: i64): i64 {
 fn currentTid(port: i64): i64 {
     match httpRequest(port, "GET", "/api/state", "") {
         Result.Ok(reply) => {
-            if let Result.Ok(doc) = jsonParse(reply) {
+            if let Result.Ok(doc) = Json.parse(reply) {
                 if let Option.Some(stopped) = doc.get("stopped") {
                     return stopped.i64("tid") ?? (-1 as i64)
                 }
@@ -169,7 +166,7 @@ fn usage(): string {
 // target/await/timeout flags, `command` is a positional, and trailing tokens (the
 // raw JSON, an eval expression) are forwarded verbatim.
 pub fn apiMain(argv: Vec<string>): i32 {
-    var p = newParser("dapweb api", usage())
+    var p = ArgParser.new("dapweb api", usage())
     p.addOptionalPositional("command", "list | state | request | continue | ...")
     p.addString("session", "", "session id (prefix ok)", "")
     p.addString("await", "", "block until a message of this type", "")
@@ -186,7 +183,8 @@ pub fn apiMain(argv: Vec<string>): i32 {
     p.enableIgnoreUnknown()
 
     let parsed = p.parseFrom(argv)
-    let pos = parsed.positional
+    // clone: reading the field bare moves it out and `parsed` is still needed for flags
+    let pos = parsed.positional.clone()
     if pos.len == 0 {
         print(p.helpText())
         return 0
@@ -197,7 +195,7 @@ pub fn apiMain(argv: Vec<string>): i32 {
         return cmdList()
     }
 
-    let port = match resolvePort(parsed.getString("session"), parsed.getI64("port")) {
+    let port = match resolvePort(parsed.getString("session") ?? "", parsed.getI64("port")) {
         Result.Ok(pt) => {
             pt
         }
@@ -207,7 +205,9 @@ pub fn apiMain(argv: Vec<string>): i32 {
         }
     }
     let timeout = parsed.getI64("timeout")
-    let awaitFlag = parsed.getString("await")
+    // None only when --await is absent, whose registered default is "" — the same
+    // "no await" sentinel the old string-returning getString handed back.
+    let awaitFlag = parsed.getString("await") ?? ""
 
     if cmd == "state" {
         return cmdState(port)
@@ -226,7 +226,7 @@ pub fn apiMain(argv: Vec<string>): i32 {
         if at.len == 0 {
             at = "stopped"
         }
-        return postCmd(port, jsonObj().str("cmd", "run").build(), at, timeout)
+        return postCmd(port, Json.obj().str("cmd", "run").build(), at, timeout)
     }
 
     if cmd == "continue" {
@@ -234,11 +234,11 @@ pub fn apiMain(argv: Vec<string>): i32 {
         if at.len == 0 {
             at = "stopped"
         }
-        return postCmd(port, jsonObj().str("cmd", "continue").build(), at, timeout)
+        return postCmd(port, Json.obj().str("cmd", "continue").build(), at, timeout)
     }
 
     if cmd == "pause" {
-        return postCmd(port, jsonObj().str("cmd", "pause").build(), awaitFlag, timeout)
+        return postCmd(port, Json.obj().str("cmd", "pause").build(), awaitFlag, timeout)
     }
 
     if cmd == "step" {
@@ -253,7 +253,7 @@ pub fn apiMain(argv: Vec<string>): i32 {
         if at.len == 0 {
             at = "stopped"
         }
-        var b = jsonObj().str("cmd", verb)
+        var b = Json.obj().str("cmd", verb)
         let tid = currentTid(port)
         if tid >= 0 {
             b = b.int("tid", tid)
@@ -267,8 +267,8 @@ pub fn apiMain(argv: Vec<string>): i32 {
             eprint("error: break needs --line <n>\n")
             return 1
         }
-        var b = jsonObj().str("cmd", "setBreakpoint").int("line", line)
-        let path = parsed.getString("path")
+        var b = Json.obj().str("cmd", "setBreakpoint").int("line", line)
+        let path = parsed.getString("path") ?? ""
         if path.len > 0 {
             b = b.str("path", path)
         }
@@ -281,7 +281,7 @@ pub fn apiMain(argv: Vec<string>): i32 {
             return 1
         }
         let fid = currentFrameId(port)
-        var b = jsonObj().str("cmd", "evaluate").str("expr", pos[1].clone()).str("context", "repl")
+        var b = Json.obj().str("cmd", "evaluate").str("expr", pos[1].clone()).str("context", "repl")
         if fid >= 0 {
             b = b.int("frameId", fid)
         }
@@ -293,7 +293,7 @@ pub fn apiMain(argv: Vec<string>): i32 {
     }
 
     if cmd == "kill" {
-        return postCmd(port, jsonObj().str("cmd", "kill").build(), awaitFlag, timeout)
+        return postCmd(port, Json.obj().str("cmd", "kill").build(), awaitFlag, timeout)
     }
 
     eprint($"error: unknown api command '{cmd}'\n\n")

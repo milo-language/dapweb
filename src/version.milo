@@ -2,12 +2,8 @@
 // with the commit sha + build date. Without it a binary from the rolling `latest`
 // tag cannot say what it is, which makes bug reports unattributable.
 
-from "std/string" import {
-    trim
-}
-
 fn versionLine(): string {
-    return "dapweb " + trim(embedFile("../.version"))
+    return "dapweb " + embedFile("../.version").trim()
 }
 
 // Rolling `latest` means re-running the install is the update path; there is no

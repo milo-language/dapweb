@@ -6,16 +6,13 @@
 // LaunchSpec; nothing here reads or writes global state.
 
 from "std/json" import {
-    Json, jsonParse, jsoncParse, jsonObj, jsonArr
+    Json
 }
 from "std/fs" import {
     pathExists
 }
 from "std/env" import {
-    getEnvOr
-}
-from "std/string" import {
-    strSplit, strContains, strStartsWith, strEndsWith, strTrim
+    Env
 }
 from "std/process" import {
     capture
@@ -85,17 +82,17 @@ struct Dialect {
 // literals in struct-literal fields lower to empty Vecs, so split explicitly).
 fn mkDialect(kind: string, types: string, probes: string, adapterId: string, supported: bool): Dialect {
     return Dialect {
-        kind: kind, types: strSplit(types, "|"),
+        kind: kind, types: types.split("|"),
         probes: pipeSplit(probes), adapterId: adapterId, supported: supported
     }
 }
 
-// like strSplit(s,"|") but "" → empty Vec (node/go have no probes yet).
+// like s.split("|") but "" → empty Vec (node/go have no probes yet).
 fn pipeSplit(s: string): Vec<string> {
     if s.len == 0 {
         return []
     }
-    return strSplit(s, "|")
+    return s.split("|")
 }
 
 // The registry. Keyed by `type` substring-free — exact type match picks a family.
@@ -172,16 +169,16 @@ fn dialectFor(t: &string): Dialect {
 
 // `type` unset → guess the dialect from the program's extension (§3).
 fn inferType(prog: &string): string {
-    if strEndsWith(prog, ".py") {
+    if prog.endsWith(".py") {
         return "python"
     }
-    if strEndsWith(prog, ".js") || strEndsWith(prog, ".ts") {
+    if prog.endsWith(".js") || prog.endsWith(".ts") {
         return "node"
     }
-    if strEndsWith(prog, ".go") {
+    if prog.endsWith(".go") {
         return "go"
     }
-    if strEndsWith(prog, ".java") {
+    if prog.endsWith(".java") {
         return "java"
     }
     return "lldb"
@@ -234,7 +231,7 @@ fn findInPath(cmd: &string): Option<string> {
         }
         return Option.None
     }
-    let pathVar = getEnvOr("PATH", "/usr/bin:/bin:/usr/local/bin")
+    let pathVar = Env.getOr("PATH", "/usr/bin:/bin:/usr/local/bin")
     var start: i64 = 0
     var i: i64 = 0
     while i <= pathVar.len {
@@ -269,10 +266,10 @@ fn resolveInPath(cmd: &string): string {
 // probe's executable isn't installed.
 fn probeAdapterCmd(probe: &string): Option<string> {
     // macOS Xcode-toolchain locator: `xcrun -f TOOL` prints TOOL's absolute path.
-    if strStartsWith(probe, "xcrun -f ") {
+    if probe.startsWith("xcrun -f ") {
         match capture(probe.clone()) {
             Result.Ok(out) => {
-                let p = strTrim(out)
+                let p = out.trim()
                 if p.len > 0 && pathExists(p) {
                     return Option.Some(p)
                 }
@@ -329,7 +326,7 @@ fn probeErr(d: &Dialect): string {
 fn kindForAdapterCmd(cmd: &string): string {
     let ds = dialects()
     for d in ds {
-        if d.supported && strContains(cmd, d.adapterId) {
+        if d.supported && cmd.contains(d.adapterId) {
             return d.kind.clone()
         }
     }
@@ -348,7 +345,7 @@ pub fn resolveAdapterCmd(cmd: &string): AdapterSel {
 // The module token after `-m` in an adapter command (`python3 -m debugpy.adapter`
 // → "debugpy.adapter"), or "" if there's no `-m`.
 fn moduleAfterDashM(cmd: &string): string {
-    let parts = strSplit(cmd, " -m ")
+    let parts = cmd.split(" -m ")
     if parts.len < 2 {
         return ""
     }
@@ -473,7 +470,7 @@ fn cfgHas(cfg: &Json, k: &string): bool {
 pub fn resolveConfig(raw: string, selectName: string): Result<LaunchSpec> {
     // JSONC, not strict JSON: launch.json files are commented in the wild (VS
     // Code's own dialect), and the drawer templates ship commented-out options.
-    match jsoncParse(raw.clone()) {
+    match Json.parseJsonc(raw.clone()) {
         Result.Ok(doc) => {
             return resolveConfigDoc(doc, selectName)
         }
@@ -481,7 +478,6 @@ pub fn resolveConfig(raw: string, selectName: string): Result<LaunchSpec> {
             return Result.Err("config is not valid JSON")
         }
     }
-    return Result.Err("config is not valid JSON")
 }
 
 fn resolveConfigDoc(doc: Json, selectName: string): Result<LaunchSpec> {
@@ -589,7 +585,7 @@ fn resolveConfigDoc(doc: Json, selectName: string): Result<LaunchSpec> {
 
     // Body = every non-meta key verbatim (flat launch.json shape; the old nested
     // "launch" object is stripped by isMetaKey and no longer merged).
-    var b = jsonObj()
+    var b = Json.obj()
     let ks = cfg.keys()
     for k in ks {
         if !isMetaKey(k) {
@@ -640,7 +636,7 @@ pub fn mainSymbolFor(kind: &string): string {
 pub fn initArgsFor(kind: &string): string {
     // supportsRunInTerminalRequest is what makes the adapter route the debuggee
     // through our pty instead of capturing its stdio itself.
-    return jsonObj().str("adapterID", adapterIdForKind(kind))
+    return Json.obj().str("adapterID", adapterIdForKind(kind))
         .bool("linesStartAt1", true)
         .bool("columnsStartAt1", true)
         .bool("supportsRunInTerminalRequest", true)
@@ -654,7 +650,7 @@ fn launchExtraDoc(raw: &string): Option<Json> {
     if raw.len == 0 {
         return Option.None
     }
-    let Result.Ok(doc) = jsonParse(raw.clone()) else {
+    let Result.Ok(doc) = Json.parse(raw.clone()) else {
         return Option.None
     }
     if doc.isObject() {
@@ -690,7 +686,7 @@ pub fn launchRequestOf(spec: &LaunchSpec): string {
 // stopAtMain is the per-run value (may override the spec's config default).
 pub fn launchArgsFor(spec: &LaunchSpec, stopMain: bool): string {
     let extra = launchExtraDoc(spec.launchExtra)
-    var b = jsonObj()
+    var b = Json.obj()
     // attach targets a pid, not a program — never inject binPath into an attach
     // body (it's usually "" for attach anyway, and confuses strict adapters).
     if spec.request != "attach" && !extraHas(extra, "program") {
@@ -750,7 +746,7 @@ pub fn launchArgsFor(spec: &LaunchSpec, stopMain: bool): string {
 // history run stamp. request/host/port are always kept so an attach or TCP
 // session round-trips as the same thing (else it becomes a broken stdio launch).
 pub fn specConfigJson(spec: &LaunchSpec, includeDapPath: bool, lastRunAt: i64): string {
-    var b = jsonObj().str("type", spec.adapterKind.clone())
+    var b = Json.obj().str("type", spec.adapterKind.clone())
     if spec.name.len > 0 {
         b = b.str("name", spec.name.clone())
     }
@@ -805,7 +801,7 @@ pub fn histEntryFor(spec: &LaunchSpec, lastRunAt: i64): string {
 // collapse to one (newest wins), rather than raw-stringify equality — so an env
 // tweak or a re-stamp doesn't spawn a duplicate row.
 fn histIdentity(item: &string): string {
-    match jsonParse(item.clone()) {
+    match Json.parse(item.clone()) {
         Result.Ok(d) => {
             let typ = d.str("type") ?? ""
             let prog = d.str("program") ?? ""
@@ -829,9 +825,9 @@ fn histIdentity(item: &string): string {
 // same identity, capped at `cap` (newest first). Returns the new array JSON.
 pub fn histInsert(histJson: &string, item: &string, cap: i64): string {
     let key = histIdentity(item)
-    var arr = jsonArr().raw(item.clone())
+    var arr = Json.arr().raw(item.clone())
     var count: i64 = 1
-    match jsonParse(histJson.clone()) {
+    match Json.parse(histJson.clone()) {
         Result.Ok(d) => {
             if d.isArray() {
                 let n = d.len()
@@ -863,7 +859,7 @@ pub fn histInsert(histJson: &string, item: &string, cap: i64): string {
 // front, then the whole thing is de-duped/capped by histInsert.
 pub fn histMergeMany(histJson: &string, entriesJson: &string, cap: i64): string {
     var out = histJson.clone()
-    match jsonParse(entriesJson.clone()) {
+    match Json.parse(entriesJson.clone()) {
         Result.Ok(d) => {
             if d.isArray() {
                 let n = d.len()

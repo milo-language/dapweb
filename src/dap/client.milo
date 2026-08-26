@@ -14,7 +14,7 @@ from "std/net" import {
     TcpStream, resolve
 }
 from "std/json" import {
-    Json, jsonParse
+    Json
 }
 from "framing" import {
     readFrame
@@ -53,7 +53,7 @@ fn _boolOr(opt: Option<bool>, fallback: bool): bool {
 
 // Decode a raw JSON frame into a DapMsg.
 fn _decode(raw: string): Result<DapMsg> {
-    let doc = jsonParse(raw.clone())?
+    let doc = Json.parse(raw.clone())?
     let kindKey: string = "type"
     let kind = _strOr(_getStr(doc, kindKey), "")
     var msg = DapMsg {
