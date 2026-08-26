@@ -238,6 +238,8 @@ export default function App() {
   const targetFocused = useRef(false);
   const [binInfo, setBinInfo] = useState<any | null>(null);
   const [showBinInfo, setShowBinInfo] = useState(false);
+  const [procs, setProcs] = useState<{ pid: number; name: string; cmd: string }[] | null>(null);
+  const [procErr, setProcErr] = useState("");
   const [showInfo, setShowInfo] = useState(false);     // ⓘ session-info popover
   const [configErr, setConfigErr] = useState("");
   const [caps, setCaps] = useState<Record<string, any>>({});
@@ -749,20 +751,64 @@ export default function App() {
   // confirmation, then force-kills and relaunches (server tears down first).
   // The bar is a projection of the config, so the config wins except while the
   // user is mid-edit; clobbering someone's half-typed path would be maddening.
-  const targetLabel = [cfg.program || "", ...((cfg.args as string[]) || [])].join(" ").trim();
+  // "attach" is a mode of the same bar, not a separate screen: the config's own
+  // `request` key is the state, so flipping the chip and editing the JSON by hand
+  // can never disagree.
+  const attachMode = cfg.request === "attach";
+  // lldb spells it `pid`, debugpy and delve spell it `processId`. The UI writes
+  // the dialect's own key rather than having the server translate, because the
+  // config is meant to be a verbatim launch.json: what you read in the sheet has
+  // to be exactly what goes to the adapter.
+  const pidKeyFor = (t?: string) => (t === "python" || t === "go" || t === "node") ? "processId" : "pid";
+  const targetLabel = attachMode
+    ? String(cfg[pidKeyFor(cfg.type)] ?? cfg.program ?? "")
+    : [cfg.program || "", ...((cfg.args as string[]) || [])].join(" ").trim();
   useEffect(() => { if (!targetFocused.current) setTargetText(targetLabel); }, [targetLabel]);
 
   // Editing the bar edits program+args inside the launch config; every other key
   // the user set in the Advanced sheet survives untouched.
+  const readCfg = (): any => {
+    try { return JSON.parse(stripJsonc(cfgTextRef.current) || "{}"); } catch { return { ...cfg }; }
+  };
+  const writeCfg = (c: any) => { cfgTextRef.current = JSON.stringify(c, null, 2); setCfg(c); };
+
   const applyTarget = (text: string) => {
+    const c = readCfg();
+    if (attachMode) {
+      const t = text.trim();
+      if (!t) return;
+      // Drop every spelling first: switching `type` must not leave a stale pid
+      // key behind for the adapter to trip over.
+      delete c.pid; delete c.processId;
+      if (/^[0-9]+$/.test(t)) c[pidKeyFor(c.type)] = Number(t);
+      else c.program = t;   // lldb attaches to a running process by name
+      writeCfg(c);
+      return;
+    }
     const parts = shellSplit(text);
     if (!parts.length) return;
-    let c: any;
-    try { c = JSON.parse(stripJsonc(cfgTextRef.current) || "{}"); } catch { c = { ...cfg }; }
     c.program = parts[0];
     if (parts.length > 1) c.args = parts.slice(1); else delete c.args;
-    cfgTextRef.current = JSON.stringify(c, null, 2);
-    setCfg(c);
+    writeCfg(c);
+  };
+
+  const setMode = (attach: boolean) => {
+    const c = readCfg();
+    if (attach) { c.request = "attach"; delete c.args; }
+    else { delete c.request; delete c.pid; delete c.processId; }
+    writeCfg(c);
+    setTargetText("");
+  };
+
+  const loadProcs = () => {
+    setProcErr("");
+    fetch("/api/processes").then(async (r) => {
+      if (!r.ok) throw new Error(r.status === 404
+        ? "this server cannot list processes (built before /api/processes) — type a pid"
+        : `server returned ${r.status}`);
+      return r.json();
+    }).then((d) => setProcs(d.processes || []))
+      .catch((e) => { setProcs([]); setProcErr(e.message || String(e)); });
   };
 
   useEffect(() => {
@@ -934,11 +980,16 @@ export default function App() {
           }} /> stop at main
         </label>
         <span className="targetbar">
+          <button className={"mode-chip" + (attachMode ? " attach" : "")}
+                  title={attachMode ? "Attaching to a running process — click to launch one instead"
+                                    : "Launching a program — click to attach to a running process instead"}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => setMode(!attachMode)}>{attachMode ? "attach" : "launch"}</button>
           <input className="target-input" value={targetText} spellCheck={false}
-                 placeholder="path to a program, plus arguments"
+                 placeholder={attachMode ? "pid, or a process name" : "path to a program, plus arguments"}
                  title={cfg.port ? `tcp: ${cfg.host || "127.0.0.1"}:${cfg.port}` : (adapterCmd ? `adapter: ${adapterCmd}` : "")}
                  onChange={(e) => setTargetText(e.target.value)}
-                 onFocus={() => { targetFocused.current = true; setTargetOpen(true); }}
+                 onFocus={() => { targetFocused.current = true; setTargetOpen(true); if (attachMode) loadProcs(); }}
                  onBlur={() => { targetFocused.current = false; setTimeout(() => setTargetOpen(false), 120); }}
                  onKeyDown={(e) => {
                    if (e.key === "Enter") {
@@ -953,7 +1004,24 @@ export default function App() {
             <button className="bin-chip" title="Binary details — format, architecture, debug info"
                     onMouseDown={(e) => e.preventDefault()} onClick={loadBinInfo}>info</button>
           )}
-          {targetOpen && cfgHist.length > 0 && (
+          {targetOpen && attachMode && (
+            <div className="target-menu">
+              {procErr && <div className="target-note">{procErr}</div>}
+              {!procs && !procErr && <div className="target-note">reading process list…</div>}
+              {(procs || [])
+                .filter((pr) => !targetText.trim() ||
+                                String(pr.pid).startsWith(targetText.trim()) ||
+                                (pr.cmd || pr.name || "").toLowerCase().includes(targetText.trim().toLowerCase()))
+                .slice(0, 200)
+                .map((pr) => (
+                  <div key={pr.pid} className="target-item"
+                       onMouseDown={(e) => { e.preventDefault(); setTargetText(String(pr.pid)); applyTarget(String(pr.pid)); setTargetOpen(false); }}>
+                    <span className="proc-pid">{pr.pid}</span>{pr.cmd || pr.name}
+                  </div>
+                ))}
+            </div>
+          )}
+          {targetOpen && !attachMode && cfgHist.length > 0 && (
             <div className="target-menu">
               {cfgHist.map((h, i) => {
                 const label = [h.program || "", ...((h.args as string[]) || [])].join(" ").trim();

@@ -433,3 +433,13 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
 .bin-dwarf.ok  { color: var(--ok, #3fb950); border: 1px solid currentColor; }
 .bin-dwarf.bad { color: var(--stop); border: 1px solid currentColor; }
 .bin-note { color: var(--muted); font-size: 11px; margin-top: 8px; }
+
+/* launch|attach chip on the target bar: `request` in the config IS the state, so
+   the chip and a hand-edited launch.json can never disagree. */
+.mode-chip { flex: none; font-size: 10px; padding: 2px 8px; border-radius: 4px; cursor: pointer;
+             background: var(--bg); color: var(--muted); border: 1px solid var(--border);
+             text-transform: uppercase; letter-spacing: 0.06em; }
+.mode-chip:hover { color: var(--fg); border-color: var(--muted); }
+.mode-chip.attach { color: var(--stop); border-color: currentColor; }
+.target-note { padding: 6px 10px; font-size: 11px; color: var(--muted); white-space: normal; }
+.proc-pid { display: inline-block; min-width: 52px; color: var(--accent); }

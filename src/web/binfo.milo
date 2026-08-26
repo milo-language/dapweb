@@ -1,0 +1,796 @@
+// Binary inspection for the toolbar's "what am I debugging?" modal.
+//
+// The question this exists to answer is "does this binary actually have debug
+// info?". A stripped or non-`-g` target is the number one reason a session
+// silently shows no source, and until now the UI gave the user no way to tell.
+//
+// Two rules shape the whole module:
+//
+//   * It never fails. A missing, unreadable, truncated, or garbage file yields
+//     format "unknown" plus a note. The endpoint is on the API port and must
+//     not be able to take the server down.
+//   * It never reads the whole file. Debug binaries run to hundreds of MB and
+//     this runs on every modal open, so every read is a seek plus a bounded
+//     `File.read`: the header, then only the section / load-command tables.
+
+from "std/io" import {
+    File, Reader
+}
+from "std/fs" import {
+    pathExists, isDir
+}
+from "std/path" import {
+    Path
+}
+from "std/json" import {
+    Json
+}
+
+// Refuse to allocate more than this for one table. Real section tables and
+// load-command blocks are kilobytes; anything larger is a corrupt or hostile
+// header field, not something worth honouring.
+let MAX_TABLE_BYTES: i64 = 8388608
+
+// ── byte decoding ──
+//
+// The headers below are packed little- or big-endian integers at fixed offsets,
+// so every field read goes through these. Out-of-range reads return -1 rather
+// than trapping, which lets the parsers treat "truncated" and "absurd" alike.
+
+fn uintAt(bytes: &string, off: i64, width: i64, little: bool): i64 {
+    if off < 0 || width <= 0 || width > 4 || off + width > bytes.len {
+        return -1
+    }
+    var v: i64 = 0
+    var i: i64 = 0
+    while i < width {
+        var shift = i * 8
+        if !little {
+            shift = (width - 1 - i) * 8
+        }
+        v = v | ((bytes[off + i] as i64) << shift)
+        i = i + 1
+    }
+    return v
+}
+
+fn u16At(bytes: &string, off: i64, little: bool): i64 {
+    return uintAt(bytes, off, 2, little)
+}
+
+fn u32At(bytes: &string, off: i64, little: bool): i64 {
+    return uintAt(bytes, off, 4, little)
+}
+
+// 64-bit fields are assembled from two 32-bit halves: Milo's arithmetic is
+// checked, so shifting a byte >= 0x80 up by 56 would trap on overflow instead
+// of producing a negative i64. A high half beyond 2^24 is rejected outright,
+// since no real file offset or size is above 2^56.
+fn u64At(bytes: &string, off: i64, little: bool): i64 {
+    var lo: i64 = 0
+    var hi: i64 = 0
+    if little {
+        lo = u32At(bytes, off, true)
+        hi = u32At(bytes, off + 4, true)
+    } else {
+        hi = u32At(bytes, off, false)
+        lo = u32At(bytes, off + 4, false)
+    }
+    if lo < 0 || hi < 0 || hi > 16777215 {
+        return -1
+    }
+    return hi * 4294967296 + lo
+}
+
+// NUL-terminated name out of a byte range (section-header string tables, Mach-O
+// segment names). `maxLen` bounds a name that runs to the end of the buffer;
+// Mach-O segnames in particular are a fixed 16 bytes with no terminator when
+// full.
+fn cstrAt(bytes: &string, off: i64, maxLen: i64): string {
+    var out: string = ""
+    if off < 0 {
+        return out
+    }
+    var i = off
+    while i < bytes.len && i - off < maxLen {
+        let c = bytes[i]
+        if c == 0 {
+            break
+        }
+        out.push(c)
+        i = i + 1
+    }
+    return out
+}
+
+// ── bounded reads ──
+
+// Read exactly `want` bytes at `off`, or fewer at EOF / on error. The caller
+// bounds-checks the result length; a short buffer just means the file is
+// truncated relative to what its own header claimed.
+fn readAt(f: &mut File, off: i64, want: i64): string {
+    if off < 0 || want <= 0 || want > MAX_TABLE_BYTES {
+        return ""
+    }
+    match f.seek(off) {
+        Result.Ok(_at) => {
+        }
+        Result.Err(_e) => {
+            return ""
+        }
+    }
+    var out: string = ""
+    while out.len < want {
+        match f.read(want - out.len) {
+            Result.Ok(chunk) => {
+                if chunk.len == 0 {
+                    break
+                }
+                out.pushStr(chunk)
+            }
+            Result.Err(_e) => {
+                break
+            }
+        }
+    }
+    return out
+}
+
+// ── accumulated answer ──
+
+// Everything the JSON reports, filled in as far as each format parser gets.
+// Defaults are the "could not tell" values, so a parser that bails halfway
+// still produces a well-formed object.
+struct BinInfo {
+    format: string,
+    cls: string,
+    endian: string,
+    arch: string,
+    fileType: string,
+    debugInfo: string,
+    hasDebugInfo: bool,
+    stripped: bool,
+    dsym: string,
+    notes: Vec<string>,
+}
+
+fn newBinInfo(): BinInfo {
+    return BinInfo {
+        format: "unknown", cls: "", endian: "", arch: "", fileType: "",
+        debugInfo: "none", hasDebugInfo: false, stripped: false, dsym: "",
+        notes: Vec.new(),
+    }
+}
+
+impl BinInfo {
+    fn note(self: &mut Self, msg: string): void {
+        self.notes.push(msg)
+    }
+}
+
+// ── ELF ──
+
+fn elfMachineName(machine: i64): string {
+    if machine == 62 {
+        return "x86-64"
+    }
+    if machine == 183 {
+        return "arm64"
+    }
+    if machine == 3 {
+        return "i386"
+    }
+    if machine == 40 {
+        return "armv7"
+    }
+    return ""
+}
+
+fn elfTypeName(etype: i64): string {
+    if etype == 1 {
+        return "object"
+    }
+    if etype == 2 {
+        return "executable"
+    }
+    if etype == 3 {
+        return "shared object"
+    }
+    if etype == 4 {
+        return "core"
+    }
+    return ""
+}
+
+fn inspectElf(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64): void {
+    info.format = "ELF"
+    let is64 = head[4] == 2
+    if is64 {
+        info.cls = "64-bit"
+    } else if head[4] == 1 {
+        info.cls = "32-bit"
+    } else {
+        info.note("unknown ELF class")
+        return
+    }
+    let little = head[5] != 2
+    if head[5] == 1 {
+        info.endian = "little"
+    } else if head[5] == 2 {
+        info.endian = "big"
+    } else {
+        info.note("unknown ELF endianness; assuming little")
+        info.endian = "little"
+    }
+
+    info.fileType = elfTypeName(u16At(head, 16, little))
+    info.arch = elfMachineName(u16At(head, 18, little))
+    if info.arch.len == 0 {
+        info.note("unrecognised e_machine")
+    }
+
+    // Section-table locators live at different offsets in the two classes; the
+    // section headers themselves are 64 bytes (ELF64) vs 40 (ELF32).
+    var shoff: i64 = 0
+    var shentsize: i64 = 0
+    var shnum: i64 = 0
+    var shstrndx: i64 = 0
+    if is64 {
+        shoff = u64At(head, 40, little)
+        shentsize = u16At(head, 58, little)
+        shnum = u16At(head, 60, little)
+        shstrndx = u16At(head, 62, little)
+    } else {
+        shoff = u32At(head, 32, little)
+        shentsize = u16At(head, 46, little)
+        shnum = u16At(head, 48, little)
+        shstrndx = u16At(head, 50, little)
+    }
+    if shoff <= 0 || shentsize <= 0 || shoff >= fileSize {
+        info.note("no section table; debug info cannot be determined")
+        return
+    }
+
+    // Extended numbering: an object with >= 0xFF00 sections stores the real
+    // count in section 0's sh_size, and an out-of-range string-table index in
+    // its sh_link. Section 0 is otherwise all zeroes.
+    if shnum == 0 || shstrndx == 65535 {
+        let sh0 = readAt(f, shoff, shentsize)
+        if sh0.len < shentsize {
+            info.note("truncated section table")
+            return
+        }
+        if shnum == 0 {
+            if is64 {
+                shnum = u64At(sh0, 32, little)
+            } else {
+                shnum = u32At(sh0, 20, little)
+            }
+        }
+        if shstrndx == 65535 {
+            if is64 {
+                shstrndx = u32At(sh0, 40, little)
+            } else {
+                shstrndx = u32At(sh0, 24, little)
+            }
+        }
+    }
+    if shnum <= 0 || shstrndx < 0 || shstrndx >= shnum {
+        info.note("section table locators out of range")
+        return
+    }
+    let tableBytes = shnum * shentsize
+    if tableBytes > MAX_TABLE_BYTES || shoff + tableBytes > fileSize {
+        info.note("section table extends past end of file")
+        return
+    }
+    let table = readAt(f, shoff, tableBytes)
+    if table.len < tableBytes {
+        info.note("truncated section table")
+        return
+    }
+
+    // The names of every section live in one string table, itself a section.
+    var strOff: i64 = 0
+    var strSize: i64 = 0
+    let strHdr = shstrndx * shentsize
+    if is64 {
+        strOff = u64At(table, strHdr + 24, little)
+        strSize = u64At(table, strHdr + 32, little)
+    } else {
+        strOff = u32At(table, strHdr + 16, little)
+        strSize = u32At(table, strHdr + 20, little)
+    }
+    if strOff <= 0 || strSize <= 0 || strSize > MAX_TABLE_BYTES || strOff + strSize > fileSize {
+        info.note("unreadable section-header string table")
+        return
+    }
+    let strtab = readAt(f, strOff, strSize)
+
+    var hasSymtab = false
+    var hasDynsym = false
+    var hasInterp = false
+    var debugLink = false
+    var compressed = false
+    var i: i64 = 0
+    while i < shnum {
+        let nameOff = u32At(table, i * shentsize, little)
+        let name = cstrAt(strtab, nameOff, 128)
+        if name == ".debug_info" {
+            info.hasDebugInfo = true
+        } else if name == ".zdebug_info" {
+            info.hasDebugInfo = true
+            compressed = true
+        } else if name == ".symtab" {
+            hasSymtab = true
+        } else if name == ".dynsym" {
+            hasDynsym = true
+        } else if name == ".gnu_debuglink" {
+            debugLink = true
+        } else if name == ".interp" {
+            hasInterp = true
+        }
+        i = i + 1
+    }
+
+    // Every modern toolchain links executables position-independent, which makes
+    // them ET_DYN and indistinguishable from a library by e_type alone. A program
+    // interpreter is what tells the two apart, and calling a PIE a "shared object"
+    // in the modal would just confuse the user reading it.
+    if info.fileType == "shared object" && hasInterp {
+        info.fileType = "executable"
+        info.note("position-independent executable")
+    }
+
+    info.stripped = !hasSymtab
+    if info.hasDebugInfo {
+        if compressed {
+            info.debugInfo = "DWARF (compressed sections)"
+        } else {
+            info.debugInfo = "DWARF (sections)"
+        }
+    } else if debugLink {
+        // Split-debug builds (Fedora/Debian -dbg packages) keep DWARF in a
+        // separate file the linker names here. The debugger can still find
+        // source if that file is installed, so say so rather than "none".
+        info.debugInfo = "separate file (.gnu_debuglink)"
+        info.note("DWARF lives in a separate debug file named by .gnu_debuglink")
+    }
+    if info.stripped {
+        if hasDynsym {
+            info.note("no .symtab; only dynamic symbols (.dynsym) remain")
+        } else {
+            info.note("no symbol table")
+        }
+    }
+}
+
+// ── Mach-O ──
+
+fn machoArchName(cputype: i64): string {
+    if cputype == 16777228 {
+        return "arm64"
+    }
+    if cputype == 16777223 {
+        return "x86-64"
+    }
+    if cputype == 7 {
+        return "i386"
+    }
+    if cputype == 12 {
+        return "armv7"
+    }
+    return ""
+}
+
+fn machoTypeName(filetype: i64): string {
+    if filetype == 1 {
+        return "object"
+    }
+    if filetype == 2 {
+        return "executable"
+    }
+    if filetype == 4 {
+        return "core"
+    }
+    if filetype == 6 {
+        return "dylib"
+    }
+    if filetype == 8 {
+        return "bundle"
+    }
+    return ""
+}
+
+// `<path>.dSYM/Contents/Resources/DWARF/<basename>` is where `clang -g` leaves
+// DWARF on macOS: the linker copies only a symbol table into the executable and
+// dsymutil writes the debug info beside it. Reporting only what the Mach-O
+// itself carries would therefore say "no debug info" for the overwhelmingly
+// common case. `path` is used exactly as configured (cwd-relative stays
+// cwd-relative, no realpath) so the modal shows the string the user gave the
+// adapter, not a symlink-resolved path they would not recognise.
+fn findDsym(info: &mut BinInfo, path: &string): void {
+    let bundle = path.clone() + ".dSYM"
+    if !pathExists(bundle) {
+        return
+    }
+    info.dsym = bundle.clone()
+    let inner = bundle.clone() + "/Contents/Resources/DWARF/" + Path.basename(path)
+    if pathExists(inner) {
+        info.hasDebugInfo = true
+    } else {
+        // A bundle whose inner DWARF is named differently (renamed binary, or a
+        // dSYM for a dylib inside a framework) still means debug info exists,
+        // but we could not confirm the file the debugger will open.
+        info.note("companion .dSYM exists but holds no DWARF for this basename")
+    }
+}
+
+// Does the symbol table still name any code in this image?
+//
+// This is the "stripped" test, and it cannot be "is LC_SYMTAB missing" or
+// "is nsyms zero": macOS `strip` leaves the command in place with the nine or
+// so undefined imports plus `__mh_execute_header` still in it, so a stripped
+// executable and an unstripped one both report a non-zero nsyms. What actually
+// changes is whether any entry is *defined in a section* of this image, which
+// is exactly what a debugger needs to turn an address into a function name.
+//
+// Both tables are read with caps rather than in full: an image carrying more
+// than the cap is self-evidently not stripped.
+fn machoHasNamedCode(f: &mut File, fileSize: i64, is64: bool, little: bool,
+                     symoff: i64, nsyms: i64, stroff: i64, strsize: i64): bool {
+    if symoff <= 0 || nsyms <= 0 || stroff <= 0 || strsize <= 0 {
+        return false
+    }
+    var entrySize: i64 = 12
+    if is64 {
+        entrySize = 16
+    }
+    var count = nsyms
+    if count > 16384 {
+        count = 16384
+    }
+    if symoff + count * entrySize > fileSize {
+        return false
+    }
+    var strWant = strsize
+    if strWant > 1048576 {
+        strWant = 1048576
+    }
+    if stroff + strWant > fileSize {
+        return false
+    }
+    let syms = readAt(f, symoff, count * entrySize)
+    let strs = readAt(f, stroff, strWant)
+
+    var i: i64 = 0
+    while (i + 1) * entrySize <= syms.len {
+        let base = i * entrySize
+        let ntype = syms[base + 4] as i64
+        // n_type packs N_STAB (0xe0), N_PEXT, N_TYPE (0x0e) and N_EXT. A stab
+        // is debug bookkeeping, not a symbol; N_TYPE == N_SECT (0x0e) is the
+        // only value that means "defined in a section of this file".
+        if (ntype & 224) == 0 && (ntype & 14) == 14 {
+            // The linker always emits this one, stripped or not, so it is not
+            // evidence that anything survived.
+            if cstrAt(strs, u32At(syms, base, little), 128) != "__mh_execute_header" {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn inspectMachO(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64, path: &string,
+                is64: bool, little: bool): void {
+    info.format = "Mach-O"
+    if is64 {
+        info.cls = "64-bit"
+    } else {
+        info.cls = "32-bit"
+    }
+    if little {
+        info.endian = "little"
+    } else {
+        info.endian = "big"
+    }
+
+    info.arch = machoArchName(u32At(head, 4, little))
+    if info.arch.len == 0 {
+        info.note("unrecognised cputype")
+    }
+    let filetype = u32At(head, 12, little)
+    info.fileType = machoTypeName(filetype)
+    if filetype == 10 {
+        info.note("this file is itself a dSYM companion, not a program image")
+    }
+
+    // The load commands follow the header contiguously: 32 bytes for a 64-bit
+    // header (it carries a reserved word), 28 for 32-bit.
+    var hdrSize: i64 = 28
+    if is64 {
+        hdrSize = 32
+    }
+    let ncmds = u32At(head, 16, little)
+    let sizeofcmds = u32At(head, 20, little)
+
+    var inBinaryDwarf = false
+    var hasSymtab = false
+    var symoff: i64 = 0
+    var nsyms: i64 = 0
+    var stroff: i64 = 0
+    var strsize: i64 = 0
+    if ncmds <= 0 || sizeofcmds <= 0 || sizeofcmds > MAX_TABLE_BYTES
+        || hdrSize + sizeofcmds > fileSize {
+        info.note("unreadable load commands")
+    } else {
+        let cmds = readAt(f, hdrSize, sizeofcmds)
+        if cmds.len < sizeofcmds {
+            info.note("truncated load commands")
+        }
+        var off: i64 = 0
+        var seen: i64 = 0
+        while seen < ncmds {
+            let cmd = u32At(cmds, off, little)
+            let cmdsize = u32At(cmds, off + 4, little)
+            // A zero or unaligned cmdsize would spin or walk off the end; both
+            // mean the table is corrupt, so stop with what we have.
+            if cmd < 0 || cmdsize < 8 || off + cmdsize > cmds.len {
+                break
+            }
+            if cmd == 2 {
+                // symtab_command: cmd, cmdsize, symoff, nsyms, stroff, strsize.
+                hasSymtab = true
+                symoff = u32At(cmds, off + 8, little)
+                nsyms = u32At(cmds, off + 12, little)
+                stroff = u32At(cmds, off + 16, little)
+                strsize = u32At(cmds, off + 20, little)
+            } else if cmd == 25 || cmd == 1 {
+                // segname is a fixed 16-byte field right after cmd/cmdsize.
+                // A __DWARF segment means the debug info is in this file
+                // (an unlinked .o, or a dSYM's own payload).
+                if cstrAt(cmds, off + 8, 16) == "__DWARF" {
+                    inBinaryDwarf = true
+                }
+            }
+            off = off + cmdsize
+            seen = seen + 1
+        }
+    }
+
+    if inBinaryDwarf {
+        info.hasDebugInfo = true
+    }
+    findDsym(info, path)
+
+    if inBinaryDwarf && info.dsym.len > 0 {
+        info.debugInfo = "DWARF (in binary + .dSYM)"
+    } else if inBinaryDwarf {
+        info.debugInfo = "DWARF (in binary)"
+    } else if info.hasDebugInfo {
+        info.debugInfo = "DWARF (.dSYM)"
+    }
+
+    if !hasSymtab {
+        info.stripped = true
+        info.note("no symbol table")
+    } else {
+        info.stripped = !machoHasNamedCode(f, fileSize, is64, little, symoff, nsyms, stroff, strsize)
+        if info.stripped {
+            info.note("no function symbols; addresses will not resolve to names")
+        }
+    }
+    if !info.hasDebugInfo && info.dsym.len == 0 {
+        info.note("no companion .dSYM; build with -g for source-level debugging")
+    }
+}
+
+// ── PE ──
+
+fn peMachineName(machine: i64): string {
+    if machine == 34404 {
+        return "x86-64"
+    }
+    if machine == 332 {
+        return "i386"
+    }
+    if machine == 43620 {
+        return "arm64"
+    }
+    if machine == 448 || machine == 452 {
+        return "armv7"
+    }
+    return ""
+}
+
+fn inspectPe(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64): void {
+    info.format = "PE"
+    info.endian = "little"
+    // Windows is a partial target here, so this stays deliberately shallow: the
+    // COFF header, the debug data directory, and the section names.
+    info.note("PE inspection is shallow")
+
+    let peOff = u32At(head, 60, true)
+    if peOff <= 0 || peOff + 24 > fileSize {
+        info.note("PE header offset out of range")
+        return
+    }
+    // COFF header (20 bytes) plus the optional header's magic word.
+    let coff = readAt(f, peOff, 26)
+    if coff.len < 26 || coff[0] != 'P' || coff[1] != 'E' || coff[2] != 0 || coff[3] != 0 {
+        info.note("missing PE signature")
+        return
+    }
+    info.arch = peMachineName(u16At(coff, 4, true))
+    if info.arch.len == 0 {
+        info.note("unrecognised COFF machine")
+    }
+    let nsections = u16At(coff, 6, true)
+    let symtabPtr = u32At(coff, 12, true)
+    let nsymbols = u32At(coff, 16, true)
+    let optSize = u16At(coff, 20, true)
+    let characteristics = u16At(coff, 22, true)
+
+    // IMAGE_FILE_DLL (0x2000) and IMAGE_FILE_EXECUTABLE_IMAGE (0x0002); a file
+    // with neither is a relocatable object.
+    if (characteristics & 8192) != 0 {
+        info.fileType = "shared object"
+    } else if (characteristics & 2) != 0 {
+        info.fileType = "executable"
+    } else {
+        info.fileType = "object"
+    }
+    // PE32+ optional header magic 0x20b vs PE32 0x10b is the only 32/64 signal
+    // that is independent of the machine field.
+    let optMagic = u16At(coff, 24, true)
+    if optMagic == 523 {
+        info.cls = "64-bit"
+    } else if optMagic == 267 {
+        info.cls = "32-bit"
+    }
+    // IMAGE_FILE_DEBUG_STRIPPED (0x0200) plus an empty COFF symbol table.
+    info.stripped = nsymbols <= 0 || (characteristics & 512) != 0
+
+    // Data directory 6 is IMAGE_DIRECTORY_ENTRY_DEBUG; a non-zero size means a
+    // debug directory (usually a PDB reference) is present. The directories
+    // begin 112 bytes into a PE32+ optional header, 96 into a PE32 one.
+    var dirBase: i64 = -1
+    if optMagic == 523 {
+        dirBase = 112
+    } else if optMagic == 267 {
+        dirBase = 96
+    }
+    if dirBase >= 0 && optSize >= dirBase + 56 {
+        let dir = readAt(f, peOff + 24 + dirBase + 48, 8)
+        if dir.len == 8 && u32At(dir, 4, true) > 0 {
+            info.hasDebugInfo = true
+            info.debugInfo = "PDB (debug directory)"
+        }
+    }
+
+    // A MinGW/clang -g build carries DWARF in sections instead. Their names run
+    // past COFF's 8-byte name field, so they are stored as "/<decimal offset>"
+    // into the string table that follows the symbol table.
+    if nsections > 0 && nsections < 4096 && optSize >= 0 {
+        let secOff = peOff + 24 + optSize
+        let secs = readAt(f, secOff, nsections * 40)
+        var strtabOff: i64 = -1
+        if symtabPtr > 0 && nsymbols > 0 {
+            strtabOff = symtabPtr + nsymbols * 18
+        }
+        var i: i64 = 0
+        // Each long name costs its own small read of the string table, so cap
+        // how many a corrupt section count can make us issue.
+        var lookups: i64 = 0
+        while i * 40 + 8 <= secs.len && !info.hasDebugInfo {
+            var name = cstrAt(secs, i * 40, 8)
+            if name.len > 1 && name[0] == '/' && strtabOff > 0 && lookups < 256 {
+                if let Option.Some(rel) = name.substr(1, name.len).parseInt() {
+                    lookups = lookups + 1
+                    name = cstrAt(readAt(f, strtabOff + rel, 128), 0, 128)
+                }
+            }
+            if name == ".debug_info" {
+                info.hasDebugInfo = true
+                info.debugInfo = "DWARF (sections)"
+            }
+            i = i + 1
+        }
+    }
+}
+
+// ── entry point ──
+
+// A JSON description of the binary at `path` for the toolbar modal. Never
+// fails: an absent file reports only `exists: false`, and anything unreadable
+// or unrecognised reports format "unknown" plus a note.
+pub fn binInfoJson(path: &string): string {
+    if path.len == 0 || !pathExists(path) {
+        return Json.obj().str("path", path.clone()).bool("exists", false).build()
+    }
+
+    var info = newBinInfo()
+    var size: i64 = 0
+
+    if isDir(path) {
+        info.note("path is a directory")
+    } else {
+        match File.openRead(path) {
+            Result.Ok(fh) => {
+                var f = fh
+                size = f.size()
+                if size < 0 {
+                    size = 0
+                    info.note("could not measure file size")
+                }
+                // 64 bytes covers every header this module reads fields from:
+                // the ELF64 header is exactly 64, the Mach-O header 32, and the
+                // PE stub only needs its e_lfanew word at 0x3C.
+                let head = readAt(f, 0, 64)
+                if head.len < 4 {
+                    info.note("file too small to identify")
+                } else if head[0] == 127 && head[1] == 'E' && head[2] == 'L' && head[3] == 'F' {
+                    inspectElf(info, f, head, size)
+                } else if head[0] == 207 && head[1] == 250 && head[2] == 237 && head[3] == 254 {
+                    // CF FA ED FE reads little-endian as MH_MAGIC_64 (0xFEEDFACF).
+                    inspectMachO(info, f, head, size, path, true, true)
+                } else if head[0] == 206 && head[1] == 250 && head[2] == 237 && head[3] == 254 {
+                    // CE FA ED FE is the 32-bit MH_MAGIC.
+                    inspectMachO(info, f, head, size, path, false, true)
+                } else if head[0] == 254 && head[1] == 237 && head[2] == 250
+                    && (head[3] == 207 || head[3] == 206) {
+                    // Byte-swapped magic: a big-endian Mach-O (PowerPC era).
+                    inspectMachO(info, f, head, size, path, head[3] == 207, false)
+                } else if head[0] == 202 && head[1] == 254 && head[2] == 186 && head[3] == 190 {
+                    // CA FE BA BE: fat header, big-endian by definition.
+                    fatInfo(info, head, true)
+                } else if head[0] == 190 && head[1] == 186 && head[2] == 254 && head[3] == 202 {
+                    fatInfo(info, head, false)
+                } else if head[0] == 'M' && head[1] == 'Z' {
+                    inspectPe(info, f, head, size)
+                } else {
+                    info.note("unrecognised file format")
+                }
+            }
+            Result.Err(_e) => {
+                info.note("could not open file")
+            }
+        }
+    }
+
+    var notes = Json.arr()
+    for n in info.notes {
+        notes = notes.str(n.clone())
+    }
+    return Json.obj()
+        .str("path", path.clone())
+        .bool("exists", true)
+        .int("size", size)
+        .str("format", info.format.clone())
+        .str("class", info.cls.clone())
+        .str("endian", info.endian.clone())
+        .str("arch", info.arch.clone())
+        .str("fileType", info.fileType.clone())
+        .str("debugInfo", info.debugInfo.clone())
+        .bool("hasDebugInfo", info.hasDebugInfo)
+        .bool("stripped", info.stripped)
+        .str("dsym", info.dsym.clone())
+        .arr("notes", notes)
+        .build()
+}
+
+// Universal ("fat") binaries are a container of per-architecture Mach-O slices.
+// Picking the right slice would mean matching the host cputype and re-running
+// the whole Mach-O parser at its offset; the modal only needs to say what kind
+// of file this is, so report the slice count and stop.
+fn fatInfo(info: &mut BinInfo, head: &string, bigEndian: bool): void {
+    info.format = "universal"
+    let n = u32At(head, 4, !bigEndian)
+    if n > 0 && n < 64 {
+        info.note($"universal binary containing {n} architectures")
+    } else {
+        info.note("universal binary with an unreadable architecture count")
+    }
+    info.note("per-architecture debug info was not inspected")
+}

@@ -54,6 +54,9 @@ from "std/json" import {
 from "./jsonaccess" import {
     bodyI64, bodyStr, frame0Field, frame0Path, scopes0Ref
 }
+from "./binfo" import {
+    binInfoJson
+}
 from "std/signal" import {
     ignoreSignal, SIGPIPE
 }
@@ -67,10 +70,10 @@ from "std/env" import {
     Env
 }
 from "std/process" import {
-    Child
+    Child, Command, Stdio
 }
 from "std/fs" import {
-    pathExists, makeDir, writeFile, removeFile, currentDir
+    pathExists, makeDir, writeFile, removeFile, currentDir, splitLines
 }
 from "std/uuid" import {
     Uuid
@@ -2161,6 +2164,67 @@ fn unregisterSession(): void {
     }
 }
 
+// Running processes, for the target bar's attach picker. Nobody remembers a pid,
+// and making the user go find one in another terminal is most of why attaching
+// feels harder than launching.
+//
+// Shelling out to ps rather than reading kinfo_proc through sysctl: the struct
+// layout is neither stable nor shared between macOS and Linux, and this is a
+// picker, not a monitor. Windows has no ps, so it answers an empty list with a
+// note instead of a plausible-looking lie.
+//
+// The command line is included because "which of these four node processes" is
+// exactly the question being asked, and argv can carry secrets. That is not a
+// new exposure: this port already answers `evaluate`, so anyone who can reach it
+// can already run ps through the debugger. It is a reason to keep the port on
+// loopback, which the README already says.
+fn processListJson(): string {
+    var arr = Json.arr()
+    var count: i64 = 0
+    // args= only, deliberately: macOS pads/TRUNCATES the comm column to 16
+    // characters, so "/usr/libexec/logd" comes back as "/usr/libexec/log" and
+    // the name shown in the picker would be subtly wrong. argv[0] is not
+    // truncated, and its basename is the name anyway.
+    let cmd = Command.new("ps").arg("-axo").arg("pid=,args=").stdout(Stdio.Pipe)
+    match cmd.spawn() {
+        Result.Ok(child) => {
+            var ch = child
+            var out: string = ""
+            if ch.stdoutFd >= 0 {
+                for chunk in fdChannel(ch.stdoutFd) {
+                    out = out + chunk
+                }
+            }
+            let _w = ch.wait()
+            for line in splitLines(out) {
+                let t = line.trim()
+                if t.len == 0 {
+                    continue
+                }
+                // "<pid> <argv…>"
+                let fields = t.splitWhitespace()
+                if fields.len < 2 {
+                    continue
+                }
+                let pid = fields[0].parseInt() ?? (0 as i64)
+                if pid <= 0 {
+                    continue
+                }
+                let full = t.substr(fields[0].len, t.len).trim()
+                arr = arr.raw(Json.obj().int("pid", pid)
+                    .str("name", Path.basename(fields[1]))
+                    .str("cmd", full).build())
+                count = count + 1
+            }
+        }
+        Result.Err(_e) => {
+            return Json.obj().arr("processes", Json.arr())
+                .str("error", "could not list processes on this platform").build()
+        }
+    }
+    return Json.obj().arr("processes", arr).int("count", count).build()
+}
+
 // ── HTTP API ──
 //
 // Snapshot of everything a caller needs to decide what to do next. Built from the
@@ -2738,6 +2802,19 @@ fn handleConnection(fd: i32, bus: Channel<string>, busWakeWr: i32, pendCh: Chann
         }
         if apiPath == "/api/state" {
             sendHttp(fd, 200, "application/json", apiStateJson())
+            close(fd)
+            return
+        }
+        // Reports on the configured target only, with no path parameter: the API
+        // port is unauthenticated, and a caller-supplied path would make this an
+        // arbitrary-file header reader.
+        if apiPath == "/api/processes" {
+            sendHttp(fd, 200, "application/json", processListJson())
+            close(fd)
+            return
+        }
+        if apiPath == "/api/binfo" {
+            sendHttp(fd, 200, "application/json", binInfoJson(binPath))
             close(fd)
             return
         }
