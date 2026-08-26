@@ -13,6 +13,9 @@ body {
 header {
   display: flex; align-items: center; gap: 10px; padding: 6px 14px;
   background: var(--panel); border-bottom: 1px solid var(--border); flex: none;
+  /* One row, always. The target bar is the only thing allowed to absorb slack,
+     and the status truncates rather than wrapping the whole toolbar to 2 lines. */
+  flex-wrap: nowrap; white-space: nowrap;
 }
 /* Icon-only debugger controls, grouped run|step|session; hover title explains.
    Icons are VS Code codicons — the ttf ships inside monaco (build.sh copies it). */
@@ -23,7 +26,7 @@ header {
 .ci { font-family: "codicon"; font-size: 15px; line-height: 1;
       display: inline-block; user-select: none; }
 .ci-sub { font-size: 9px; align-self: flex-end; margin-left: 1px; }
-.toolbar { display: flex; gap: 3px; }
+.toolbar { display: flex; gap: 3px; flex: none; }
 .toolbar + .toolbar { border-left: 1px solid var(--border); padding-left: 10px; }
 .toolbar button, .gear {
   display: inline-flex; align-items: center; justify-content: center;
@@ -32,7 +35,8 @@ header {
 header .logo { font-weight: 700; letter-spacing: 1px; color: var(--accent); }
 header .logo::before { content: "⚡ "; }
 header .prog { color: var(--muted); font-size: 11px; margin-left: 8px; }
-.status { color: var(--muted); margin-left: auto; }
+.status { color: var(--muted); margin-left: auto; min-width: 0; flex: 0 1 auto;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status.stopped { color: var(--stop); }
 .status.running { color: var(--accent); }
 .status.done { color: var(--ok); }
@@ -89,10 +93,15 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
                      align-items: center; justify-content: center; z-index: 2;
                      font-size: 8px; font-weight: 900; line-height: 1; color: var(--bg); }
 /* Debug-target config drawer */
-.stopmain { display: flex; align-items: center; gap: 4px; font-size: 11px;
-            color: var(--muted); cursor: pointer; user-select: none; }
-.drawer { width: 380px; border-right: 1px solid var(--border); display: flex;
-          flex-direction: column; min-height: 0; }
+.stopmain { display: flex; align-items: center; gap: 4px; font-size: 11px; flex: none;
+            color: var(--muted); cursor: pointer; user-select: none; white-space: nowrap; }
+/* The target sheet OVERLAYS the debug view instead of permanently owning a
+   column of it: configuring a target is a thing you do occasionally, watching a
+   program run is the thing you do constantly. */
+.drawer { position: absolute; left: 0; top: 0; bottom: 0; width: 460px; z-index: 45;
+          background: var(--panel); border-right: 1px solid var(--border); display: flex;
+          flex-direction: column; min-height: 0; box-shadow: 6px 0 24px rgba(0,0,0,0.5); }
+.drawer-backdrop { position: absolute; inset: 0; z-index: 44; background: rgba(0,0,0,0.35); }
 .drawer-head { display: flex; align-items: center; justify-content: space-between;
                padding: 6px 12px; border-bottom: 1px solid var(--border); }
 .drawer-head h2, .drawer-hist h2 { margin: 0; font-size: 11px; text-transform: uppercase;
@@ -381,3 +390,46 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
 .sf-sret { color: var(--stop); font-size: 10px; cursor: help; }
 .sf-frameless { color: var(--muted); border: 1px solid var(--border); border-radius: 8px;
                 padding: 0 6px; font-size: 9px; cursor: help; }
+
+
+/* ── Target bar: the toolbar IS where you say what to run ────────────────── */
+.targetbar { position: relative; display: inline-flex; align-items: center; gap: 6px;
+             margin-left: 8px; flex: 1 1 260px; min-width: 160px; max-width: 560px; }
+.target-input { flex: 1; min-width: 0; background: var(--bg); color: var(--fg);
+                border: 1px solid var(--border); border-radius: 4px; padding: 3px 8px;
+                font: inherit; font-size: 11px; outline: none; }
+.target-input:hover { border-color: var(--muted); }
+.target-input:focus { border-color: var(--accent); }
+.target-input::placeholder { color: var(--muted); opacity: 0.7; }
+.bin-chip { flex: none; font-size: 10px; padding: 1px 7px; border-radius: 8px; cursor: pointer;
+            background: none; color: var(--muted); border: 1px solid var(--border); }
+.bin-chip:hover { color: var(--accent); border-color: var(--accent); }
+.target-menu { position: absolute; top: 100%; left: 0; right: 0; z-index: 46; margin-top: 3px;
+               background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+               box-shadow: 0 6px 20px rgba(0,0,0,0.55); max-height: 260px; overflow: auto; }
+.target-item { padding: 5px 10px; font-size: 11px; cursor: pointer; white-space: nowrap;
+               overflow: hidden; text-overflow: ellipsis; }
+.target-item:hover { background: rgba(255,255,255,0.08); }
+
+/* Another peer is driving. Magenta everywhere, matching the console tag, so the
+   two readings of the same event are obviously the same event. */
+.agent-note { margin-left: auto; font-size: 11px; color: #ff7bd5; max-width: 420px;
+              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-note + .status { margin-left: 12px; }
+
+/* ── Binary details modal ────────────────────────────────────────────────── */
+.modal-backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,0.45); }
+.modal { position: fixed; z-index: 61; top: 50%; left: 50%; transform: translate(-50%, -50%);
+         width: 520px; max-width: 92vw; max-height: 80vh; background: var(--panel);
+         border: 1px solid var(--border); border-radius: 8px; display: flex;
+         flex-direction: column; box-shadow: 0 12px 40px rgba(0,0,0,0.6); }
+.modal-head { display: flex; align-items: center; justify-content: space-between;
+              padding: 8px 14px; border-bottom: 1px solid var(--border); }
+.modal-head h2 { margin: 0; font-size: 11px; text-transform: uppercase;
+                 letter-spacing: 0.08em; color: var(--muted); }
+.modal-body { padding: 12px 14px; overflow: auto; font-size: 12px; }
+.bin-path { color: var(--fg); word-break: break-all; margin-bottom: 10px; }
+.bin-dwarf { padding: 6px 10px; border-radius: 6px; margin-bottom: 12px; font-size: 11px; }
+.bin-dwarf.ok  { color: var(--ok, #3fb950); border: 1px solid currentColor; }
+.bin-dwarf.bad { color: var(--stop); border: 1px solid currentColor; }
+.bin-note { color: var(--muted); font-size: 11px; margin-top: 8px; }

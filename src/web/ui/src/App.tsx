@@ -153,6 +153,23 @@ function writeTagged(term: Terminal | null, key: string, text: string, color: st
   term.write(out + SGR.reset);
 }
 
+// Split a target bar's text into argv the way a shell would for the cases that
+// actually come up here: quoted paths and quoted arguments. Not a shell parser
+// (no expansion, no escapes beyond the quote pair) and deliberately so, since
+// anything more elaborate belongs in the launch config's own "args" array.
+function shellSplit(s: string): string[] {
+  const out: string[] = [];
+  let cur = "", q = "";
+  for (const ch of s.trim()) {
+    if (q) { if (ch === q) q = ""; else cur += ch; }
+    else if (ch === '"' || ch === "'") q = ch;
+    else if (ch === " " || ch === "\t") { if (cur) { out.push(cur); cur = ""; } }
+    else cur += ch;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
 // VS Code codicon glyphs (font ships inside monaco; build.sh copies the ttf).
 // Codepoints from monaco's codiconsLibrary.js — stable public API of the font.
 const CI = {
@@ -215,6 +232,12 @@ export default function App() {
   const [showConfig, setShowConfig] = useState(false);
   // Last thing another peer said it was doing, shown briefly in the toolbar.
   const [agentNote, setAgentNote] = useState<{ text: string; at: number } | null>(null);
+  // Target bar: the toolbar's editable projection of config.program + config.args.
+  const [targetText, setTargetText] = useState("");
+  const [targetOpen, setTargetOpen] = useState(false);
+  const targetFocused = useRef(false);
+  const [binInfo, setBinInfo] = useState<any | null>(null);
+  const [showBinInfo, setShowBinInfo] = useState(false);
   const [showInfo, setShowInfo] = useState(false);     // ⓘ session-info popover
   const [configErr, setConfigErr] = useState("");
   const [caps, setCaps] = useState<Record<string, any>>({});
@@ -724,6 +747,54 @@ export default function App() {
 
   // Run = parse the drawer's live JSON and launch it. A live session asks for
   // confirmation, then force-kills and relaunches (server tears down first).
+  // The bar is a projection of the config, so the config wins except while the
+  // user is mid-edit; clobbering someone's half-typed path would be maddening.
+  const targetLabel = [cfg.program || "", ...((cfg.args as string[]) || [])].join(" ").trim();
+  useEffect(() => { if (!targetFocused.current) setTargetText(targetLabel); }, [targetLabel]);
+
+  // Editing the bar edits program+args inside the launch config; every other key
+  // the user set in the Advanced sheet survives untouched.
+  const applyTarget = (text: string) => {
+    const parts = shellSplit(text);
+    if (!parts.length) return;
+    let c: any;
+    try { c = JSON.parse(stripJsonc(cfgTextRef.current) || "{}"); } catch { c = { ...cfg }; }
+    c.program = parts[0];
+    if (parts.length > 1) c.args = parts.slice(1); else delete c.args;
+    cfgTextRef.current = JSON.stringify(c, null, 2);
+    setCfg(c);
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setShowBinInfo(false);
+      setShowConfig(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // The toast is a nudge, not a log: the console keeps every line permanently.
+  useEffect(() => {
+    if (!agentNote) return;
+    const t = setTimeout(() => setAgentNote(null), 6000);
+    return () => clearTimeout(t);
+  }, [agentNote]);
+
+  const loadBinInfo = () => {
+    setShowBinInfo(true);
+    setBinInfo(null);
+    // A server too old for this endpoint answers a plain-text 404, so check the
+    // status before parsing: a raw SyntaxError in the modal explains nothing.
+    fetch("/api/binfo").then(async (r) => {
+      if (!r.ok) throw new Error(r.status === 404
+        ? "this server does not support binary inspection (built before /api/binfo)"
+        : `server returned ${r.status}`);
+      return r.json();
+    }).then(setBinInfo).catch((e) => setBinInfo({ error: e.message || String(e) }));
+  };
+
   const run = () => {
     let config: any = undefined;
     const text = stripJsonc(cfgTextRef.current).trim();  // config dialect is JSONC (launch.json)
@@ -862,7 +933,41 @@ export default function App() {
             localStorage.setItem("dapweb.stopAtMain", e.target.checked ? "1" : "0");
           }} /> stop at main
         </label>
-        <span className="prog" title={cfg.port ? `tcp: ${cfg.host || "127.0.0.1"}:${cfg.port}` : (adapterCmd ? `adapter: ${adapterCmd}` : "")}>{program}</span>
+        <span className="targetbar">
+          <input className="target-input" value={targetText} spellCheck={false}
+                 placeholder="path to a program, plus arguments"
+                 title={cfg.port ? `tcp: ${cfg.host || "127.0.0.1"}:${cfg.port}` : (adapterCmd ? `adapter: ${adapterCmd}` : "")}
+                 onChange={(e) => setTargetText(e.target.value)}
+                 onFocus={() => { targetFocused.current = true; setTargetOpen(true); }}
+                 onBlur={() => { targetFocused.current = false; setTimeout(() => setTargetOpen(false), 120); }}
+                 onKeyDown={(e) => {
+                   if (e.key === "Enter") {
+                     applyTarget(targetText); setTargetOpen(false);
+                     (e.target as HTMLInputElement).blur();
+                     runRef.current?.();
+                   } else if (e.key === "Escape") {
+                     setTargetText(targetLabel); (e.target as HTMLInputElement).blur();
+                   }
+                 }} />
+          {program && (
+            <button className="bin-chip" title="Binary details — format, architecture, debug info"
+                    onMouseDown={(e) => e.preventDefault()} onClick={loadBinInfo}>info</button>
+          )}
+          {targetOpen && cfgHist.length > 0 && (
+            <div className="target-menu">
+              {cfgHist.map((h, i) => {
+                const label = [h.program || "", ...((h.args as string[]) || [])].join(" ").trim();
+                return (
+                  <div key={i} className="target-item"
+                       onMouseDown={(e) => { e.preventDefault(); setTargetText(label); applyTarget(label); setTargetOpen(false); }}>
+                    {h.type && <span className={"hist-type dt-" + h.type}>{h.type}</span>}{label}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </span>
+        {agentNote && <span className="agent-note" title={agentNote.text}>◆ {agentNote.text}</span>}
         <span className={"status " + status.cls}>{status.text}</span>
         {Object.keys(caps).length > 0 && (
           <span className="info-wrap">
@@ -892,6 +997,8 @@ export default function App() {
       </header>
       <main>
         {showConfig ? (
+          <>
+          <div className="drawer-backdrop" onClick={() => setShowConfig(false)} />
           <ConfigDrawer
             config={cfg}
             sessionActive={phase === "running" || phase === "stopped"}
@@ -901,9 +1008,8 @@ export default function App() {
             onRun={run}
             onClose={() => setShowConfig(false)}
           />
-        ) : (
-          <button className="drawer-reopen" title="Show debug target" onClick={() => setShowConfig(true)}><Ico g={CI.chevRight} /></button>
-        )}
+          </>
+        ) : null}
         <div className="editor-col">
           {tabs.length > 1 && (
             <div className="filetabs">
@@ -1046,6 +1152,7 @@ export default function App() {
             onClose={() => setBpEdit(null)}
           />
         )}
+        {showBinInfo && <BinInfoModal info={binInfo} onClose={() => setShowBinInfo(false)} />}
       </main>
       <div className="bottom" style={{ height: bottomH }}>
         <DragBar onResize={(h) => setBottomH(h)} />
@@ -2038,5 +2145,56 @@ function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, locals, f
         </div>
       )}
     </div>
+  );
+}
+
+// Binary details for the current target: format, architecture, and above all
+// whether it carries debug info. A binary built without -g (or stripped) is the
+// most common reason a session runs but shows no source, and nothing else in the
+// UI can tell you that.
+function BinInfoModal({ info, onClose }: { info: any | null; onClose: () => void }) {
+  const rows: [string, string][] = [];
+  if (info && info.exists !== false && !info.error) {
+    const fmt = [info.format, info.class, info.endian && info.endian + "-endian"].filter(Boolean).join(" · ");
+    if (fmt) rows.push(["format", fmt]);
+    if (info.arch) rows.push(["arch", info.arch]);
+    if (info.fileType) rows.push(["type", info.fileType]);
+    if (typeof info.size === "number") rows.push(["size", info.size.toLocaleString() + " bytes"]);
+    rows.push(["symbols", info.stripped ? "stripped" : "present"]);
+    if (info.dsym) rows.push(["dSYM", info.dsym]);
+  }
+  return (
+    <>
+      <div className="modal-backdrop" onClick={onClose} />
+      <div className="modal">
+        <div className="modal-head">
+          <h2>Binary</h2>
+          <button className="drawer-hide" onClick={onClose}>✕</button>
+        </div>
+        <div className="modal-body">
+          {!info && <div className="hint">reading…</div>}
+          {info?.error && <div className="cfg-err">{info.error}</div>}
+          {info && info.exists === false && (
+            <div className="cfg-err">{info.path} does not exist</div>
+          )}
+          {info && info.exists !== false && !info.error && (
+            <>
+              <div className="bin-path">{info.path}</div>
+              <div className={"bin-dwarf " + (info.hasDebugInfo ? "ok" : "bad")}>
+                {info.hasDebugInfo
+                  ? `debug info: ${info.debugInfo}`
+                  : "no debug info — you will get no source or locals. Rebuild with -g."}
+              </div>
+              {rows.map(([k, v]) => (
+                <div key={k} className="info-line"><span className="info-k">{k}</span> {v}</div>
+              ))}
+              {(info.notes || []).map((n: string, i: number) => (
+                <div key={i} className="bin-note">{n}</div>
+              ))}
+            </>
+          )}
+        </div>
+      </div>
+    </>
   );
 }
