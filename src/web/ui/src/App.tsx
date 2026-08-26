@@ -132,6 +132,7 @@ const SGR = {
   dbg: "\x1b[38;5;80m",    // debugger console — cyan
   err: "\x1b[38;5;203m",   // stderr / failures — red
   cmd: "\x1b[2;37m",       // REPL echo — dim
+  agent: "\x1b[38;5;213m", // another peer (dapweb api / an AI agent) — magenta
 };
 // Per-stream begin-of-line flags so a message split across events (or a partial
 // pty line) isn't re-tagged mid-line.
@@ -209,7 +210,11 @@ export default function App() {
   const [bottomH, setBottomH] = useState(240);
   const [asideW, setAsideW] = useState(340);
   const [adapterCmd, setAdapterCmd] = useState("");    // resolved adapter command (ⓘ popover)
-  const [showConfig, setShowConfig] = useState(true);  // open by default; |◂| hides it
+  // Opens only when there is nothing to run; a resolvable target goes straight to
+  // the debug view. The gear reopens it.
+  const [showConfig, setShowConfig] = useState(false);
+  // Last thing another peer said it was doing, shown briefly in the toolbar.
+  const [agentNote, setAgentNote] = useState<{ text: string; at: number } | null>(null);
   const [showInfo, setShowInfo] = useState(false);     // ⓘ session-info popover
   const [configErr, setConfigErr] = useState("");
   const [caps, setCaps] = useState<Record<string, any>>({});
@@ -280,6 +285,10 @@ export default function App() {
     const t = termRef.current;
     if (cls === "err") writeTagged(t, "err", text, SGR.err, "");
     else if (cls === "in") writeTagged(t, "cmd", text, SGR.cmd, "");
+    // Deliberately tagged and coloured unlike anything the debuggee or the
+    // debugger prints: the whole point is that you can tell at a glance the
+    // session moved because someone else moved it.
+    else if (cls === "agent") writeTagged(t, "agent", text, SGR.agent, "◆ ");
     else writeTagged(t, "dbg", text, SGR.dbg, "");
   }, []);
 
@@ -379,6 +388,9 @@ export default function App() {
         // works even before the drawer editor mounts.
         setCfg(m.config || {});
         if (!cfgTextRef.current) cfgTextRef.current = JSON.stringify(m.config || {}, null, 2);
+        // Nothing to run means the config IS the task: open the sheet once. A
+        // server that booted with a target (or restored one) never sees it.
+        if (!m.program) setShowConfig(true);
         // A different sessionId is a genuinely new session (newSession command
         // or server restart) — wipe everything a same-session reconnect would
         // have replayed. A rejoin replay repopulates via bpSync/stopped/etc.
@@ -432,6 +444,13 @@ export default function App() {
         }));
       }
       else if (m.type === "historyChanged") setCfgHist(m.history || []);
+      // Another peer (dapweb api, an agent) announced a command before running
+      // it. Surface it in the console and flash it in the toolbar, so a stop the
+      // user did not ask for is never unexplained.
+      else if (m.type === "activity") {
+        consoleAppend(`${m.text}\n`, "agent");
+        setAgentNote({ text: m.text, at: Date.now() });
+      }
       else if (m.type === "configError") setConfigErr(m.error);
       else if (m.type === "capabilities") { try { setCaps(JSON.parse(m.raw).body || {}); } catch {} }
       else if (m.type === "source") {
