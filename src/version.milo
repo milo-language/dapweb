@@ -3,7 +3,7 @@
 // tag cannot say what it is, which makes bug reports unattributable.
 
 fn versionLine(): string {
-    return "dapweb " + embedFile("../.version").trim()
+    return "dapweb " + @embedFile("../.version").trim()
 }
 
 // Rolling `latest` means re-running the install is the update path; there is no

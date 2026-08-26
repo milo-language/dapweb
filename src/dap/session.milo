@@ -252,15 +252,7 @@ fn findInPath(cmd: &string): Option<string> {
 // Best-effort PATH resolution: the resolved absolute path, or the command
 // unchanged when it isn't found (an explicit `adapter` is honored as-is).
 fn resolveInPath(cmd: &string): string {
-    match findInPath(cmd) {
-        Option.Some(p) => {
-            return p
-        }
-        Option.None => {
-            return cmd.clone()
-        }
-    }
-}
+    return findInPath(cmd) ?? cmd.clone()}
 
 // Resolve a probe command to a spawnable adapter command line, or None if the
 // probe's executable isn't installed.

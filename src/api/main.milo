@@ -209,7 +209,7 @@ pub fn apiMain(argv: Vec<string>): i32 {
         print(p.helpText())
         return 0
     }
-    let cmd = pos[0]
+    let cmd = pos[0].clone()
 
     if cmd == "list" {
         return cmdList()

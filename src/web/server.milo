@@ -212,9 +212,41 @@ fn cloneBp(b: &Bp): Bp {
 // which never bound. Resolve against cwd rather than realpath(): clang records
 // comp_dir + the argument it was given, so joining cwd reproduces it, while
 // realpath() would rewrite /tmp to /private/tmp and stop matching.
+// Collapse "." and ".." lexically. Two absolute paths can denote one file and
+// still differ as strings (".../tests/../examples/x.c"), which would key a second
+// breakpoint on a line that already has one. Lexical, not realpath(): realpath
+// resolves symlinks too, which would rewrite /tmp to /private/tmp and stop
+// matching what the compiler recorded in DWARF.
+fn normalizePath(p: &string): string {
+    var parts: Vec<string> = []
+    for seg in p.split("/") {
+        if seg.len == 0 || seg == "." {
+            continue
+        }
+        if seg == ".." {
+            if parts.len > 0 {
+                let _d = parts.pop()
+            }
+            continue
+        }
+        parts.push(seg.clone())
+    }
+    var out: string = ""
+    for seg in parts {
+        out = out + "/" + seg
+    }
+    if out.len == 0 {
+        return "/"
+    }
+    return out
+}
+
 fn absSourcePath(p: &string): string {
-    if p.len == 0 || p[0] == '/' {
+    if p.len == 0 {
         return p.clone()
+    }
+    if p[0] == '/' {
+        return normalizePath(p)
     }
     var rel = p.clone()
     if rel.len > 2 && rel[0] == '.' && rel[1] == '/' {
@@ -223,7 +255,7 @@ fn absSourcePath(p: &string): string {
     // currentDir() can fail (cwd unlinked); an unresolvable relative path is
     // still better sent as-is than turned into garbage.
     if let Result.Ok(cwd) = currentDir() {
-        return Path.join(cwd, rel)
+        return normalizePath(Path.join(cwd, rel))
     }
     return rel
 }
@@ -2536,25 +2568,25 @@ fn sendHttp(fd: i32, status: i32, contentType: &string, body: &string): void {
 // is the point: a missing asset is a compile error, not a 404 in the browser.
 fn embeddedAsset(p: &string): Option<string> {
     if p == "/index.html" {
-        return Option.Some(embedFile("ui/dist/index.html"))
+        return Option.Some(@embedFile("ui/dist/index.html"))
     }
     if p == "/app.js" {
-        return Option.Some(embedFile("ui/dist/app.js"))
+        return Option.Some(@embedFile("ui/dist/app.js"))
     }
     if p == "/app.css" {
-        return Option.Some(embedFile("ui/dist/app.css"))
+        return Option.Some(@embedFile("ui/dist/app.css"))
     }
     if p == "/editor.worker.js" {
-        return Option.Some(embedFile("ui/dist/editor.worker.js"))
+        return Option.Some(@embedFile("ui/dist/editor.worker.js"))
     }
     if p == "/json.worker.js" {
-        return Option.Some(embedFile("ui/dist/json.worker.js"))
+        return Option.Some(@embedFile("ui/dist/json.worker.js"))
     }
     if p == "/favicon.svg" {
-        return Option.Some(embedFile("ui/dist/favicon.svg"))
+        return Option.Some(@embedFile("ui/dist/favicon.svg"))
     }
     if p == "/og.png" {
-        return Option.Some(embedFile("ui/dist/og.png"))
+        return Option.Some(@embedFile("ui/dist/og.png"))
     }
     return Option.None
 }

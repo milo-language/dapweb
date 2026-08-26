@@ -68,7 +68,7 @@ fn main(): i32 {
         print(parser.helpText())
         return 0
     }
-    let sub = pos[0]
+    let sub = pos[0].clone()
 
     // Hand the subcommand its own argv: [display-name, ...remaining tokens].
     // parseFrom skips argv[0] as the program name, so `dapweb web --port 9`
