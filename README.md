@@ -97,7 +97,7 @@ and come back the next time you debug it, conditions included.
 Click **LAUNCH** to flip it to **ATTACH**. Nobody remembers a pid, so the bar
 lists the running processes and filters as you type — pick one and it fills in:
 
-![the target bar in attach mode](docs/images/attach.png)
+![the target bar in attach mode](docs/images/attach.gif)
 
 A pid works too. The bar writes the key the adapter actually wants (`pid` for
 lldb, `processId` for debugpy and delve), so the config stays a launch.json you
@@ -131,9 +131,7 @@ announced in the debug console *before* they run, and its breakpoints show up in
 your gutter as it sets them — so a program that moves on its own is never
 unexplained:
 
-![an agent driving the session](docs/images/agent-activity.png)
-
-![zoom on the agent announcements](docs/images/agent-activity.gif)
+![an agent driving the session](docs/images/agent-activity.gif)
 
 ```sh
 dapweb api break --line 23 --path examples/nested/main.c
@@ -151,6 +149,10 @@ inline under each source line. Both track the pc, and instruction-level stepping
 appears in the toolbar while they are open.
 
 ![inline disassembly](docs/images/asm-inline.png)
+
+...or side by side, when you want to read a whole function's worth at once:
+
+![disassembly beside the source](docs/images/asm-split.png)
 
 ### Milo
 

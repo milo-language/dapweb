@@ -78,6 +78,37 @@ def annotate(spec):
 
     if "gif" in spec:
         _gif(img, out, regions[spec["gif"].get("focus", 0)]["box"], spec["gif"])
+    if "reveal" in spec:
+        _reveal(img, out, spec["reveal"])
+
+def _reveal(raw, annotated, r):
+    """Cross-fade the plain screenshot into the annotated one, and back.
+
+    A still annotation asks the reader to trust that the dimmed parts were once
+    readable. Fading from the real screenshot makes the callout obviously a
+    highlight OF something rather than a different picture, and looping it means
+    the reader can look at either state for as long as they want.
+    """
+    outw = int(r.get("width", 900))
+    def scaled(im):
+        return im.resize((outw, int(outw * im.height / im.width)), Image.LANCZOS)
+    a, b = scaled(raw), scaled(annotated)
+
+    hold_raw, fade, hold_ann = r.get("hold_raw", 6), r.get("fade", 9), r.get("hold_ann", 22)
+    frames = [a] * hold_raw
+    for i in range(1, fade + 1):
+        t = i / fade
+        frames.append(Image.blend(a, b, t * t * (3 - 2 * t)))   # smoothstep, as above
+    frames += [b] * hold_ann
+    for i in range(1, fade):
+        t = 1 - i / fade
+        frames.append(Image.blend(a, b, t * t * (3 - 2 * t)))
+
+    pal = b.quantize(colors=255, method=Image.MEDIANCUT)
+    frames = [f.quantize(palette=pal, dither=Image.NONE) for f in frames]
+    frames[0].save(r["out"], save_all=True, append_images=frames[1:],
+                   duration=r.get("duration", 90), loop=0, optimize=True)
+    print(f"wrote {r['out']}  ({len(frames)} frames)")
 
 def _gif(raw, annotated, box, g):
     """Zoom from the full annotated frame into one region and back out.
