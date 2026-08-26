@@ -26,7 +26,7 @@ unsigned binary on first run. Re-run the command to update.
 
 Type a path and press Enter; arguments go on the same line, shell-split.
 
-![the target bar in launch mode](docs/images/launch-args.png)
+![the target bar in launch mode](docs/images/launch-args.gif)
 
 Click **LAUNCH** to flip to **ATTACH** and pick a running process by name.
 

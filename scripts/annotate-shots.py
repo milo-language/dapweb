@@ -94,21 +94,29 @@ def _reveal(raw, annotated, r):
         return im.resize((outw, int(outw * im.height / im.width)), Image.LANCZOS)
     a, b = scaled(raw), scaled(annotated)
 
-    hold_raw, fade, hold_ann = r.get("hold_raw", 6), r.get("fade", 9), r.get("hold_ann", 22)
-    frames = [a] * hold_raw
+    # Hold with a long DURATION on one frame, never by repeating a frame: GIF
+    # optimisation drops consecutive identical frames, which silently turned a
+    # 2.5s hold into three frames and made the whole thing pulse without ever
+    # resting long enough to read the labels.
+    fade = r.get("fade", 9)
+    step = r.get("step", 60)
+    frames, durations = [a], [r.get("hold_raw_ms", 1400)]
     for i in range(1, fade + 1):
         t = i / fade
         frames.append(Image.blend(a, b, t * t * (3 - 2 * t)))   # smoothstep, as above
-    frames += [b] * hold_ann
+        durations.append(step)
+    durations[-1] = r.get("hold_ann_ms", 2800)                  # rest on the callout
     for i in range(1, fade):
         t = 1 - i / fade
         frames.append(Image.blend(a, b, t * t * (3 - 2 * t)))
+        durations.append(step)
 
     pal = b.quantize(colors=255, method=Image.MEDIANCUT)
     frames = [f.quantize(palette=pal, dither=Image.NONE) for f in frames]
     frames[0].save(r["out"], save_all=True, append_images=frames[1:],
-                   duration=r.get("duration", 90), loop=0, optimize=True)
-    print(f"wrote {r['out']}  ({len(frames)} frames)")
+                   duration=durations, loop=0, optimize=True)
+    print(f"wrote {r['out']}  ({len(frames)} frames, "
+          f"{sum(durations)/1000:.1f}s loop)")
 
 def _gif(raw, annotated, box, g):
     """Zoom from the full annotated frame into one region and back out.
