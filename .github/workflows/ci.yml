@@ -50,12 +50,23 @@ jobs:
       - name: install openssl headers
         run: sudo apt-get install -y libssl-dev
 
+      # The UI bundle needs its own deps; scripts/build.sh builds the bundle and
+      # then the binary that embeds it.
+      - name: install ui deps
+        working-directory: src/web/ui
+        run: bun install --frozen-lockfile
+
       - name: build
         run: MILO=.milo-src/src/main.ts scripts/build.sh
 
       - name: gates
         run: scripts/test.sh
 
+      # Best-effort: a failure before the suites run leaves no logs, and the glob
+      # failing to match must not add a second, misleading error to the run.
       - name: server logs on failure
         if: failure()
-        run: for f in /tmp/dapweb_test_*.log; do echo "── $f"; tail -40 "$f"; done
+        run: |
+          shopt -s nullglob
+          for f in /tmp/dapweb_test_*.log; do echo "── $f"; tail -40 "$f"; done
+          exit 0

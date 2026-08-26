@@ -31,10 +31,13 @@ run() {
 }
 
 what="${1:-all}"
+# UI FIRST. The binary embeds src/web/ui/dist via @embedFile, which is resolved at
+# compile time, so building the binary against a missing (or stale) bundle either
+# fails outright on a clean checkout or silently ships yesterday's UI.
+case "$what" in
+    all|release|ui)  run src/web/ui/build.sh ;;
+esac
 case "$what" in
     all|bin)  run $MILO_RUN build src/main.milo --debug -o dapweb ;;
     release)  run $MILO_RUN build src/main.milo -o dapweb ;;
-esac
-case "$what" in
-    all|release|ui)  run src/web/ui/build.sh ;;
 esac
