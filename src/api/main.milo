@@ -14,10 +14,13 @@ from "std/argparse" import {
     ArgParser
 }
 from "std/os" import {
-    exit
+    exit, getpid
 }
 from "std/json" import {
     Json
+}
+from "std/env" import {
+    Env
 }
 from "std/time" import {
     epochMillis
@@ -67,11 +70,28 @@ fn cmdList(): i32 {
     return 0
 }
 
+// Who the server should name when it narrates this command to the humans
+// watching the UI. DAPWEB_AGENT wins; CLAUDECODE is set by Claude Code itself, so
+// honouring it is a statement of fact rather than a guess.
+fn agentLabel(): string {
+    if let Option.Some(a) = Env.get("DAPWEB_AGENT") {
+        if a.len > 0 {
+            return a
+        }
+    }
+    if let Option.Some(c) = Env.get("CLAUDECODE") {
+        if c.len > 0 {
+            return "claude"
+        }
+    }
+    return "agent"
+}
+
 // POST a command body and print the reply. `awaitType` empty ⇒ fire-and-forget.
 fn postCmd(port: i64, body: string, awaitType: string, timeoutMs: i64): i32 {
-    var path = "/api/cmd"
+    var path = $"/api/cmd?agent={agentLabel()}&pid={getpid() as i64}"
     if awaitType.len > 0 {
-        path = $"/api/cmd?await={awaitType}&timeout={timeoutMs}"
+        path = path + $"&await={awaitType}&timeout={timeoutMs}"
     }
     match httpRequest(port, "POST", path, body) {
         Result.Ok(reply) => {

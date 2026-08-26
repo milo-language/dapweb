@@ -158,7 +158,7 @@ var gNextClient: i64 = 1
 var gBps: Vec<Bp> = [] // shared breakpoint set (was per-connection before the shared session)
 var gSessionId: string = "" // uuid in hello — a reloaded tab detects same-vs-new session
 var gPeers: i64 = 0 // attached WS peers (browser tabs; `api` callers are one-shot HTTP)
-var gLastDetachMs: i64 = 0 // epochMillis when the last peer left — idle-ttl clock
+var gLastActivityMs: i64 = 0 // epochMillis of the last peer event OR api call — idle-ttl clock
 var gIdleTtlSecs: i64 = 0 // --idle-ttl; 0 = never reap
 var gTickWr: i32 = -1 // reaper pipe write end (ticker OS thread → green task)
 var gTickUsecs: i64 = 0
@@ -200,6 +200,29 @@ fn cloneBp(b: &Bp): Bp {
         logMessage: b.logMessage.clone(),
         enabled: b.enabled,
     }
+}
+
+// Breakpoints are keyed on (path, line) and lldb binds on the FULL path, so the
+// one spelling that works is the absolute one the compiler recorded. A client can
+// send either: the UI keys on `--source`/hello before the first stop and on the
+// frame's DWARF path after it, which used to make one line two breakpoints, one of
+// which never bound. Resolve against cwd rather than realpath(): clang records
+// comp_dir + the argument it was given, so joining cwd reproduces it, while
+// realpath() would rewrite /tmp to /private/tmp and stop matching.
+fn absSourcePath(p: &string): string {
+    if p.len == 0 || p[0] == '/' {
+        return p.clone()
+    }
+    var rel = p.clone()
+    if rel.len > 2 && rel[0] == '.' && rel[1] == '/' {
+        rel = rel.substr(2, rel.len)
+    }
+    // currentDir() can fail (cwd unlinked); an unresolvable relative path is
+    // still better sent as-is than turned into garbage.
+    if let Result.Ok(cwd) = currentDir() {
+        return Path.join(cwd, rel)
+    }
+    return rel
 }
 
 fn bpPaths(bps: &Vec<Bp>, fallback: &string): Vec<string> {
@@ -900,6 +923,92 @@ fn loadHistory(): void {
     }
 }
 
+// Breakpoints outlive the server process. Keyed by PROGRAM path, not the full
+// history identity tuple: changing args or env does not change which lines you
+// care about, so those edits must not throw your breakpoints away.
+fn bpsFilePath(): string {
+    return histDir() + "/breakpoints.json"
+}
+
+fn bpsJson(bps: &Vec<Bp>): string {
+    var arr = Json.arr()
+    for b in bps {
+        arr = arr.raw(Json.obj()
+            .str("path", b.path.clone()).int("line", b.line)
+            .str("condition", b.condition.clone())
+            .str("hitCondition", b.hitCondition.clone())
+            .str("logMessage", b.logMessage.clone())
+            .bool("enabled", b.enabled).build())
+    }
+    return arr.build()
+}
+
+// Rewrite this program's entry, leaving every other program's set intact.
+fn persistBps(): void {
+    if binPath.len == 0 {
+        return
+    }
+    var out = Json.obj()
+    if let Result.Ok(s2) = readFile(bpsFilePath()) {
+        if let Result.Ok(doc) = Json.parse(s2) {
+            if doc.isObject() {
+                for k in doc.keys() {
+                    if k != binPath {
+                        if let Option.Some(v) = doc.get(k) {
+                            out = out.raw(k.clone(), v.rawStr())
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out = out.raw(binPath.clone(), bpsJson(gBps))
+    ensureDir(histDir())
+    let _r = writeFile(bpsFilePath(), out.build())
+}
+
+// Load this program's saved set. Missing/corrupt file leaves gBps untouched.
+fn loadBps(): void {
+    if binPath.len == 0 {
+        return
+    }
+    let f = bpsFilePath()
+    if !pathExists(f) {
+        return
+    }
+    var restored: Vec<Bp> = []
+    if let Result.Ok(s2) = readFile(f) {
+        if let Result.Ok(doc) = Json.parse(s2) {
+            if let Option.Some(arr) = doc.get(binPath) {
+                if arr.isArray() {
+                    let n = arr.len()
+                    var i: i64 = 0
+                    while i < n {
+                        if let Option.Some(e) = arr.at(i) {
+                            let pth = e.str("path") ?? ""
+                            let ln = e.i64("line") ?? (0 as i64)
+                            if pth.len > 0 && ln > 0 {
+                                restored.push(Bp {
+                                    path: absSourcePath(pth), line: ln,
+                                    condition: e.str("condition") ?? "",
+                                    hitCondition: e.str("hitCondition") ?? "",
+                                    logMessage: e.str("logMessage") ?? "",
+                                    enabled: e.bool("enabled") ?? true,
+                                })
+                            }
+                        }
+                        i = i + 1
+                    }
+                }
+            }
+        }
+    }
+    if restored.len > 0 {
+        gBps = restored
+        logEvent("breakpoints", $"restored {gBps.len} for {binPath}")
+    }
+}
+
 fn persistHistory(): void {
     ensureDir(histDir())
     let _r = writeFile(histFilePath(), gHistory)
@@ -1577,13 +1686,66 @@ fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): b
 // One client command (the `{"cmd": ...}` JSON the browser sends over WS).
 // Factored out of the WS reader so the HTTP API can drive the exact same verbs:
 // one vocabulary, so `dapweb api` cannot drift from what the UI does.
-fn dispatchClientCmd(payload: string, peerKind: string, bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): void {
+// One human-readable line for what a command is about to do. Only the verbs an
+// onlooker would care about get spelled out; anything else falls back to its name.
+fn activityText(c: &string, payload: &string): string {
+    if c == "run" {
+        return "launch the program"
+    }
+    if c == "continue" {
+        return "continue"
+    }
+    if c == "pause" {
+        return "pause the program"
+    }
+    if c == "kill" {
+        return "terminate the program"
+    }
+    if c == "restart" {
+        return "restart the program"
+    }
+    if c == "stepOver" || c == "stepIn" || c == "stepOut" {
+        return c.clone()
+    }
+    if c == "evaluate" {
+        return $"evaluate `{jStr(payload, "expr")}`"
+    }
+    if c == "setBreakpoint" {
+        return $"set a breakpoint at line {jI64(payload, "line", 0 as i64)}"
+    }
+    if c == "clearBreakpoint" {
+        return $"clear the breakpoint at line {jI64(payload, "line", 0 as i64)}"
+    }
+    if c == "setVar" {
+        return $"set {jStr(payload, "name")} = {jStr(payload, "value")}"
+    }
+    if c == "setConfig" {
+        return "change the debug target"
+    }
+    if c == "newSession" {
+        return "reset the session"
+    }
+    return c.clone()
+}
+
+fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): void {
     let c = jStr(payload, "cmd")
+    // A browser peer's actions are self-evident to whoever performed them; an
+    // agent's are not. Announce before acting, so the human watching the UI is
+    // never surprised by a program that moves on its own.
+    if peerKind != "browser" {
+        let who = peerLabel
+        let what = activityText(c, payload)
+        logEvent("agent", $"{who} is attempting to {what}")
+        wsPush(bus, busWakeWr, Json.obj().str("type", "activity")
+            .str("peer", peerKind.clone()).str("who", who.clone()).str("cmd", c.clone())
+            .str("text", $"{who} is attempting to {what}").build())
+    }
     if c == "setBreakpoint" || c == "clearBreakpoint" {
         let line = jI64(payload, "line", 0 as i64)
-        var path = jStr(payload, "path")
+        var path = absSourcePath(jStr(payload, "path"))
         if path.len == 0 {
-            path = srcPath.clone()
+            path = absSourcePath(srcPath)
         }
         // Upsert: drop any existing bp at (path, line), then re-add for
         // "set" (a condition edit is a set on an existing line).
@@ -1605,6 +1767,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, bus: &Channel<string>, b
             }
             )
         }
+        persistBps()
         wsPush(bus, busWakeWr, bpAckMsg(line, c == "setBreakpoint"))
         if gStarted && gDapIn >= 0 {
             gOddSeq = gOddSeq + 2
@@ -1644,6 +1807,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, bus: &Channel<string>, b
                 cfgErr = applyConfig(cfgRaw, "")
                 if cfgErr.len == 0 {
                     logEvent("target changed", $"{binPath}  (by {peerKind} peer)")
+                    loadBps()
                     wsPush(bus, busWakeWr, helloMsg())
                     if srcPath.len > 0 {
                         wsPush(bus, busWakeWr, sourceMsg(srcPath))
@@ -1899,6 +2063,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, bus: &Channel<string>, b
                 wsPush(bus, busWakeWr, configErrMsg(err))
             } else {
                 logEvent("target changed", $"{binPath}  (by {peerKind} peer)")
+                    loadBps()
                 wsPush(bus, busWakeWr, helloMsg())
                 if srcPath.len > 0 {
                     wsPush(bus, busWakeWr, sourceMsg(srcPath))
@@ -1941,6 +2106,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, bus: &Channel<string>, b
             sendReqFd(gDapIn, gOddSeq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
         }
         gBps = []
+        persistBps()
         gStopMsg = ""
         gThreadsMsg = ""
         gRegionsMsg = ""
@@ -2030,6 +2196,21 @@ fn apiStateJson(): string {
     return b.build()
 }
 
+// Display name for an api caller: ?agent=<label>&pid=<n>, both optional. Identity
+// rides the query string so the {"cmd":...} body stays exactly what the browser
+// speaks and cannot drift from it.
+fn apiWho(query: &string): string {
+    var who = queryParam(query, "agent")
+    if who.len == 0 {
+        who = "agent"
+    }
+    let apid = queryParam(query, "pid")
+    if apid.len > 0 {
+        who = $"{who} (pid {apid})"
+    }
+    return who
+}
+
 // Value of `key` in a raw query string ("a=1&b=2"); "" when absent.
 fn queryParam(query: &string, key: &string): string {
     var i: i64 = 0
@@ -2055,9 +2236,12 @@ fn queryParam(query: &string, key: &string): string {
 // Run one command and, when `awaitType` is set, block until a broadcast of that
 // type arrives (or the deadline passes). Registering as a Sink first means no
 // reply can slip through between dispatch and listening.
-fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): string {
+fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): string {
+    // An agent driving the session IS activity: without this an --idle-ttl server
+    // reaps the debuggee out from under a caller that has no WS peer holding it.
+    gLastActivityMs = epochMillis()
     if awaitType.len == 0 {
-        dispatchClientCmd(body, "api", bus, busWakeWr, pendCh)
+        dispatchClientCmd(body, "api", who, bus, busWakeWr, pendCh)
         return Json.obj().bool("ok", true).build()
     }
     let ch = Channel<string>.new(256)!
@@ -2074,15 +2258,23 @@ fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, bus: &Channel<stri
     unsafe {
         let _w = write(busWakeWr, one as *u8, 1)
     }
-    dispatchClientCmd(body, "api", bus, busWakeWr, pendCh)
+    dispatchClientCmd(body, "api", who, bus, busWakeWr, pendCh)
 
     let deadline = epochMillis() + timeoutMs
     var out: string = ""
     while epochMillis() < deadline {
         match ch.tryRecv() {
             Option.Some(m) => {
-                if jStr(m, "type") == awaitType {
+                let mt = jStr(m, "type")
+                if mt == awaitType {
                     out = m.clone()
+                    break
+                }
+                // A rejected command never produces the awaited reply, so return
+                // the refusal rather than burning the caller's whole timeout and
+                // then reporting a useless {"error":"timeout"}.
+                if mt == "configError" {
+                    out = Json.obj().bool("ok", false).str("error", jStr(m, "error")).build()
                     break
                 }
             }
@@ -2094,6 +2286,10 @@ fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, bus: &Channel<stri
     sinkUnregister(clientId)
     unsafe {
         let _w2 = write(busWakeWr, one as *u8, 1)
+        // wake[0] is never read here (the await polls tryRecv), and leaving it
+        // open leaked one descriptor per api call: an agent stepping in a loop
+        // walked the server into EMFILE.
+        close(wake[0])
     }
     if out.len == 0 {
         return Json.obj().bool("ok", false).str("error", "timeout").str("awaited", awaitType).build()
@@ -2173,7 +2369,7 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, busWakeWr:
             }
         }
 
-        dispatchClientCmd(payload.clone(), peerKind.clone(), bus, busWakeWr, pendCh)
+        dispatchClientCmd(payload.clone(), peerKind.clone(), peerKind.clone(), bus, busWakeWr, pendCh)
     }
 
     // Leave the shared session; sinkUnregister closes our wake fd.
@@ -2182,7 +2378,7 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, busWakeWr:
         let _w2 = write(busWakeWr, one as *u8, 1)
     }
     gPeers = gPeers - 1
-    gLastDetachMs = epochMillis()
+    gLastActivityMs = epochMillis()
     logEvent("peer disconnected", $"{peerKind}  {peerCountStr()}")
 }
 
@@ -2220,7 +2416,7 @@ fn reaperLoop(tickRd: i32, pendCh: Channel<Pending>): void {
         if !gStarted || gPeers > 0 || gDapIn < 0 {
             continue
         }
-        if epochMillis() - gLastDetachMs < gIdleTtlSecs * 1000 {
+        if epochMillis() - gLastActivityMs < gIdleTtlSecs * 1000 {
             continue
         }
         logEvent("session idle", $"no peers for {gIdleTtlSecs}s — terminating debuggee")
@@ -2580,7 +2776,7 @@ fn handleConnection(fd: i32, bus: Channel<string>, busWakeWr: i32, pendCh: Chann
             if timeoutMs <= 0 {
                 timeoutMs = 5000
             }
-            let reply = apiRunCmd(body, queryParam(apiQuery, "await"), timeoutMs, bus, busWakeWr, pendCh)
+            let reply = apiRunCmd(body, queryParam(apiQuery, "await"), timeoutMs, apiWho(apiQuery), bus, busWakeWr, pendCh)
             sendHttp(fd, 200, "application/json", reply)
             close(fd)
             return
@@ -2744,7 +2940,7 @@ pub fn webMain(argv: Vec<string>): i32 {
     gDapPort = 0
     gSessionId = Uuid.v4().toString()
     gPeers = 0
-    gLastDetachMs = epochMillis()
+    gLastActivityMs = epochMillis()
     gIdleTtlSecs = args.getI64("idle-ttl")
 
     // Apply a --launch config through the same path as every other config
@@ -2773,6 +2969,9 @@ pub fn webMain(argv: Vec<string>): i32 {
             }
         }
     }
+    // Breakpoints come back only once the target is settled — they are keyed by
+    // program, so this has to follow --program/--launch and the history restore.
+    loadBps()
     let bus = Channel<string>.new(1024)!
     let pendCh = Channel<Pending>.new(64)!
     var busWake: [i32; 2] = [0; 2]
