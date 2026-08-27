@@ -110,10 +110,28 @@ jobs:
         with:
           merge-multiple: true
       - run: ls -lh dapweb-*.tar.gz
+
+      - name: stamp release identity
+        id: stamp
+        run: |
+          echo "sha=$(printf '%s' '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      # GitHub stamps published_at once, on the draft->published transition, and
+      # never on update. A rolling `latest` tag is only ever updated after the
+      # first push, so the releases page kept reporting the July date next to
+      # binaries built today. Deleting the release first makes the next create a
+      # real publish. The tag ref survives (action-gh-release re-points it), and
+      # the install URL 404s for the few seconds in between.
+      - name: delete the previous rolling release
+        run: gh release delete latest --yes -R "$GITHUB_REPOSITORY" || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: Latest Build
+          name: Latest Build ${{ steps.stamp.outputs.sha }} (${{ steps.stamp.outputs.date }})
           body: |
             Rolling release from the latest passing commit on main.
 
