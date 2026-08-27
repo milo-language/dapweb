@@ -1,0 +1,117 @@
+[
+ {
+  "out": "docs/images/session.gif",
+  "width": 1100,
+  "label_size": 30,
+  "hold_ms": 2900,
+  "fade": 4,
+  "step_ms": 60,
+  "steps": [
+   {
+    "src": "docs/shots/01-target.jpg",
+    "regions": [
+     {
+      "box": [
+       104,
+       5,
+       415,
+       32
+      ],
+      "label": "point it at a binary",
+      "side": "below"
+     }
+    ]
+   },
+   {
+    "src": "docs/shots/02-breakpoint.jpg",
+    "regions": [
+     {
+      "box": [
+       2,
+       443,
+       100,
+       21
+      ],
+      "label": "click the gutter",
+      "side": "below"
+     }
+    ]
+   },
+   {
+    "src": "docs/shots/03-run.jpg",
+    "regions": [
+     {
+      "box": [
+       507,
+       5,
+       152,
+       62
+      ],
+      "label": "press Run",
+      "side": "below"
+     }
+    ]
+   },
+   {
+    "src": "docs/shots/04-stopped.jpg",
+    "regions": [
+     {
+      "box": [
+       2,
+       470,
+       830,
+       22
+      ],
+      "label": "it stops on your line",
+      "side": "below"
+     }
+    ]
+   },
+   {
+    "src": "docs/shots/05-locals.jpg",
+    "regions": [
+     {
+      "box": [
+       845,
+       288,
+       338,
+       138
+      ],
+      "label": "expand a local",
+      "side": "below"
+     }
+    ]
+   },
+   {
+    "src": "docs/shots/06-eval.jpg",
+    "regions": [
+     {
+      "box": [
+       4,
+       858,
+       430,
+       32
+      ],
+      "label": "evaluate in the stop frame",
+      "side": "above"
+     }
+    ]
+   },
+   {
+    "src": "docs/shots/07-continue.jpg",
+    "regions": [
+     {
+      "box": [
+       545,
+       5,
+       80,
+       62
+      ],
+      "label": "continue",
+      "side": "below"
+     }
+    ]
+   }
+  ]
+ }
+]

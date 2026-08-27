@@ -20,6 +20,7 @@ The spec is JSON so the call sites stay readable:
      "gif": {"out": "docs/images/x.gif", "focus": 0}}
 """
 import json
+import re
 import sys
 from PIL import Image, ImageDraw, ImageFont
 
@@ -163,6 +164,96 @@ def _gif(raw, annotated, box, g):
                    duration=g.get("duration", 90), loop=0, optimize=True)
     print(f"wrote {g['out']}  ({len(frames)} frames)")
 
+# ── side-by-side: a terminal transcript beside the browser it is driving ──
+
+TERM_BG = (11, 14, 20)
+TERM_FG = (201, 209, 217)
+TERM_KEY = (121, 192, 255)
+TERM_STR = (165, 214, 255)
+TERM_NUM = (242, 204, 96)
+TERM_PUNCT = (110, 118, 129)
+TERM_PROMPT = (63, 185, 80)
+
+# Spans of one JSON line, as (text, color). Keys and values get different colors
+# for the same reason the UI highlights them: the reader is meant to match
+# "sum": "42" against the locals pane next to it, not to read a wall of text.
+def _json_spans(line):
+    out, i = [], 0
+    for m in re.finditer(r'"(?:[^"\\]|\\.)*"(\s*:)?|-?\d+(?:\.\d+)?', line):
+        if m.start() > i:
+            out.append((line[i:m.start()], TERM_PUNCT))
+        tok = m.group(0)
+        if tok.startswith('"'):
+            out.append((tok, TERM_KEY if m.group(1) else TERM_STR))
+        else:
+            out.append((tok, TERM_NUM))
+        i = m.end()
+    if i < len(line):
+        out.append((line[i:], TERM_PUNCT))
+    return out or [(line, TERM_FG)]
+
+def _terminal(lines, font, width, height, pad, line_h):
+    img = Image.new("RGB", (width, height), TERM_BG)
+    d = ImageDraw.Draw(img)
+    y = pad
+    for line in lines:
+        if line.startswith("$ "):
+            d.text((pad, y), "$", font=font, fill=TERM_PROMPT)
+            w = d.textlength("$ ", font=font)
+            d.text((pad + w, y), line[2:], font=font, fill=TERM_FG)
+        else:
+            x = pad
+            for text, color in _json_spans(line):
+                d.text((x, y), text, font=font, fill=color)
+                x += d.textlength(text, font=font)
+        y += line_h
+    return img
+
+def pair(spec):
+    """A terminal transcript and the browser tab it drives, side by side.
+
+    The claim "an agent and your tab share one session" is not something a
+    screenshot of either half can make: the picture has to show the command and
+    the window at the same moment, with the same values in both.
+    """
+    shot = Image.open(spec["shot"]).convert("RGB")
+    lines = open(spec["transcript"]).read().rstrip("\n").split("\n")
+    if "command" in spec:
+        lines = ["$ " + spec["command"], ""] + lines
+
+    H = shot.height
+    pad = int(spec.get("pad", 26))
+    line_h = (H - 2 * pad) / max(len(lines), 1)
+    size = int(line_h * spec.get("line_ratio", 0.74))
+    font = _font(size)
+    probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    text_w = max(probe.textlength(l, font=font) for l in lines)
+    term_w = int(text_w) + 2 * pad
+
+    cap_font = _font(int(spec.get("label_size", 30)))
+    cap_h = cap_font.size + 2 * PAD + 14
+    gap = int(spec.get("gap", 24))
+    out = Image.new("RGB", (term_w + gap + shot.width, H + cap_h), (13, 17, 23))
+    out.paste(_terminal(lines, font, term_w, H, pad, line_h), (0, cap_h))
+    out.paste(shot, (term_w + gap, cap_h))
+
+    d = ImageDraw.Draw(out)
+    # Outlines in FINAL-image coordinates, tying a value on the left to the same
+    # value on the right. Without them a reader sees two dark rectangles and has
+    # to hunt for the correspondence the picture exists to make.
+    for box in spec.get("boxes", []):
+        x, y, w, h = box
+        d.rounded_rectangle([x - 2, y - 2, x + w + 2, y + h + 2],
+                            radius=RADIUS, outline=ACCENT, width=3)
+    for x, label in ((0, spec["left_label"]), (term_w + gap, spec["right_label"])):
+        tw = d.textlength(label, font=cap_font)
+        d.rounded_rectangle([x, 0, x + tw + 2 * PAD, cap_font.size + 2 * PAD],
+                            radius=6, fill=ACCENT)
+        d.text((x + PAD, PAD - 1), label, font=cap_font, fill=(20, 12, 20))
+
+    out.save(spec["out"])
+    print(f"wrote {spec['out']}  ({out.width}x{out.height})")
+
 def story(spec):
     """One GIF walking a real session: each step is a screenshot with the control
     you press called out, held long enough to read, cross-fading to the next.
@@ -204,7 +295,9 @@ if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit(__doc__)
     for spec in json.load(open(sys.argv[1])):
-        if "steps" in spec:
+        if "shot" in spec:
+            pair(spec)
+        elif "steps" in spec:
             story(spec)
         else:
             annotate(spec)
