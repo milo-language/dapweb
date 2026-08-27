@@ -15,8 +15,12 @@ type Watch = { expr: string; value: string | null };
 type HoverInfo = { value: string; children?: HoverVar[] };
 
 let ws: WebSocket | null = null;
+// Set by the App's ws effect: send() lives at module scope but a dropped
+// command needs to say so in the console, which only the component can reach.
+let onSendWhileDead: (() => void) | null = null;
 function send(obj: any) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+  else onSendWhileDead?.();
 }
 
 let evalSeq = 0;
@@ -207,6 +211,9 @@ export default function App() {
   // Anything that is guidance rather than state belongs in the console, where it
   // scrolls with the session instead of holding a strip of chrome forever.
   const [status, setStatus] = useState({ text: "connecting to the session…", short: "connecting", cls: "" });
+  // Offline gets more than the status pill: a banner, because every control in
+  // the app is a silent no-op until the socket comes back.
+  const [offline, setOffline] = useState(false);
   const [program, setProgram] = useState("");
   const [srcPath, setSrcPath] = useState("");   // configured main source (hello)
   const [viewPath, setViewPath] = useState(""); // file currently displayed
@@ -413,14 +420,21 @@ export default function App() {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const connect = () => {
     ws = new WebSocket(`ws://${location.host}/ws`);
-    ws.onopen = () => { retries = 0; setStatus({ text: "ready — set breakpoints, then Run", short: "ready", cls: "" }); };
+    ws.onopen = () => {
+      if (retries > 0) consoleAppend("reconnected to the dapweb server\n");
+      retries = 0; setOffline(false);
+      setStatus({ text: "ready — set breakpoints, then Run", short: "ready", cls: "" });
+    };
     // The server session survives disconnects and replays full state on
     // rejoin, so a dropped socket is always worth retrying.
     ws.onclose = () => {
       if (gone) return;
       const delay = Math.min(500 * 2 ** retries, 5000);
+      // Once per outage, not per retry: the banner covers the ongoing state.
+      if (retries === 0) consoleAppend("lost connection to the dapweb server, reconnecting…\n", "err");
       retries++;
-      setStatus({ text: "disconnected — reconnecting…", short: "offline", cls: "warn" });
+      setOffline(true);
+      setStatus({ text: "disconnected — reconnecting…", short: "offline", cls: "offline" });
       timer = setTimeout(connect, delay);
     };
     ws.onmessage = (ev) => {
@@ -688,7 +702,15 @@ export default function App() {
     };
     };
     connect();
-    return () => { gone = true; clearTimeout(timer); ws?.close(); };
+    // Throttled: a burst of clicks (or hover evals) while down is one line.
+    let lastDrop = 0;
+    onSendWhileDead = () => {
+      const now = Date.now();
+      if (now - lastDrop < 2000) return;
+      lastDrop = now;
+      consoleAppend("offline: command not sent, still reconnecting…\n", "err");
+    };
+    return () => { gone = true; clearTimeout(timer); onSendWhileDead = null; ws?.close(); };
   }, []);
 
   // Default exception filters on once when capabilities first arrive.
@@ -1141,6 +1163,7 @@ export default function App() {
           </>
         )}
       </header>
+      {offline && <div className="offline-banner">disconnected from the dapweb server: nothing you click will reach the session until it reconnects</div>}
       <main>
         {showConfig ? (
           <>

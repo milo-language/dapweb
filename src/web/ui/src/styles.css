@@ -85,6 +85,16 @@ header .prog { color: var(--muted); font-size: 11px; margin-left: 8px; }
 .status.running { color: var(--accent); }
 .status.warn { color: var(--stop); }
 .status.done { color: var(--ok); }
+/* Offline makes every control a no-op, so it is the one state that gets to be
+   loud: pulsing red pill, plus a banner under the header (rendered by App). */
+.status.offline { color: var(--bp); font-weight: 600; }
+.status.offline::before { animation: offline-pulse 1s ease-in-out infinite; }
+@keyframes offline-pulse { 50% { opacity: 0.15; } }
+.offline-banner {
+  flex: none; text-align: center; font-size: 12px; padding: 4px 10px;
+  color: var(--bp); background: rgba(248,81,73,0.14);
+  border-bottom: 1px solid rgba(248,81,73,0.4);
+}
 button {
   background: #21262d; color: var(--fg); border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 11px; cursor: pointer; font: inherit;
