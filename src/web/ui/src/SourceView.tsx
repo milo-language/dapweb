@@ -216,26 +216,51 @@ monaco.languages.registerHoverProvider("asm", {
   },
 });
 
-// Enriched hover payload from the session: the value, plus one level of members
-// for aggregates/pointers.
-type HoverInfo = { value: string; children?: { name: string; value: string; type?: string }[] };
+// Enriched hover payload from the session: the value, plus expanded members for
+// aggregates/pointers — nested, so a struct of structs reads as a tree.
+export type HoverVar = { name: string; value: string; type?: string; children?: HoverVar[] };
+type HoverInfo = { value: string; children?: HoverVar[] };
 
 const mdCell = (s: string) => (s ?? "").replace(/\|/g, "\\|");
-// Build the hover markdown: a `name  value` header, then a member table when the
-// value expands (struct fields, array elements, a pointer's target).
+const MAX_ROWS = 16;
+// Nesting is spelled with indentation rather than by flattening to `[0].origin.x`
+// paths: what a hover over `Shape[2]` is being asked is "what is inside it", and
+// a list of paths makes the reader rebuild the shape in their head — which is the
+// tree they can already see in Locals.
+function hoverRows(kids: HoverVar[], depth: number, out: string[]): void {
+  for (const c of kids) {
+    if (out.length >= MAX_ROWS) return;
+    // A nested aggregate reports its type as the "value" (Shape → Shape). When we
+    // expanded it, the rows below say what it holds and the repeat adds nothing.
+    const agg = !c.value || c.value === c.type;
+    const v = agg ? (c.children?.length ? "" : "{…}") : mdCell(c.value);
+    const pad = "&nbsp;".repeat(depth * 3);
+    out.push(`| ${pad}\`${c.name}\`${c.type ? " `" + c.type + "`" : ""} | ${v} |`);
+    if (c.children?.length) hoverRows(c.children, depth + 1, out);
+  }
+}
+const countVars = (ks: HoverVar[]): number =>
+  ks.reduce((n, k) => n + 1 + countVars(k.children ?? []), 0);
+// Build the hover markdown: a `name  value` header, then the member tree.
 function fmtHover(name: string, info: HoverInfo): string {
   const head = `**${name}** &nbsp; \`${info.value}\``;
   const kids = info.children ?? [];
   if (!kids.length) return head;
-  const rows = kids.slice(0, 12).map((c) => {
-    // A nested aggregate reports its type as the "value" (Shape → Shape); show
-    // {…} instead of the redundant type name.
-    const v = !c.value || c.value === c.type ? "{…}" : mdCell(c.value);
-    return `| \`${c.name}\`${c.type ? " `" + c.type + "`" : ""} | ${v} |`;
-  });
-  const more = kids.length > 12 ? `\n\n_… ${kids.length - 12} more_` : "";
-  return `${head}\n\n| | |\n|:--|:--|\n${rows.join("\n")}${more}`;
+  const out: string[] = [];
+  hoverRows(kids, 0, out);
+  const total = countVars(kids);
+  const more = total > out.length ? `\n\n_… ${total - out.length} more_` : "";
+  return `${head}\n\n| | |\n|:--|:--|\n${out.join("\n")}${more}`;
 }
+
+// Words that may precede an identifier without making it a declarator. Anything
+// else immediately before one (`int`, `Point`, `unsigned`, `size_t`, `static`)
+// means the brackets that follow are an array SIZE, not a subscript.
+const NOT_A_TYPE = new Set([
+  "return", "if", "else", "while", "for", "do", "switch", "case", "goto",
+  "sizeof", "new", "delete", "and", "or", "not", "in", "is", "assert", "yield",
+  "await", "elif", "lambda", "raise", "del", "with", "as", "import", "from",
+]);
 
 // The whole lvalue expression the cursor sits in: a base identifier plus its
 // full chain of `[..]` / `.field` / `->field` accesses. Hover anywhere inside
@@ -250,6 +275,16 @@ function exprAt(line: string, col: number): { expr: string; s: number; e: number
     const start = m.index, end = start + m[0].length;
     if (c < start || c > end) continue;
     const expr = m[0].replace(/\s+/g, "");
+    // On a DECLARATION the trailing brackets are the array's LENGTH, so hovering
+    // `int labels[3]` evaluated labels[3] — one past the end — and answered with
+    // whatever integer happened to sit in the next word of stack. Take the name
+    // being declared instead, which is what the pointer is over anyway.
+    const before = line.slice(0, start).replace(/[\s*&]+$/, "");
+    const prev = /[A-Za-z_]\w*$/.exec(before);
+    if (prev && !NOT_A_TYPE.has(prev[0])) {
+      const bare = /^[A-Za-z_]\w*/.exec(expr)![0];
+      if (bare !== expr) return { expr: bare, s: start, e: start + bare.length };
+    }
     return expr ? { expr, s: start, e: end } : null;
   }
   return null;

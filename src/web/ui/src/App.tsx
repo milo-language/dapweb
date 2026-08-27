@@ -2,7 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import SourceView, { langFor, BpMeta, BpPopover } from "./SourceView";
+import SourceView, { langFor, BpMeta, BpPopover, HoverVar } from "./SourceView";
 import ConfigDrawer, { DebugConfig, stripJsonc } from "./ConfigDrawer";
 
 type Frame = { id: number; name: string; line: number; path: string; ipRef: string };
@@ -12,7 +12,7 @@ type Var = { name: string; value: string; ref: number; mref?: string; type?: str
 type Watch = { expr: string; value: string | null };
 // Enriched hover payload: the evaluated value plus, for aggregates/pointers,
 // one level of expanded members (name/type/value) rendered in the tooltip.
-type HoverInfo = { value: string; children?: Var[] };
+type HoverInfo = { value: string; children?: HoverVar[] };
 
 let ws: WebSocket | null = null;
 function send(obj: any) {
@@ -326,19 +326,34 @@ export default function App() {
   // Monaco hover → DAP evaluate(context:"hover") while stopped.
   // Hover → evaluate; if the result is an aggregate/pointer (ref>0), expand one
   // level so the tooltip can show its members instead of a bare "Shape[2]".
+  // Expand one level, then expand each aggregate child in parallel, so a struct
+  // of structs (or an array of them) arrives as a tree instead of a row of
+  // `{…}` placeholders. Two levels only: the round trips are what a hover can
+  // afford, and past that the Locals tree is the right tool.
+  const HOVER_KID_BUDGET = 8;
+  const expandTree = useCallback(async (ref: number, depth: number): Promise<HoverVar[]> => {
+    const kids: Var[] = await expandRef(ref).catch(() => []);
+    if (depth <= 0) return kids;
+    const grand = await Promise.all(kids.slice(0, HOVER_KID_BUDGET).map((k) =>
+      k.ref > 0 ? expandTree(k.ref, depth - 1).catch(() => []) : Promise.resolve([])));
+    return kids.map((k, i) => (grand[i]?.length ? { ...k, children: grand[i] } : k));
+  }, []);
+
   const evalHover = useCallback((expr: string) => new Promise<HoverInfo | null>((resolve) => {
     if (phaseRef.current !== "stopped") return resolve(null);
     const id = ++evalSeq;
     pending.set(id, { kind: "hover", done: (m: any) => {
       if (!m || m.value == null) return resolve(null);
-      if (m.ref > 0) expandRef(m.ref).then(
+      if (m.ref > 0) expandTree(m.ref, 1).then(
         (kids) => resolve({ value: m.value, children: kids }),
         () => resolve({ value: m.value }));
       else resolve({ value: m.value });
     } });
     send({ cmd: "evaluate", expr, context: "hover", id, frameId: frame0Ref.current });
-    setTimeout(() => { if (pending.delete(id)) resolve(null); }, 2000);
-  }), []);
+    // Two levels of expansion is more round trips than one, so the tooltip gets
+    // longer to arrive; Monaco simply shows nothing if we miss the window.
+    setTimeout(() => { if (pending.delete(id)) resolve(null); }, 3500);
+  }), [expandTree]);
 
   // fetch a disassembly window around a frame's pc.
   const requestDisasm = useCallback((f: Frame) => {
@@ -882,7 +897,11 @@ export default function App() {
       catch (e: any) { setConfigErr(`invalid JSON: ${e.message}`); setShowConfig(true); return; }
     }
     const force = phaseRef.current === "running" || phaseRef.current === "stopped";
-    if (force && !confirm("This will kill the existing debug session. Start a new one?")) return;
+    // Retargeting is the destructive surprise: you meant to launch something else
+    // and the running session goes with it. Re-running the SAME target is exactly
+    // what Restart does without asking, so Run should not ask either.
+    const retarget = force && !!config && (config.program ?? "") !== (cfg.program ?? "");
+    if (retarget && !confirm(`Switch this session to ${config.program} ? The running program is killed first.`)) return;
     setConfigErr("");
     setPhase("running");
     setStatus({ text: force ? "restarting with the new target…" : "running…", short: "running", cls: "running" });
@@ -963,10 +982,10 @@ export default function App() {
         {/* The wordmark goes to the other screen. Sending it off to GitHub would
             make the one always-present, always-clickable thing in the app a way
             to leave the app. */}
-        <a className="logo" href="/sessions" title="All live dapweb sessions">DAPWEB</a>
+        <a className="logo" href="/sessions" data-tip="All live dapweb sessions">DAPWEB</a>
         <span className="targetbar">
           <select className={"mode-select" + (attachMode ? " attach" : "")} value={cfg.request || "launch"}
-                  title={attachMode ? "Attaching to a process that is already running"
+                  data-tip={attachMode ? "Attaching to a process that is already running"
                                     : "Launching a program from a path"}
                   onChange={(e) => setMode(e.target.value === "attach")}>
             <option value="launch">launch</option>
@@ -974,7 +993,7 @@ export default function App() {
           </select>
           <input className="target-input" value={targetText} spellCheck={false}
                  placeholder={attachMode ? "pid, or a process name" : "path to a program, plus arguments"}
-                 title={cfg.port ? `tcp: ${cfg.host || "127.0.0.1"}:${cfg.port}` : (adapterCmd ? `adapter: ${adapterCmd}` : "")}
+                 data-tip={cfg.port ? `tcp: ${cfg.host || "127.0.0.1"}:${cfg.port}` : (adapterCmd ? `adapter: ${adapterCmd}` : "")}
                  onChange={(e) => setTargetText(e.target.value)}
                  onFocus={() => { targetFocused.current = true; setTargetOpen(true); if (attachMode) loadProcs(); }}
                  onBlur={() => { targetFocused.current = false; setTimeout(() => setTargetOpen(false), 120); }}
@@ -988,7 +1007,7 @@ export default function App() {
                    }
                  }} />
           {program && (
-            <button className="bin-chip" title="Binary details — format, architecture, debug info"
+            <button className="bin-chip" data-tip="Binary details — format, architecture, debug info"
                     onMouseDown={(e) => e.preventDefault()} onClick={loadBinInfo}>info</button>
           )}
           {targetOpen && attachMode && (
@@ -1023,29 +1042,30 @@ export default function App() {
           )}
         </span>
         <span className="toolbar">
-          <button className="run" title={phase === "idle" ? "Run — start the program" : "Run — kill the current session and relaunch"} onClick={run}><Ico g={CI.run} /></button>
-          <button disabled={!stopped} title={stopped ? "Continue" : "Continue (needs a stopped program)"}
+          <button className="run" data-tip={phase === "idle" ? "Run — start the program"
+                                            : "Run — relaunch with whatever the target bar says now"} onClick={run}><Ico g={CI.run} /></button>
+          <button disabled={!stopped} data-tip={stopped ? "Continue" : "Continue (needs a stopped program)"}
                   onClick={() => resume("continue")}><Ico g={CI.cont} /></button>
-          <button disabled={phase !== "running"} title="Pause"
+          <button disabled={phase !== "running"} data-tip="Pause"
                   onClick={() => send({ cmd: "pause", tid: tidRef.current })}><Ico g={CI.pause} /></button>
         </span>
         <span className="toolbar">
-          <button disabled={!stopped} title="Step over" onClick={() => resume("stepOver")}><Ico g={CI.stepOver} /></button>
-          <button disabled={!stopped} title="Step in" onClick={() => resume("stepIn")}><Ico g={CI.stepInto} /></button>
-          <button disabled={!stopped} title="Step out" onClick={() => resume("stepOut")}><Ico g={CI.stepOut} /></button>
-          {asm && <button disabled={!canInstrStep} title="Step one instruction (over calls)"
+          <button disabled={!stopped} data-tip="Step over" onClick={() => resume("stepOver")}><Ico g={CI.stepOver} /></button>
+          <button disabled={!stopped} data-tip="Step in" onClick={() => resume("stepIn")}><Ico g={CI.stepInto} /></button>
+          <button disabled={!stopped} data-tip="Step out" onClick={() => resume("stepOut")}><Ico g={CI.stepOut} /></button>
+          {asm && <button disabled={!canInstrStep} data-tip="Step one instruction (over calls)"
                           onClick={() => resume("stepOver", "instruction")}><Ico g={CI.stepOver} sub="i" /></button>}
-          {asm && <button disabled={!canInstrStep} title="Step one instruction (into calls)"
+          {asm && <button disabled={!canInstrStep} data-tip="Step one instruction (into calls)"
                           onClick={() => resume("stepIn", "instruction")}><Ico g={CI.stepInto} sub="i" /></button>}
         </span>
         <span className="toolbar">
           <button disabled={phase !== "running" && phase !== "stopped"}
-                  title="Restart the program (breakpoints persist)" onClick={restart}><Ico g={CI.restart} /></button>
+                  data-tip="Restart — same target, from the top (breakpoints persist)" onClick={restart}><Ico g={CI.restart} /></button>
           <button disabled={phase !== "running" && phase !== "stopped"}
-                  title="Stop — terminate the program" onClick={() => send({ cmd: "kill" })}><Ico g={CI.stop} /></button>
+                  data-tip="Stop — terminate the program" onClick={() => send({ cmd: "kill" })}><Ico g={CI.stop} /></button>
           <button disabled={!stopped || !caps.supportsDisassembleRequest}
                   className={asm && !inlineAsm ? "asm-on" : ""}
-                  title={stopped ? "Toggle disassembly pane"
+                  data-tip={stopped ? "Toggle disassembly pane"
                                  : "Disassembly (available while stopped, adapter must support it)"}
                   onClick={() => {
                     if (disasm) { setDisasm(null); setInlineAsm(false); }
@@ -1057,7 +1077,7 @@ export default function App() {
                   }}><Ico g={CI.chip} /></button>
           <button disabled={!stopped || !caps.supportsDisassembleRequest}
                   className={inlineAsm ? "asm-on" : ""}
-                  title="Show generated asm inline, under each source line"
+                  data-tip="Show generated asm inline, under each source line"
                   onClick={() => {
                     if (inlineAsm) { setInlineAsm(false); setDisasm(null); }
                     else {
@@ -1067,14 +1087,14 @@ export default function App() {
                     }
                   }}><Ico g={CI.chip} sub="s" /></button>
         </span>
-        <label className="stopmain" title="break at main (python: first user line) on Run">
+        <label className="stopmain" data-tip="break at main (python: first user line) on Run">
           <input type="checkbox" checked={stopMain} onChange={(e) => {
             setStopMain(e.target.checked);
             localStorage.setItem("dapweb.stopAtMain", e.target.checked ? "1" : "0");
           }} /> stop at main
         </label>
-        {agentNote && <span className="agent-note" title={agentNote.text}>◆ {agentNote.text}</span>}
-        <span className={"status " + status.cls} title={status.text}>{status.short}</span>
+        {agentNote && <span className="agent-note" data-tip={agentNote.text}>◆ {agentNote.text}</span>}
+        <span className={"status " + status.cls} data-tip={status.text}>{status.short}</span>
         {/* Three unlabelled glyphs (ⓘ, +, ⚙) asked the reader to remember which
             was which. One labelled menu says what it opens, and has room for the
             things that had nowhere to live — like the list of other sessions. */}
@@ -1337,12 +1357,11 @@ function Panel({ title, action, children }: any) {
   const [collapsed, setCollapsed] = useState(false);
   return (
     <div className={"panel" + (collapsed ? " collapsed" : "")}>
-      <h2>
-        <span className="panel-toggle" onClick={() => setCollapsed((c) => !c)}
-              title={collapsed ? "expand" : "collapse"}>
-          <span className="chev">{collapsed ? "▸" : "▾"}</span>{title}
-        </span>
-        {action}
+      {/* The whole heading toggles. A 10px chevron as the only hit target is a
+          thing you aim at; the row is a thing you click. */}
+      <h2 onClick={() => setCollapsed((c) => !c)} title={collapsed ? "expand" : "collapse"}>
+        <span className="panel-toggle">{title}</span>
+        {action && <span className="panel-act" onClick={(e) => e.stopPropagation()}>{action}</span>}
       </h2>
       {!collapsed && <div className="body">{children}</div>}
     </div>
@@ -1655,27 +1674,29 @@ function VarNode({ v, disabled, parentRef, onSetVar, onAddr, prevVals, gen }: {
   const val = shown ?? v.value;
   return (
     <div>
-      <div className="var">
-        <span className="tw" onClick={v.ref > 0 ? expand : undefined}>
-          {v.ref > 0 ? (open ? "▾" : "▸") : " "}
-        </span>
+      <div className={"var" + (v.ref > 0 ? " expandable" : "") + (open ? " open" : "")}
+           onClick={v.ref > 0 ? expand : undefined}>
+        <span className="tw" />
         <span className="name">{v.name}</span>
         {/* Type chip is for locals only; on registers (prevVals set) the adapter's
             "unsigned long" / "<no-type>" is noise. */}
         {v.type && !prevVals && <span className="vtype" title={v.type}>{v.type}</span>}
+        {/* An aggregate's "value" IS its type (int[3] → int[3]), so printing both
+            rendered `labels int[3] int[3]`. The type chip already says it. */}
         {editing ? (
           <input className="varedit" autoFocus value={draft} spellCheck={false}
                  onChange={(e) => setDraft(e.target.value)}
                  onBlur={() => setEditing(false)}
                  onKeyDown={(e) => { if (e.key === "Enter") commit(); else if (e.key === "Escape") setEditing(false); }} />
         ) : (
-          <span className={"val" + (changed ? " changed" : "")} onDoubleClick={startEdit} title={val}>
-            <Val text={val} onAddr={onAddr} />
+          <span className={"val" + (changed ? " changed" : "")} onDoubleClick={startEdit}
+                onClick={(e) => e.stopPropagation()} title={val}>
+            {val === v.type ? null : <Val text={val} onAddr={onAddr} />}
           </span>
         )}
         {onAddr && v.mref && (
           <span className="memlink" title={`view memory at ${v.mref}`}
-                onClick={() => onAddr(v.mref!)}>⌗</span>
+                onClick={(e) => { e.stopPropagation(); onAddr(v.mref!); }}>⌗</span>
         )}
       </div>
       {open && (

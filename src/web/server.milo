@@ -55,7 +55,7 @@ from "./jsonaccess" import {
     bodyI64, bodyStr, frame0Field, frame0Path, scopes0Ref
 }
 from "../sessions" import {
-    stateDir, writeSession, removeSession, sessionsJson
+    stateDir, writeSession, removeSession, sessionsJson, newSessionName
 }
 from "./binfo" import {
     binInfoJson
@@ -163,7 +163,9 @@ var gOutputLog: Vec<OutLine> = []
 let OUTLOG_MAX: i64 = 400
 var gNextClient: i64 = 1
 var gBps: Vec<Bp> = [] // shared breakpoint set (was per-connection before the shared session)
-var gSessionId: string = "" // uuid in hello — a reloaded tab detects same-vs-new session
+// Three words, not a uuid: this id is read off a screen, typed into
+// `api --session`, and pasted in a URL. See newSessionName in ../sessions.
+var gSessionId: string = "" // in hello — a reloaded tab detects same-vs-new session
 var gListenPort: i64 = 0    // the port we bound; the registry descriptor carries it
 var gNoBrowser: bool = false
 var gPeers: i64 = 0 // attached WS peers (browser tabs; `api` callers are one-shot HTTP)
@@ -2168,7 +2170,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         gThreadsMsg = ""
         gRegionsMsg = ""
         gOutputLog = []
-        gSessionId = Uuid.v4().toString()
+        gSessionId = newSessionName(sessionNameSeeds())
         logEvent("session reset", $"new session {gSessionId}")
         wsPush(bus, busWakeWr, helloMsg())
         if srcPath.len > 0 {
@@ -2182,6 +2184,18 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
 // This server IS its session's identity (one process, one session), so the
 // descriptor it drops in the registry is what `dapweb api list` and the
 // /sessions dashboard read. Directory layout and pruning live in ../sessions.
+// Five candidates, so a name already taken by a live session can be re-rolled
+// without another trip out to the uuid generator mid-loop.
+fn sessionNameSeeds(): Vec<string> {
+    var out: Vec<string> = []
+    var i: i64 = 0
+    while i < 5 {
+        out.push(Uuid.v4().toString())
+        i = i + 1
+    }
+    return out
+}
+
 fn registerSession(port: i64): void {
     gListenPort = port
     gStartedAt = epochMillis()
@@ -3138,7 +3152,7 @@ pub fn webMain(argv: Vec<string>): i32 {
     gRequest = ""
     gDapHost = ""
     gDapPort = 0
-    gSessionId = Uuid.v4().toString()
+    gSessionId = newSessionName(sessionNameSeeds())
     gPeers = 0
     gLastActivityMs = epochMillis()
     gIdleTtlSecs = args.getI64("idle-ttl")

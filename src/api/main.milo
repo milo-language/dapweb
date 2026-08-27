@@ -62,13 +62,11 @@ fn cmdList(): i32 {
         print("no live dapweb sessions")
         return 0
     }
-    print("ID".padEnd(10, " ") + "PORT".padEnd(7, " ") + "PID".padEnd(8, " ") + "PROGRAM")
+    // Printed whole. Ids are three words now, and half of "fresh-cobalt-paints"
+    // is neither recognisable nor something you can paste into --session.
+    print("ID".padEnd(24, " ") + "PORT".padEnd(7, " ") + "PID".padEnd(8, " ") + "PROGRAM")
     for r in rows {
-        var id = r.id.clone()
-        if id.len > 8 {
-            id = id.substr(0, 8)
-        }
-        print(id.padEnd(10, " ") + ($"{r.port}").padEnd(7, " ") + ($"{r.pid}").padEnd(8, " ") + r.program)
+        print(r.id.padEnd(24, " ") + ($"{r.port}").padEnd(7, " ") + ($"{r.pid}").padEnd(8, " ") + r.program)
     }
     return 0
 }

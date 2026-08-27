@@ -45,7 +45,11 @@ function ok(cond: any, label: string, detail?: any) {
 const a = new Peer();
 await a.connect();
 const hello1 = await a.wait(m => m.type === "hello");
-ok(typeof hello1.sessionId === "string" && hello1.sessionId.length === 36, "hello carries sessionId uuid", hello1.sessionId);
+// Three lowercase words. Asserting the SHAPE, not just non-emptiness: the id is
+// pasted into a URL and typed into `api --session`, so a silent regression back
+// to a uuid (or to anything with a slash, which is also a registry filename)
+// should fail here rather than in someone's chat window.
+ok(/^[a-z]+-[a-z]+-[a-z]+$/.test(hello1.sessionId ?? ""), "hello carries a three-word sessionId", hello1.sessionId);
 a.send({ cmd: "setBreakpoint", path: hello1.sourcePath, line: 23 });
 await a.wait(m => m.type === "breakpoint" && m.line === 23);
 a.send({ cmd: "run", stopAtMain: true });

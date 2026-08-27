@@ -165,3 +165,108 @@ pub fn sessionsJson(selfId: &string): string {
     }
     return Json.obj().arr("sessions", arr).int("count", n).build()
 }
+
+// ── Session names ───────────────────────────────────────────────────────────
+//
+// A session id is a thing people read off a screen, type into `api --session`,
+// and paste to each other in a URL. A v4 uuid is none of those: 34a36e83-f9a4-
+// 4a9c-b08e-343b0c390cf9 cannot be recognised at a glance, held in your head
+// for the two seconds it takes to switch windows, or read aloud at all. Three
+// words can do all three.
+//
+// 64³ = 262144 combinations, which is not a lot — so it is not treated as one.
+// newSessionName() checks the live registry and re-rolls on a collision, which
+// makes uniqueness exact among the sessions that can actually be confused
+// rather than merely probable.
+//
+// Lists are chosen for being short, common, and unambiguous when spoken: no
+// homophones (no "wait"/"weight"), nothing that reads as a status word (no
+// "failed", "broken"), nothing that could be read as an insult when three of
+// them land next to each other.
+let ADJECTIVES: [string; 64] = [
+    "amber", "arctic", "bold", "brave", "brisk", "bronze", "calm", "civic",
+    "clear", "coral", "cosmic", "crisp", "dapper", "deft", "dry", "eager",
+    "early", "easy", "electric", "fair", "fancy", "fast", "fond", "fresh",
+    "gentle", "giant", "glad", "golden", "grand", "green", "happy", "hollow",
+    "honest", "ivory", "jolly", "keen", "kind", "level", "lively", "loyal",
+    "lucid", "lunar", "mellow", "merry", "mighty", "mild", "modest", "neat",
+    "noble", "nimble", "polar", "proud", "quick", "quiet", "rapid", "royal",
+    "sharp", "silver", "smooth", "solar", "steady", "sunny", "swift", "warm",
+]
+let NOUNS: [string; 64] = [
+    "anchor", "arrow", "atlas", "badger", "beacon", "bison", "canyon", "cedar",
+    "cobalt", "comet", "compass", "cotton", "delta", "dolphin", "ember", "falcon",
+    "fern", "forest", "garnet", "glacier", "harbor", "hazel", "heron", "island",
+    "jasper", "juniper", "kestrel", "lagoon", "lantern", "ledger", "lily", "lynx",
+    "maple", "marble", "meadow", "meteor", "mosaic", "nebula", "oak", "ocean",
+    "onyx", "orbit", "otter", "pebble", "pine", "prairie", "quartz", "raven",
+    "reef", "ridge", "river", "sable", "signal", "spruce", "summit", "thistle",
+    "tundra", "vector", "walnut", "willow", "wombat", "yarrow", "zephyr", "zinc",
+]
+let VERBS: [string; 64] = [
+    "adds", "aims", "asks", "bends", "binds", "builds", "calls", "carves",
+    "casts", "charts", "chases", "climbs", "counts", "covers", "dives", "draws",
+    "drifts", "drives", "echoes", "enters", "fills", "finds", "flies", "flows",
+    "folds", "gathers", "gives", "glides", "grows", "guards", "guides", "holds",
+    "hums", "joins", "jumps", "keeps", "lands", "leads", "leaps", "learns",
+    "lifts", "links", "maps", "marks", "meets", "moves", "opens", "paints",
+    "plans", "reads", "rides", "rings", "rises", "runs", "sails", "sends",
+    "shifts", "sings", "sorts", "spins", "starts", "steers", "turns", "walks",
+]
+
+// Entropy comes from the same v4 uuid the ids used to BE — three of its hex
+// digits per word. Rolling our own PRNG here would be a second source of
+// randomness to reason about for no gain.
+fn wordFromHex(hex: &string, at: i64): i64 {
+    var acc: i64 = 0
+    var i = at
+    while i < at + 3 && i < hex.len {
+        let c = hex[i]
+        var d: i64 = 0
+        if c >= '0' && c <= '9' {
+            d = (c - '0') as i64
+        } else if c >= 'a' && c <= 'f' {
+            d = (c - 'a') as i64 + 10
+        }
+        acc = acc * 16 + d
+        i = i + 1
+    }
+    return acc % 64
+}
+
+fn nameFromUuid(u: &string): string {
+    // Strip the dashes so the three slices are three independent hex runs.
+    var hex: string = ""
+    var i: i64 = 0
+    while i < u.len {
+        if u[i] != '-' {
+            hex = hex + u.substr(i, i + 1)
+        }
+        i = i + 1
+    }
+    return ADJECTIVES[wordFromHex(hex, 0)] + "-" + NOUNS[wordFromHex(hex, 8)] + "-" + VERBS[wordFromHex(hex, 16)]
+}
+
+// A name no LIVE session already holds. `uuids` supplies the entropy; it is a
+// callback so this module does not have to depend on std/uuid's shape.
+pub fn newSessionName(uuids: Vec<string>): string {
+    for u in uuids {
+        let name = nameFromUuid(u)
+        var taken = false
+        for r in loadSessions(false) {
+            if r.id == name {
+                taken = true
+            }
+        }
+        if !taken {
+            return name
+        }
+    }
+    // Every candidate collided (five live sessions holding those exact names, or
+    // a caller that passed nothing). Fall back to the raw uuid: ugly beats
+    // ambiguous, since the id keys the registry file and the reload check.
+    if uuids.len > 0 {
+        return uuids[uuids.len - 1].clone()
+    }
+    return "session"
+}
