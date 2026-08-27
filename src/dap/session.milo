@@ -652,7 +652,8 @@ pub fn adapterIdForKind(kind: &string): string {
 
 // The symbol name for "stop at main" via a function breakpoint. Go's entry is
 // the package-qualified `main.main`; C/C++/Rust just `main`. (Python takes the
-// launch stopOnEntry path instead, so it never reaches here.)
+// launch stopOnEntry path instead, so it never reaches here. Attach never
+// reaches here either: main already ran, so the stop comes from stopOnEntry.)
 pub fn mainSymbolFor(kind: &string): string {
     if kind == "go" {
         return "main.main"
@@ -814,8 +815,12 @@ pub fn launchArgsFor(spec: &LaunchSpec, stopMain: bool): string {
         // java-dap derives mainClass/classPaths from `program` when unset and
         // has no runInTerminal/stopOnEntry — no dialect defaults to inject.
     } else {
+        // An attached process is already past main, so the function breakpoint
+        // that means "stop at main" for a launch can never hit. stopOnEntry is
+        // what holds an attach where it is: without it lldb-dap resumes the
+        // process at configurationDone and the user gets no stop at all.
         if !extraHas(extra, "stopOnEntry") {
-            b = b.bool("stopOnEntry", false)
+            b = b.bool("stopOnEntry", spec.request == "attach" && stopMain)
         }
         if !extraHas(extra, "runInTerminal") {
             b = b.bool("runInTerminal", true)
@@ -905,9 +910,46 @@ pub fn histEntryFor(spec: &LaunchSpec, lastRunAt: i64): string {
     return specConfigJson(spec, false, lastRunAt)
 }
 
-// Dedup identity: (type, program, args). Two entries that launch the same thing
-// collapse to one (newest wins), rather than raw-stringify equality — so an env
-// tweak or a re-stamp doesn't spawn a duplicate row.
+// The `lastRunAt` already stored for whatever `item` would dedup against, or 0
+// if history has never seen it. Configuring a target records it in history
+// before it has ever run, and since dedup keeps the NEWEST entry, a stamp-less
+// re-insert would erase the real "last run" of something that HAS run.
+pub fn histLastRunAt(histJson: &string, item: &string): i64 {
+    let key = histIdentity(item)
+    match Json.parse(histJson.clone()) {
+        Result.Ok(d) => {
+            if d.isArray() {
+                let n = d.len()
+                var i: i64 = 0
+                while i < n {
+                    match d.at(i) {
+                        Option.Some(el) => {
+                            let es = el.rawStr()
+                            if histIdentity(es) == key {
+                                return el.i64("lastRunAt") ?? (0 as i64)
+                            }
+                        }
+                        Option.None => {
+                        }
+                    }
+                    i = i + 1
+                }
+            }
+        }
+        Result.Err(_e) => {
+        }
+    }
+    return 0 as i64
+}
+
+// Dedup identity: (type, program, args) for a launch, plus the attach target for
+// an attach. Two entries that debug the same thing collapse to one (newest wins),
+// rather than raw-stringify equality — so an env tweak or a re-stamp doesn't
+// spawn a duplicate row.
+//
+// The attach half matters because an attach config has NO program: on identity
+// (type, "", []) every attach ever configured is the same entry, so history could
+// hold exactly one of them and each new pid silently erased the last.
 fn histIdentity(item: &string): string {
     match Json.parse(item.clone()) {
         Result.Ok(d) => {
@@ -921,7 +963,23 @@ fn histIdentity(item: &string): string {
                 Option.None => {
                 }
             }
-            return typ + "\t" + prog + "\t" + argsStr
+            var tgt: string = ""
+            if (d.str("request") ?? "") == "attach" {
+                var pid = d.i64("pid") ?? (0 as i64)
+                if pid == 0 {
+                    pid = d.i64("processId") ?? (0 as i64)
+                }
+                var conn: string = ""
+                if let Option.Some(c) = d.get("connect") {
+                    conn = c.rawStr()
+                }
+                // host/port select WHICH adapter, so the same pid on two servers
+                // is two entries.
+                let host = d.str("host") ?? ""
+                let dport = d.i64("port") ?? (0 as i64)
+                tgt = $"attach\t{pid}\t{conn}\t{host}\t{dport}"
+            }
+            return typ + "\t" + prog + "\t" + argsStr + "\t" + tgt
         }
         Result.Err(_e) => {
             return item.clone()

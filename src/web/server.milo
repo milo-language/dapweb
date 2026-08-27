@@ -1129,6 +1129,18 @@ fn appendHistory(): string {
     return historyChangedMsg()
 }
 
+// A target that was configured but never launched still belongs in history:
+// otherwise `dapweb web --program X` is forgotten the moment the process exits,
+// and the next boot with no flags restores whatever came before it. Carries the
+// existing run stamp forward so recording a config cannot un-run an entry.
+fn recordConfig(): string {
+    let probe = histEntryFor(curSpec(), 0 as i64)
+    let stamp = histLastRunAt(gHistory, probe)
+    gHistory = histInsert(gHistory, histEntryFor(curSpec(), stamp), 10 as i64)
+    persistHistory()
+    return historyChangedMsg()
+}
+
 fn historyChangedMsg(): string {
     return Json.obj().str("type", "historyChanged").raw("history", gHistory.clone()).build()
 }
@@ -1620,7 +1632,11 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 // launchArgs(). Failure is tolerated: fbInit response is a no-op.
                 // python and node stop at entry via launch stopOnEntry instead
                 // (no "main" symbol; js-debug has no function breakpoints).
-                if stopAtMain && adapterKind != "python" && adapterKind != "node" {
+                // Attach is excluded too: the process is already running, so main
+                // is long past and the breakpoint would never hit. There the same
+                // toggle means "stop on attach" and rides in the attach body's
+                // stopOnEntry — see launchArgsFor().
+                if stopAtMain && adapterKind != "python" && adapterKind != "node" && gRequest != "attach" {
                     let fb = Json.obj().arr("breakpoints", Json.arr().obj(Json.obj().str("name", mainSymbolFor(adapterKind)))).build()
                     let fs = cl.send("setFunctionBreakpoints", fb)
                     pend.push(Pending {
@@ -2481,6 +2497,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             } else {
                 logEvent("target changed", $"{binPath}  (by {peerKind} peer)")
                     loadBps()
+                wsPush(bus, busWakeWr, recordConfig())
                 pushHelloState(bus, busWakeWr)
             }
         }
@@ -3552,6 +3569,12 @@ pub fn webMain(argv: Vec<string>): i32 {
             Option.None => {
             }
         }
+    } else {
+        // A --program/--launch target goes into history at boot, not at first
+        // Run: the point of history is that closing the tab and starting over
+        // lands on what you were debugging, and a target nobody got around to
+        // running is exactly the case that used to be lost.
+        let _h = recordConfig()
     }
     // Breakpoints come back only once the target is settled — they are keyed by
     // program, so this has to follow --program/--launch and the history restore.

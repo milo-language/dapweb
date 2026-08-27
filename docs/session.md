@@ -143,9 +143,13 @@ go     ← types [go]                          (delve — future, same error)
 - Server persists history at `$XDG_STATE_HOME/dapweb/history.json`
   (default `~/.local/state/dapweb/history.json`; create dirs on demand): array of canonical
   config objects + `lastRunAt`, cap 20, newest first.
-- **Single writer**: server appends on successful `run` launch (adapter spawned + launch
-  ack'd). Both client-side `saveHist` call sites (drawer apply + hello echo) are deleted —
-  that's the dupe bug.
+- **Single writer**: server appends when a target is *configured* (`--program`/`--launch` at
+  boot, or a `setConfig`) and again on a successful `run` launch (adapter spawned + launch
+  ack'd). Configuring records with no `lastRunAt`; the launch adds the stamp, and re-recording
+  an entry that has run carries its existing stamp forward, since dedup keeps the newest copy.
+  A target you set up and never got around to running is history too — otherwise
+  `dapweb web --program X` is forgotten the moment the process exits. Both client-side
+  `saveHist` call sites (drawer apply + hello echo) are deleted — that's the dupe bug.
 - Dedup by identity key `(type, program, args, adapter)` after canonicalization (sorted keys,
   empties stripped) — not raw stringify. Match → move to front, update stamp.
 - `hello` carries `history: [...]`; `historyChanged` broadcast on append. Any browser, any

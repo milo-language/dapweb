@@ -176,6 +176,21 @@ const TEMPLATES: { label: string; text: string }[] = [
   },
 ];
 
+// What a history row is FOR. An attach config has no `program` — its target is a
+// pid — so the old `{h.program}` left an attach row as a bare type chip with
+// nothing next to it, which is unreadable as soon as there are two of them.
+function histTarget(h: any): string {
+  if (h.request === "attach") {
+    const pid = h.pid ?? h.processId;
+    if (pid != null) return `attach pid ${pid}`;
+    if (h.connect) return `attach ${h.connect.host ?? "127.0.0.1"}:${h.connect.port ?? "?"}`;
+    if (h.program) return `attach ${h.program}`;
+    return "attach";
+  }
+  const args = (h.args as string[]) || [];
+  return h.program + (args.length ? " " + args.join(" ") : "");
+}
+
 export default function ConfigDrawer({ config, sessionActive, error, history, onChange, onRun, onClose }: {
   config: DebugConfig; sessionActive: boolean; error: string;
   history: DebugConfig[];
@@ -288,7 +303,7 @@ export default function ConfigDrawer({ config, sessionActive, error, history, on
                 <span className="hist-prog">
                   {h.type && <span className={"hist-type dt-" + h.type}>{h.type}</span>}
                   {h.name ? <span className="hist-name">{h.name}</span> : null}
-                  {h.program}{h.args && (h.args as string[]).length ? " " + (h.args as string[]).join(" ") : ""}
+                  {histTarget(h)}
                 </span>
                 {h.source && <span className="hist-src">{h.source}</span>}
               </div>

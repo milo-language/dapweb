@@ -18,6 +18,17 @@ let ws: WebSocket | null = null;
 // Set by the App's ws effect: send() lives at module scope but a dropped
 // command needs to say so in the console, which only the component can reach.
 let onSendWhileDead: (() => void) | null = null;
+// Whether a config names something to debug, mirroring the server's own rule
+// (resolveConfig): a launch needs a program, an attach needs a pid, a connect{},
+// or waitFor+program. Testing `program` alone reports every attach as "no
+// target", which is how attaching by pid ended up looking unconfigured.
+function hasTarget(c: any, program?: string): boolean {
+  if (!c) return !!program;
+  return c.request === "attach"
+    ? (c.pid != null || c.processId != null || c.connect != null || (!!c.waitFor && !!c.program))
+    : !!(program ?? c.program);
+}
+
 function send(obj: any) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
   else onSendWhileDead?.();
@@ -308,6 +319,9 @@ export default function App() {
   const acceptReplayRef = useRef(false);
   const frame0Ref = useRef(-1);   // frameId evals run in — follows the selected frame
   const frameReqRef = useRef(0);  // latest frameScopes id; stale frameLocals replies are dropped
+  // Last banner state announced into the terminal ("none" | "nosrc" | "ok"), so a
+  // repeated hello re-announces only when something actually changed.
+  const announcedRef = useRef<string>("");
   const phaseRef = useRef(phase);
   const pendingRestart = useRef(false);           // kill+rerun fallback in flight
   const runRef = useRef<() => void>(() => {});    // ws handler needs a fresh run()
@@ -464,9 +478,6 @@ export default function App() {
         // works even before the drawer editor mounts.
         setCfg(m.config || {});
         if (!cfgTextRef.current) cfgTextRef.current = JSON.stringify(m.config || {}, null, 2);
-        // Nothing to run means the config IS the task: open the sheet once. A
-        // server that booted with a target (or restored one) never sees it.
-        if (!m.program) setShowConfig(true);
         // A different sessionId is a genuinely new session (newSession command
         // or server restart) — wipe everything a same-session reconnect would
         // have replayed. A rejoin replay repopulates via bpSync/stopped/etc.
@@ -500,18 +511,26 @@ export default function App() {
             localStorage.removeItem("dapweb.configHistory");
           }
         } catch {}
-        // Boot restore is server-side now (it stages history[0], so m.program is
-        // set when there was something to restore). Still empty → nothing to
-        // restore, open the drawer.
-        if (!m.program) {
-          setShowConfig(true);
-          setStatus({ text: "no debug target configured", short: "no target", cls: "warn" });
-          consoleAppend("no debug target yet — type a program in the bar at the top left, or open Session ▸ Configure target for the full launch config\n");
-        }
-        // no --source — the first stop's frame fills the editor.
-        else if (!m.sourcePath) {
-          setStatus({ text: "no source configured — Run stops at main and loads it", short: "no source", cls: "" });
-          consoleAppend("no source configured — Run stops at main and loads whatever file the first frame names\n");
+        // A hello now arrives on every target change, not only on connect, so
+        // this announces the STATE and not the message: re-printing the same
+        // banner into the terminal on each retarget is how one config edit
+        // turned into three identical lines. Boot restore is server-side (it
+        // stages history[0]), so an unconfigured session here really has
+        // nothing to restore, and the sheet is the task.
+        const cfgNow = m.config || {};
+        const state = !hasTarget(cfgNow, m.program) ? "none" : (!m.sourcePath ? "nosrc" : "ok");
+        if (state !== announcedRef.current) {
+          announcedRef.current = state;
+          if (state === "none") {
+            setShowConfig(true);
+            setStatus({ text: "no debug target configured", short: "no target", cls: "warn" });
+            consoleAppend("no debug target yet — type a program in the bar at the top left, or open Session ▸ Configure target for the full launch config\n");
+          } else if (state === "nosrc") {
+            // An attach has no main to stop at, so it must not be promised one.
+            const where = cfgNow.request === "attach" ? "stops on attach" : "stops at main";
+            setStatus({ text: `no source configured — Run ${where} and loads it`, short: "no source", cls: "" });
+            consoleAppend(`no source configured — Run ${where} and loads whatever file the first frame names\n`);
+          }
         }
       }
       // Any peer's breakpoint change, including our own echo. Applying it here
@@ -847,7 +866,21 @@ export default function App() {
   const readCfg = (): any => {
     try { return JSON.parse(stripJsonc(cfgTextRef.current) || "{}"); } catch { return { ...cfg }; }
   };
-  const writeCfg = (c: any) => { cfgTextRef.current = JSON.stringify(c, null, 2); setCfg(c); };
+  // A committed target is server state, not browser state. Pushing it is what
+  // puts it in the other peers' bars and in history, so a target you configured
+  // and never got around to running is still there on the next boot instead of
+  // being lost with the tab. Idle-only, mirroring the server (retargeting a live
+  // session needs a force-Run), and only once the config actually names a target:
+  // the server rejects a half-built one, and flipping the attach chip should not
+  // raise an error about the pid you have not typed yet.
+  const pushCfg = (c: any) => {
+    const live = phaseRef.current === "running" || phaseRef.current === "stopped";
+    // hasTarget mirrors the server's validity rule, so flipping the attach chip
+    // — which keeps the program and drops the pid — stays silent instead of
+    // pushing something the server answers with "attach needs a target".
+    if (!live && hasTarget(c)) send({ cmd: "setConfig", ...c });
+  };
+  const writeCfg = (c: any) => { cfgTextRef.current = JSON.stringify(c, null, 2); setCfg(c); pushCfg(c); };
 
   const applyTarget = (text: string) => {
     const c = readCfg();
@@ -1124,11 +1157,15 @@ export default function App() {
                     }
                   }}><Ico g={CI.chip} sub="s" /></button>
         </span>
-        <label className="stopmain" data-tip="break at main (python: first user line) on Run">
+        {/* One toggle, two honest names: attaching to a process that is already
+            running cannot stop at main, so there it means "hold it where it is". */}
+        <label className="stopmain" data-tip={attachMode
+          ? "hold the process where it is on Attach, instead of resuming it"
+          : "break at main (python: first user line) on Run"}>
           <input type="checkbox" checked={stopMain} onChange={(e) => {
             setStopMain(e.target.checked);
             localStorage.setItem("dapweb.stopAtMain", e.target.checked ? "1" : "0");
-          }} /> stop at main
+          }} /> {attachMode ? "stop on attach" : "stop at main"}
         </label>
         {agentNote && <span className="agent-note" data-tip={agentNote.text}>◆ {agentNote.text}</span>}
         <span className={"status " + status.cls} data-tip={status.text}>{status.short}</span>

@@ -20,6 +20,11 @@ pub fn httpRequest(port: i64, method: string, path: string, body: string): Resul
         Result.Ok(s) => {
             s
         }
+        // Deliberately NOT appending the NetError: std/net's variants carry a
+        // fixed literal ("connect() failed"), never the errno, so the only thing
+        // stringifying adds is which syscall failed. ECONNREFUSED, EACCES and
+        // EMFILE all read identically, so the suffix would be noise on the one
+        // message a user of `dapweb api` is most likely to see.
         Result.Err(_e) => {
             return Result.Err($"no server on port {port} (is `dapweb web` running there?)")
         }
@@ -34,7 +39,9 @@ pub fn httpRequest(port: i64, method: string, path: string, body: string): Resul
         Result.Ok(_n) => {
         }
         Result.Err(_e) => {
-            return Result.Err("send failed")
+            // Same reason as above for dropping the NetError; the request itself
+            // is the context worth having, and a bare "send failed" had none.
+            return Result.Err($"sending {method} {path} to port {port} failed")
         }
     }
     // Connection: close ⇒ read until EOF, so a body larger than one segment
