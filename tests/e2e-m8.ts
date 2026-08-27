@@ -109,7 +109,8 @@ ok(da.instructions.some((i: any) => { try { return BigInt(i.addr) === pc; } catc
 ok(stopped.scopeRef > 0, `stopped carries scopeRef (got ${stopped.scopeRef})`);
 d.send({ cmd: "setVar", ref: stopped.scopeRef, name: "x", value: "58", id: 301 });
 const sv = await d.wait(m => m.type === "setVarResult" && m.id === 301);
-ok(!sv.error && sv.value.includes("58"), `setVar x=58 → ${sv.value}`, sv);
+ok(!sv.error && sv.value.includes("58"), `setVar x=58 → ${sv.value}`,
+   { sv, scopeRef: stopped.scopeRef, locals: (stopped.locals ?? []).map((l: any) => `${l.name}(ref ${l.ref})`) });
 d.send({ cmd: "evaluate", expr: "x", context: "repl", id: 302, frameId: stopped.frames[0].id });
 const ev = await d.wait(m => m.type === "evalResult" && m.id === 302);
 ok(ev.value.includes("58"), `evaluate x after setVar → ${ev.value}`);
