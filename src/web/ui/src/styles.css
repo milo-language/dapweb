@@ -34,7 +34,26 @@ header {
      and the status truncates rather than wrapping the whole toolbar to 2 lines. */
   flex-wrap: nowrap; white-space: nowrap;
 }
-/* Icon-only debugger controls, grouped run|step|session; hover title explains.
+/* Instant tooltips. The native `title` attribute waits about a second before it
+   appears, which on a row of unlabelled icons reads as "this one has no help" —
+   people have already moved the pointer on. Same text, no delay.
+   `header` must not clip these, so nothing in it may set overflow: hidden. */
+[data-tip] { position: relative; }
+[data-tip]:hover::after {
+  content: attr(data-tip); position: absolute; top: calc(100% + 6px); left: 50%;
+  transform: translateX(-50%); z-index: 70; pointer-events: none;
+  background: #1c2128; color: var(--fg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 9px; font-size: 11px; font-family: var(--ui);
+  white-space: nowrap; box-shadow: 0 6px 18px rgba(0,0,0,0.6);
+}
+/* The controls nearest the right edge would push their tip off-screen. */
+.targetbar [data-tip]:hover::after,
+.menu-wrap [data-tip]:hover::after { left: auto; right: 0; transform: none; }
+/* A tip over an open menu or dropdown list is noise on top of the answer. */
+.menu-wrap:has(.menu-pop) [data-tip]:hover::after,
+.targetbar:has(.target-menu) [data-tip]:hover::after { display: none; }
+
+/* Icon-only debugger controls, grouped run|step|session; the tip above explains.
    Icons are VS Code codicons — the ttf ships inside monaco (build.sh copies it). */
 @font-face {
   font-family: "codicon";
@@ -204,12 +223,15 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
 .dt-go     { color: #56d4dd; }
 .panel { border-bottom: 1px solid var(--border); }
 .panel h2 { margin: 0; padding: 6px 12px; font-size: 11px; text-transform: uppercase;
+            cursor: pointer; user-select: none;
             letter-spacing: 1px; color: var(--muted); background: var(--panel);
             display: flex; align-items: center; }
 .panel .body { overflow: auto; padding: 4px 12px; max-height: 220px; }
-.panel-toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
-.panel-toggle:hover { color: var(--fg); }
-.panel-toggle .chev { font-size: 8px; opacity: 0.55; width: 8px; text-align: center; }
+/* Actions sit at the far end; the title takes the slack so the whole bar between
+   them is still part of the toggle's hit area. */
+.panel-act { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+.panel-toggle { display: inline-flex; align-items: center; gap: 6px; flex: 1; }
+.panel h2:hover .panel-toggle { color: var(--fg); }
 .frame { padding: 2px 4px; cursor: pointer; border-radius: 4px;
          white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .frame:hover { background: rgba(255,255,255,0.06); }
@@ -234,8 +256,25 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
 .bpdot { cursor: pointer; }
 .bpdot.off { background: transparent !important; border: 1.5px solid var(--muted); }
 .bpacts { display: flex; gap: 8px; }
-.vartree .var { padding: 1px 0; display: flex; align-items: baseline; min-width: 0; }
-.vartree .var .tw { flex: none; display: inline-block; width: 14px; color: var(--muted); cursor: pointer; }
+.vartree .var { padding: 1px 0; display: flex; align-items: baseline; min-width: 0;
+                border-radius: 4px; }
+.vartree .var.expandable { cursor: pointer; }
+.vartree .var.expandable:hover { background: rgba(255,255,255,0.05); }
+/* The twisty is a state readout, not the hit target — the whole row is. It keeps
+   its width on leaf rows so names stay aligned down the column. */
+/* Drawn with borders, not typed. The ▸/▾ characters render at wildly different
+   sizes across fonts — in the UI face they came out as a speck that read as a
+   bullet, which is worse than no marker at all: it says "list item", not "opens".
+   A border triangle is the same size everywhere. */
+.vartree .var .tw { flex: none; width: 15px; align-self: center;
+                    display: inline-flex; align-items: center; justify-content: center; }
+.vartree .var.expandable .tw::before {
+  content: ""; width: 0; height: 0; border-style: solid;
+  border-width: 4.5px 0 4.5px 6px; border-color: transparent transparent transparent var(--muted);
+  transition: transform 0.12s ease;
+}
+.vartree .var.expandable.open .tw::before { transform: rotate(90deg); }
+.vartree .var.expandable:hover .tw::before { border-left-color: var(--accent); }
 .vartree .var .name { flex: none; color: var(--accent); padding-right: 8px; }
 /* DWARF type chip (locals): dim, truncates so long C++ types don't shove the value off. */
 .vartree .var .vtype { flex: none; color: var(--muted); font-style: italic; padding-right: 8px;
@@ -547,8 +586,24 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
 .sessions-foot { margin-top: 14px; color: var(--muted); font-size: 11px; }
 .sessions-foot a { color: var(--muted); }
 .sessions-foot a:hover { color: var(--accent); }
-.sessions-new { display: inline-flex; align-items: center; gap: 7px; margin-bottom: 14px;
-                font-size: 12px; padding: 7px 12px; color: var(--ok); border-color: currentColor; }
-.sessions-new:disabled { color: var(--muted); }
+/* The only control on this page that starts a process, so it is filled rather
+   than outlined: an outline reads as secondary sitting above a list of rows
+   that are themselves outlined boxes. Hairline border and the 1px shadow are
+   what keep a flat fill from looking like a colored div. */
+.sessions-new { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 16px;
+                font-size: 13px; font-weight: 600; line-height: 20px; padding: 5px 16px;
+                border-radius: 6px; color: #fff; background: #238636;
+                border: 1px solid rgba(240,246,252,0.1);
+                box-shadow: 0 1px 0 rgba(1,4,9,0.2);
+                transition: background 120ms ease, border-color 120ms ease; }
+.sessions-new:hover:not(:disabled) { background: #2ea043; color: #fff;
+                                     border-color: rgba(240,246,252,0.2); }
+.sessions-new:active:not(:disabled) { background: #1f7a32;
+                                      box-shadow: inset 0 1px 0 rgba(1,4,9,0.2); }
+.sessions-new:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sessions-new:disabled { color: #fff; opacity: 0.55; }
+/* The glyph carries the "adds something" meaning; at button weight it out-shouts
+   the label, so it sits a step lighter and slightly larger than the text. */
+.sessions-new .plus { font-size: 15px; font-weight: 400; line-height: 1; margin-top: -1px; }
 .sessions-page code { background: var(--panel); border: 1px solid var(--border);
                       border-radius: 4px; padding: 1px 5px; }

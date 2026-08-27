@@ -70,7 +70,7 @@ export default function Sessions() {
       <div className="sessions-body">
         <div className="sessions-inner">
           <button className="sessions-new" onClick={newSession} disabled={starting}>
-            {starting ? "starting…" : "+  new session"}
+            {starting ? "starting…" : <><span className="plus">+</span>new session</>}
           </button>
           {err && <div className="sessions-empty">{err}</div>}
           {!rows && !err && <div className="sessions-empty">reading the session registry…</div>}
