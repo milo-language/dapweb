@@ -389,18 +389,24 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
                 padding: 3px 8px; font: inherit; outline: none; }
 .memctl input:focus { border-color: var(--accent); }
 .memctl button { padding: 3px 9px; }
-.memdump { flex: 1; overflow: auto; padding: 6px 12px; font-size: 12px; }
-.memrow { display: flex; gap: 16px; white-space: pre; }
-.memaddr { color: var(--muted); }
+/* No horizontal scroll: annotation labels are clipped to their column instead
+   of widening the dump and pushing the address column off the left edge. */
+.memdump { flex: 1; overflow-x: hidden; overflow-y: auto; padding: 6px 12px; font-size: 12px; }
+.memrow { display: flex; gap: 16px; white-space: pre; line-height: 1.45; }
+.memaddr { color: var(--muted); flex: none; }
 .membytes { color: var(--fg); }
 .membytes .memptr { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 .membytes .memptr:hover { color: var(--accent); }
 /* Muted, not orange — orange is the data-region hue; ascii shouldn't share it. */
 .memascii { color: var(--muted); }
 .mem-err { color: var(--bp); font-size: 12px; }
-/* Per-slot annotation row: one annotation, arrow padded under its word column. */
-.memannot { display: flex; gap: 16px; white-space: pre; font-size: 11px; line-height: 1.3; }
+/* Annotation line under every dump row (empty ones included, so the grid keeps
+   a fixed 2-line pitch). Same font-size as the row above: `ch` is font-relative,
+   and a smaller one would put the columns on a different axis. */
+.memannot { display: flex; gap: 16px; white-space: pre; line-height: 1.45; }
 .memannot .annospacer { visibility: hidden; }
+.annocell { display: inline-block; overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; vertical-align: top; }
 .anno { color: var(--muted); font-style: italic; white-space: nowrap; }
 .anno.annofollow { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 .anno.annofollow:hover { color: var(--accent); }

@@ -2062,7 +2062,7 @@ function StackView({ enabled, regFrame, frames, stopSeq, onAddr }: {
 // A per-slot annotation under an 8-byte group: what this word *is* — a typed
 // local (from DWARF), a saved frame pointer / return address, or a pointer into
 // a named region. `follow` (present on typed pointers) opens the struct view.
-type Anno = { text: string; cls?: string; follow?: { ref: number; name: string; type: string; target: string } };
+type Anno = { text: string; full?: string; cls?: string; follow?: { ref: number; name: string; type: string; target: string } };
 
 // hex/dec/bin dump with ASCII column, 16 bytes per row. Slots are annotated
 // with DWARF/frame knowledge and typed pointers can be followed into their struct.
@@ -2134,7 +2134,6 @@ function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, locals, f
   for (const v of locals) { const a = bi(v.mref || ""); if (a !== null) localByAddr.set(a.toString(), v); }
   const fpN = bi(regFrame.fp), lrN = bi(regFrame.lr), spN = bi(regFrame.sp);
   const frameIps = frames.map((f) => ({ ip: bi(f.ipRef), name: f.name })).filter((f) => f.ip !== null);
-  const clip = (s: string, n = 26) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 
   // What is the 8-byte word at `slotAddr` (value `ptr`)? Most specific first.
   const annotate = (slotAddr: bigint, ptr: bigint, looksPtr: boolean): Anno | null => {
@@ -2147,23 +2146,30 @@ function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, locals, f
           ? { ref: local.ref, name: local.name, type: local.type || "?", target: "0x" + ptr.toString(16) }
           : undefined;
         const str = peeks.get("0x" + ptr.toString(16));
-        return { text: `${local.name} ${local.type || ""} → 0x${ptr.toString(16)}${preg ? ` (${preg})` : ""}${str ? `  ${JSON.stringify(str)}` : ""}`,
+        return { text: `${local.name}${preg ? ` → ${preg}` : ""}`,
+                 full: `${local.name} ${local.type || ""} → 0x${ptr.toString(16)}${preg ? ` (${preg})` : ""}${str ? `  ${JSON.stringify(str)}` : ""}`,
                  cls: preg ? "t-" + preg : undefined, follow };
       }
-      return { text: clip(`${local.name} ${local.type ? local.type + " " : ""}= ${local.value}`) };
+      return { text: `${local.name} = ${local.value}`,
+               full: `${local.name} ${local.type ? local.type + " " : ""}= ${local.value}` };
     }
     // Frame anatomy: fp points at the saved (fp, lr) pair; sp at the stack top.
-    if (fpN !== null && slotAddr === fpN) return { text: "saved fp · x29 → caller frame", cls: "t-stack" };
+    if (fpN !== null && slotAddr === fpN)
+      return { text: "saved fp", full: "saved fp · x29 → caller frame", cls: "t-stack" };
     if (fpN !== null && slotAddr === fpN + 8n)
-      return { text: `saved lr · return addr${preg === "code" ? " (code)" : ""}`, cls: preg ? "t-" + preg : "t-code" };
-    if (spN !== null && slotAddr === spN) return { text: "sp · top of stack", cls: "t-stack" };
+      return { text: "return addr", full: `saved lr · return address${preg ? ` into ${preg}` : ""}`,
+               cls: preg ? "t-" + preg : "t-code" };
+    if (spN !== null && slotAddr === spN) return { text: "sp", full: "sp · top of stack", cls: "t-stack" };
     if (!looksPtr) return null;
     // A word whose value is a known frame's pc — a return address into that fn.
     const fr = frameIps.find((f) => f.ip === ptr);
-    if (fr) return { text: `→ ${fr.name} (code)`, cls: "t-code" };
+    if (fr) return { text: `→ ${fr.name}`, full: `→ ${fr.name} (code)`, cls: "t-code" };
     if (preg) {
       const str = peeks.get("0x" + ptr.toString(16));
-      return { text: `→ 0x${ptr.toString(16)} (${preg})${str ? `  ${JSON.stringify(str)}` : ""}`, cls: "t-" + preg };
+      // The address itself is already in the row above, tinted by region — the
+      // label repeats only what the row cannot show: the region, or the string.
+      return { text: str ? `→ ${JSON.stringify(str)}` : `→ ${preg}`,
+               full: `→ 0x${ptr.toString(16)} (${preg})${str ? `  ${JSON.stringify(str)}` : ""}`, cls: "t-" + preg };
     }
     return null;
   };
@@ -2212,22 +2218,28 @@ function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, locals, f
           <span className="memascii">{ascii}</span>
         </div>
       );
-      // One annotation row per annotated word — arrow padded to sit under its
-      // column. Separate rows (not two cells) so long labels never collide.
-      annos.forEach((a, wi) => {
-        if (!a) return;
-        rows.push(
-          <div key={`a${off}_${wi}`} className="memannot">
-            <span className="memaddr annospacer">0x000000000000</span>
-            <span className="membytes">
-              <span className={"anno" + (a.cls ? " " + a.cls : "") + (a.follow ? " annofollow" : "")}
-                    style={{ paddingLeft: `${wi * (wordW + 2)}ch` }}
-                    title={a.follow ? `follow ${a.follow.name} → ${a.follow.target}  (typed as ${a.follow.type})` : a.text}
-                    onClick={a.follow ? () => doFollow(a.follow!) : undefined}>↑ {a.text}</span>
-            </span>
-          </div>
-        );
-      });
+      // Exactly one annotation line per dump row, always — every row is two
+      // lines tall whether or not it holds pointers, so the address column and
+      // the scroll position keep a fixed rhythm instead of jumping by how many
+      // slots happened to be annotated. Each label is clipped to its own word
+      // column (full text on hover), so labels can never collide or widen the
+      // dump into a horizontal scroll.
+      rows.push(
+        <div key={`a${off}`} className="memannot">
+          <span className="memaddr annospacer">0x000000000000</span>
+          <span className="membytes">
+            {annos.map((a, wi) => (
+              <span key={wi} className="annocell" style={{ width: `${wordW + 2}ch` }}>
+                {a && (
+                  <span className={"anno" + (a.cls ? " " + a.cls : "") + (a.follow ? " annofollow" : "")}
+                        title={a.follow ? `follow ${a.follow.name} → ${a.follow.target}  (typed as ${a.follow.type})` : (a.full || a.text)}
+                        onClick={a.follow ? () => doFollow(a.follow!) : undefined}>↑ {a.text}</span>
+                )}
+              </span>
+            ))}
+          </span>
+        </div>
+      );
     }
   }
   return (
