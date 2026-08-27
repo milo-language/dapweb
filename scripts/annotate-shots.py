@@ -2,9 +2,10 @@
 """Annotate dapweb screenshots for the README.
 
 A raw screenshot of a debugger is a wall of panes, and a reader cannot tell which
-part the surrounding paragraph is about. This dims everything outside the regions
-of interest, outlines them, and labels them, so the picture makes the same point
-the prose does.
+part the surrounding paragraph is about. This outlines the regions of interest and
+labels them, so the picture makes the same point the prose does. The rest of the
+frame is left at full brightness: a reader wants to see the whole debugger, and
+dimming it hides the very thing the screenshot is there to show.
 
 Only needed to REGENERATE docs/images; nothing in the build or test path imports
 it. It wants Pillow, which is not a dependency of this repo:
@@ -14,7 +15,7 @@ it. It wants Pillow, which is not a dependency of this repo:
 
 The spec is JSON so the call sites stay readable:
 
-    {"src": "raw.jpg", "out": "docs/images/x.png", "dim": 0.62,
+    {"src": "raw.jpg", "out": "docs/images/x.png",
      "regions": [{"box": [x, y, w, h], "label": "what this is", "side": "below"}],
      "gif": {"out": "docs/images/x.gif", "focus": 0}}
 """
@@ -48,17 +49,9 @@ def annotate(spec):
 
 def _compose(img, spec):
     W, H = img.size
-    dim = float(spec.get("dim", 0.62))
     regions = spec["regions"]
 
-    # Dim the whole frame, then paste the regions of interest back at full
-    # brightness. Compositing this way (rather than drawing four dark rectangles
-    # around each region) keeps overlapping regions from double-darkening.
-    out = Image.blend(img, Image.new("RGB", img.size, (0, 0, 0)), dim)
-    for r in regions:
-        x, y, w, h = r["box"]
-        out.paste(img.crop((x, y, x + w, y + h)), (x, y))
-
+    out = img.copy()
     d = ImageDraw.Draw(out)
     label_font = _font(int(spec.get("label_size", 17)))
     for r in regions:
@@ -87,10 +80,9 @@ def _compose(img, spec):
 def _reveal(raw, annotated, r):
     """Cross-fade the plain screenshot into the annotated one, and back.
 
-    A still annotation asks the reader to trust that the dimmed parts were once
-    readable. Fading from the real screenshot makes the callout obviously a
-    highlight OF something rather than a different picture, and looping it means
-    the reader can look at either state for as long as they want.
+    Fading in from the plain screenshot makes the callout obviously a highlight OF
+    something rather than a different picture, and looping it means the reader can
+    look at either state for as long as they want.
     """
     outw = int(r.get("width", 900))
     def scaled(im):
@@ -181,13 +173,12 @@ def story(spec):
     """
     steps = spec["steps"]
     outw = int(spec.get("width", 880))
-    dim = float(spec.get("dim", 0.66))
     step_ms = int(spec.get("step_ms", 55))
     fade = int(spec.get("fade", 6))
 
     shots = []
     for i, st in enumerate(steps, 1):
-        sub = {"src": st["src"], "out": "/dev/null", "dim": dim,
+        sub = {"src": st["src"], "out": "/dev/null",
                "regions": st["regions"], "label_size": spec.get("label_size", 17)}
         img = Image.open(st["src"]).convert("RGB")
         ann = _compose(img, sub)
