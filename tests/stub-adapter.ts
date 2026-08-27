@@ -12,9 +12,14 @@ const log = process.env.STUB_LOG;
 
 // process.stdout.write, not Bun.write(Bun.stdout): Bun.write is async and two
 // in-flight writes can interleave, which splits a DAP frame down the middle.
+//
+// The header is spelled in lower case ON PURPOSE. LSP's base protocol, which DAP
+// borrows wholesale, treats header field names as HTTP-style and therefore
+// case-insensitive, so "content-length" is a conformant peer and not a malformed
+// one. dapweb used to match the exact case and would hang on this stub forever.
 function send(msg: any) {
   const body = JSON.stringify(msg);
-  process.stdout.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+  process.stdout.write(`content-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
 }
 
 let seq = 0;

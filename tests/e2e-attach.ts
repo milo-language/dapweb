@@ -78,6 +78,10 @@ const dapPath = `bun ${root}/tests/stub-adapter.ts`;
            config: { type: "lldb", name: "attach stub", request: "attach", pid: 4242, dapPath } });
   const stop = await a.wait(m => m.type === "stopped");
   ok(stop, "attach with stop-at-main produces a stop", stop?.reason);
+  // The stub frames with a lower-case "content-length", which the base protocol
+  // allows and dapweb's own framing used to reject. Reaching a stop at all is
+  // the assertion: a case-sensitive reader never finds a header here.
+  ok(stop, "a conformant lower-case Content-Length header is accepted", stop?.reason);
 
   const sent = await reqs(log);
   const attach = sent.find(r => r.command === "attach");

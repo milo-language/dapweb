@@ -1,10 +1,21 @@
 // DAP-specific message glue. The wire framing (Content-Length header + body,
-// identical to LSP) lives in framing.milo; this file binds it to a Child.
+// identical to LSP) comes from the json-rpc package, which owns that format for
+// both protocols; this file binds it to a Child.
 
 from "std/process" import { Child }
-from "framing" import { writeFrameFd }
+from "json-rpc/frame" import { writeFrame as writeFramedTo }
 
-// Frame and write a JSON payload to the child's stdin.
+// Frame and write a JSON payload to the child's stdin. Collapses back to the
+// i64 contract its callers already check (`< 0` is the failure): ShortWrite is
+// the only thing the package can report on this path, and no caller has a
+// second thing it could do about it.
 pub fn writeFrame(child: &Child, payload: &string): i64 {
-    return writeFrameFd(child.stdinFd, payload)
+    match writeFramedTo(child.stdinFd, payload) {
+        Result.Ok(n) => {
+            return n
+        }
+        Result.Err(_e) => {
+            return -1 as i64
+        }
+    }
 }

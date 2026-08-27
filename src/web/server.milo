@@ -16,7 +16,7 @@
 //   PTY pump   (P) — pty master → WS "ptyData".
 //
 // Concurrency invariants (all yield-point reasoning; scheduler is cooperative):
-//   * DAP frames are written with a single write() (see framing.milo), so R's
+//   * DAP frames are written with a single write() (see json-rpc/frame), so R's
 //     and D's requests can't interleave; odd/even seq split means no collisions.
 //   * All WS sends funnel through W, so WS frames can't interleave either.
 //   * Channels are drained with tryRecv only — never a blocking recv on the
@@ -97,8 +97,8 @@ from "std/path" import {
 from "../dap/client" import {
     DapClient, DapMsg
 }
-from "../dap/framing" import {
-    writeFrameFd
+from "json-rpc/frame" import {
+    writeFrame as writeFrameFd
 }
 from "../dap/session" import {
     LaunchSpec, AdapterSel, resolveConfig, resolveAdapterCmd,
@@ -831,6 +831,9 @@ fn outputMsg(raw: &string): string {
 fn sendReqFd(fd: i32, seq: i64, command: &string, argsJson: &string): void {
     let payload = Json.obj().int("seq", seq).str("type", "request")
         .str("command", command.clone()).raw("arguments", argsJson.clone()).build()
+    // Deliberately unchecked, as before: R has no path to report a short write
+    // to, and a failed write here surfaces as the adapter going quiet, which D
+    // already handles.
     let _w = writeFrameFd(fd, payload)
 }
 

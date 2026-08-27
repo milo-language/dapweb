@@ -16,8 +16,8 @@ from "std/net" import {
 from "std/json" import {
     Json
 }
-from "framing" import {
-    readFrame
+from "json-rpc/frame" import {
+    readFrame, frameErrorMessage
 }
 from "protocol" import {
     writeFrame
@@ -172,9 +172,21 @@ impl DapClient {
     }
 
     // Read and decode exactly one message off the adapter (blocking).
+    //
+    // Every framing failure is terminal for this stream — the peer is gone, or
+    // framing desynced and the next read is no longer at a frame boundary — so
+    // they all collapse to one Err here. What changed is that the text now says
+    // WHICH happened; the old hand-rolled framing reported a clean adapter exit
+    // and a corrupt header with the same "eof or bad header".
     fn recv(self: &Self): Result<DapMsg> {
-        let raw = readFrame(self.child.stdoutFd)?
-        return _decode(raw)
+        match readFrame(self.child.stdoutFd) {
+            Result.Ok(raw) => {
+                return _decode(raw)
+            }
+            Result.Err(e) => {
+                return Result.Err(frameErrorMessage(e))
+            }
+        }
     }
 
     // Send a request and pump messages until its response arrives, printing any

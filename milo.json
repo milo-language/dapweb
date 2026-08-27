@@ -1,0 +1,7 @@
+{
+  "name": "dapweb",
+  "version": "0.1.0",
+  "deps": {
+    "json-rpc": "github.com/milo-language/milo-json-rpc@v0.1.0"
+  }
+}
