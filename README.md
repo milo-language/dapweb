@@ -183,6 +183,24 @@ adapter, its arguments and reply are that DAP request's, specified at
 dapweb's own. An unrecognised command is refused and names the vocabulary back
 at you, and `api request` exits non-zero so a script can branch on it.
 
+`dapweb log` reads the journal: every command a peer sent and every event a
+session answered with, recorded to one sqlite file per machine
+(`$XDG_STATE_HOME/dapweb/journal.db`, 50MB, oldest events evicted first). It
+reads the file, not a server, which is the point — the session that wedged is
+the one you cannot ask any more:
+
+```sh
+./dapweb log --limit 40                 # what just happened, any session
+./dapweb log --session <id> --json      # one session, JSONL, for an agent
+./dapweb log --dir in --kind setBreakpoint
+./dapweb log --sessions                 # what has been debugged
+./dapweb log --breakpoints              # per line: sessions set vs sessions hit
+```
+
+`--since <seq>` returns only what is new, so an agent can poll it. The same rows
+are served at `/api/log` (`?view=sessions`, `?view=breakpoints`). Recording is
+off with `--no-journal` or `DAPWEB_NO_JOURNAL=1`.
+
 > Unauthenticated, and `eval` reaches the debugger — an exposed port is remote
 > code execution. Keep it on localhost.
 

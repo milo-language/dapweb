@@ -1,0 +1,639 @@
+// The journal — an append-only record of what a session actually did.
+//
+// Every command a peer sends and every broadcast the session answers with
+// already funnels through exactly two places (dispatchClientCmd and
+// broadcastLoop), so recording them is a tap on two functions rather than a
+// change to any of them. What that buys, in order of why it exists:
+//
+//   * postmortem. The terminal's late-join replay is in memory and dies with
+//     the process; an agent that restarted, or a human asking "what did it do
+//     before it wedged", had nothing to read. `dapweb log` answers from disk,
+//     with no server running.
+//   * which lines are worth stopping at. `dapweb log --breakpoints` counts,
+//     per program, how many sessions set a breakpoint at a line and how many
+//     of those actually stopped there — the set-8-times-never-hit line is the
+//     one to delete, and it is a GROUP BY, not a guess.
+//   * where callers get the vocabulary wrong. Refused commands are recorded
+//     WITH the refusal, so the commands table (../commands.milo) can be judged
+//     against what people actually typed at it.
+//
+// Nothing in here may break a debug session: every failure path is silent and
+// returns. A journal that can take the debugger down with it is worse than no
+// journal. Disable with --no-journal or DAPWEB_NO_JOURNAL=1.
+//
+// One file, ~/.local/state/dapweb/journal.db (XDG_STATE_HOME honored), shared
+// by every session on the machine — that sharing is the point, since the
+// breakpoint question spans sessions. Concurrent writers are ordinary
+// multi-process sqlite: WAL plus a busy timeout.
+
+from "std/sqlite" import {
+    Database, Statement, dbOpen, dbClose, dbExec, dbQuery, dbStep, dbFinalize,
+    dbReset, dbBindText, dbBindInt64, dbBindNull, dbColumnText, dbColumnInt64,
+    dbColumnIsNull
+}
+from "std/fs" import {
+    makeDir, fileSizePath
+}
+from "std/json" import {
+    Json
+}
+from "std/env" import {
+    Env
+}
+from "std/time" import {
+    epochMillis
+}
+
+// The whole store, main db + WAL, is held under this. Rows are evicted oldest
+// first — a journal that stops recording because it hit a ceiling would be
+// silently useless exactly when a session ran long enough to be interesting.
+pub let JOURNAL_MAX_BYTES: i64 = 50 * 1024 * 1024
+
+// Overridable so the eviction path can be exercised against a small store
+// rather than by generating 50MB of events, and so a machine where 50MB is the
+// wrong number can say so: DAPWEB_JOURNAL_MAX_BYTES=<bytes>. Values under a
+// megabyte or so are mostly the WAL's own floor (journal_size_limit below), not
+// events.
+var gMaxBytes: i64 = 0
+
+fn jrnMaxBytes(): i64 {
+    if gMaxBytes == 0 {
+        gMaxBytes = JOURNAL_MAX_BYTES
+        if let Option.Some(x) = Env.get("DAPWEB_JOURNAL_MAX_BYTES") {
+            let n = x.parseInt() ?? (0 as i64)
+            if n > 0 {
+                gMaxBytes = n
+            }
+        }
+    }
+    return gMaxBytes
+}
+
+// Per-row payload cap. A stopped frame with locals, a disassembly, a memory
+// window: all bounded, none deleted. `trunc` records the original length so a
+// reader knows the text is a prefix and not valid JSON.
+let PAYLOAD_MAX: i64 = 4096
+
+// Checking a file size on every insert is a stat() per debugger event. Every
+// this many rows OR this many bytes written, whichever comes first: rows alone
+// let a burst of 4KB payloads overshoot by a megabyte, and bytes alone would
+// never check a session that only ever sends tiny commands.
+let PRUNE_EVERY: i64 = 256
+let PRUNE_BYTES: i64 = 256 * 1024
+
+// Milo has no nullable module-scope handle (module init is NYI and a *u8 global
+// cannot be initialized here), so an empty Vec is "not open" and a one-element
+// Vec is the open database. Same trick for the reused insert statement.
+var gDb: Vec<Database> = []
+var gIns: Vec<Statement> = []
+var gFailed: bool = false // an open that failed is never retried
+var gOff: bool = false    // --no-journal / DAPWEB_NO_JOURNAL
+var gSession: string = "" // current session id, stamped on every row
+var gSinceCheck: i64 = 0
+var gSinceBytes: i64 = 0
+
+pub fn journalDisable(): void {
+    gOff = true
+}
+
+pub fn journalDbPath(): string {
+    if let Option.Some(x) = Env.get("DAPWEB_JOURNAL") {
+        if x.len > 0 {
+            return x
+        }
+    }
+    return journalDir() + "/journal.db"
+}
+
+fn journalDir(): string {
+    if let Option.Some(x) = Env.get("XDG_STATE_HOME") {
+        if x.len > 0 {
+            return x + "/dapweb"
+        }
+    }
+    return Env.getOr("HOME", "") + "/.local/state/dapweb"
+}
+
+// mkdir -p (0755), ignoring already-exists. Named apart from ../sessions'
+// identical helper on purpose: milo merges same-named functions across modules
+// into one symbol, so two definitions are one body.
+fn jrnEnsureDir(path: &string): void {
+    var i: i64 = 1
+    while i <= path.len {
+        if i == path.len || path[i] == '/' {
+            let _r = makeDir(path.substr(0, i), 493)
+        }
+        i = i + 1
+    }
+}
+
+fn jrnExec(sql: string): bool {
+    if gDb.len == 0 {
+        return false
+    }
+    match dbExec(gDb[0], sql) {
+        Result.Ok(_n) => {
+            return true
+        }
+        Result.Err(_e) => {
+            return false
+        }
+    }
+}
+
+// Open + migrate, once. Returns false forever after a failure: a missing
+// libsqlite3 or an unwritable state dir must cost one attempt, not one per
+// event.
+pub fn journalOpen(): bool {
+    if gOff || gFailed {
+        return false
+    }
+    if gDb.len > 0 {
+        return true
+    }
+    if let Option.Some(x) = Env.get("DAPWEB_NO_JOURNAL") {
+        if x.len > 0 && x != "0" {
+            gOff = true
+            return false
+        }
+    }
+    let path = journalDbPath()
+    jrnEnsureDir(journalDir())
+    match dbOpen(path.clone()) {
+        Result.Ok(d) => {
+            gDb.push(d)
+        }
+        Result.Err(_e) => {
+            gFailed = true
+            return false
+        }
+    }
+    // auto_vacuum only takes effect on a database with no tables yet, which is
+    // why it precedes the schema: without it a DELETE frees pages inside the
+    // file and the 50MB cap would bound rows while the file kept growing.
+    let _a = jrnExec("PRAGMA auto_vacuum=INCREMENTAL")
+    let _b = jrnExec("PRAGMA journal_mode=WAL")
+    let _c = jrnExec("PRAGMA synchronous=NORMAL")
+    // A checkpoint returns the WAL to this size instead of leaving it at its
+    // high-water mark, and autocheckpoint keeps it there between prunes: the
+    // cap counts the WAL, so an unbounded one would evict live events to make
+    // room for a file that is only a write buffer.
+    let _d = jrnExec("PRAGMA journal_size_limit=524288")
+    let _d2 = jrnExec("PRAGMA wal_autocheckpoint=128")
+    // Every session on the machine writes this one file; a concurrent writer is
+    // normal, not an error.
+    let _e2 = jrnExec("PRAGMA busy_timeout=2000")
+    if !jrnExecFatal("CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, started_ms INTEGER NOT NULL, ended_ms INTEGER, pid INTEGER, port INTEGER, program TEXT, adapter TEXT, cwd TEXT)") {
+        return false
+    }
+    if !jrnExecFatal("CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY, session TEXT NOT NULL, at_ms INTEGER NOT NULL, dir TEXT NOT NULL, kind TEXT NOT NULL, peer TEXT NOT NULL DEFAULT '', who TEXT NOT NULL DEFAULT '', ok INTEGER, err TEXT, path TEXT, line INTEGER, tid INTEGER, trunc INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL DEFAULT '')") {
+        return false
+    }
+    let _i1 = jrnExec("CREATE INDEX IF NOT EXISTS ev_sess ON events(session, seq)")
+    let _i2 = jrnExec("CREATE INDEX IF NOT EXISTS ev_kind ON events(kind, at_ms)")
+    match dbQuery(gDb[0], "INSERT INTO events(session, at_ms, dir, kind, peer, who, ok, err, path, line, tid, trunc, payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)") {
+        Result.Ok(s) => {
+            gIns.push(s)
+        }
+        Result.Err(_e) => {
+            gFailed = true
+            return false
+        }
+    }
+    return true
+}
+
+// A schema statement that failed: the store is unusable, so say so once and
+// stop trying rather than answering every insert with a silent no.
+fn jrnExecFatal(sql: string): bool {
+    if jrnExec(sql) {
+        return true
+    }
+    gFailed = true
+    return false
+}
+
+// Closing does not disable the journal: a CLI process writes, closes, and then
+// reads, and `dapweb log` opens on its first query.
+pub fn journalClose(): void {
+    if gIns.len > 0 {
+        dbFinalize(gIns[0])
+        gIns = []
+    }
+    if gDb.len > 0 {
+        dbClose(gDb[0])
+        gDb = []
+    }
+}
+
+// A session's identity row. Called at boot, whenever the target is retargeted,
+// and on `newSession` (which mints a new id inside one process). started_ms is
+// set by the first insert and never moved, so it is the reset time for a reset
+// session, not the server's boot time.
+pub fn journalSession(id: &string, pid: i64, port: i64, program: &string, adapter: &string, cwd: &string): void {
+    if !journalOpen() {
+        return
+    }
+    gSession = id.clone()
+    match dbQuery(gDb[0], "INSERT OR IGNORE INTO sessions(id, started_ms, pid, port, program, adapter, cwd) VALUES(?,?,?,?,?,?,?)") {
+        Result.Ok(s) => {
+            let _1 = dbBindText(s, 1, id.clone())
+            let _2 = dbBindInt64(s, 2, epochMillis())
+            let _3 = dbBindInt64(s, 3, pid)
+            let _4 = dbBindInt64(s, 4, port)
+            let _5 = dbBindText(s, 5, program.clone())
+            let _6 = dbBindText(s, 6, adapter.clone())
+            let _7 = dbBindText(s, 7, cwd.clone())
+            let _st = dbStep(s)
+            dbFinalize(s)
+        }
+        Result.Err(_e) => {
+            return
+        }
+    }
+    // The program changes under a retarget and the dashboard's whole job is to
+    // say what a session is on; the journal's answer must age the same way.
+    match dbQuery(gDb[0], "UPDATE sessions SET pid=?, port=?, program=?, adapter=?, cwd=? WHERE id=?") {
+        Result.Ok(u) => {
+            let _1 = dbBindInt64(u, 1, pid)
+            let _2 = dbBindInt64(u, 2, port)
+            let _3 = dbBindText(u, 3, program.clone())
+            let _4 = dbBindText(u, 4, adapter.clone())
+            let _5 = dbBindText(u, 5, cwd.clone())
+            let _6 = dbBindText(u, 6, id.clone())
+            let _st = dbStep(u)
+            dbFinalize(u)
+        }
+        Result.Err(_e) => {
+        }
+    }
+}
+
+pub fn journalEnd(): void {
+    if gDb.len == 0 || gSession.len == 0 {
+        return
+    }
+    match dbQuery(gDb[0], "UPDATE sessions SET ended_ms=? WHERE id=?") {
+        Result.Ok(u) => {
+            let _1 = dbBindInt64(u, 1, epochMillis())
+            let _2 = dbBindText(u, 2, gSession.clone())
+            let _st = dbStep(u)
+            dbFinalize(u)
+        }
+        Result.Err(_e) => {
+        }
+    }
+    journalClose()
+}
+
+// A command a peer sent. Recorded before it runs and whether or not it is a
+// command at all: a refusal is the row worth having, since it says what a
+// caller believed the vocabulary was.
+// `path` is the file the command means, already canonical — the caller resolves
+// it, because a breakpoint recorded under the spelling the caller typed and a
+// stop recorded under the absolute path the adapter reports never join, and
+// that join is what --breakpoints counts. "" falls back to the payload's own
+// "path", which is what every other command carries.
+pub fn journalCmd(cmd: &string, peer: &string, who: &string, ok: bool, err: &string, payload: &string, path: &string): void {
+    if !journalOpen() {
+        return
+    }
+    var okI: i64 = 0
+    if ok {
+        okI = 1
+    }
+    jrnInsert("in", cmd.clone(), peer.clone(), who.clone(), okI, err, payload, path.clone())
+}
+
+// A broadcast the session answered with. `kind` is the message's own "type".
+pub fn journalOut(payload: &string): void {
+    if !journalOpen() {
+        return
+    }
+    let kind = jrnStr(payload, "type")
+    if kind.len == 0 {
+        return
+    }
+    // ptyData is raw terminal bytes (a chunk per keystroke, and the same text
+    // `output` already carries in lines); source is a whole file. Both would
+    // evict the events worth keeping and neither answers a question the journal
+    // is for.
+    if kind == "ptyData" || kind == "source" {
+        return
+    }
+    jrnInsert("out", kind, "", "", 0 - 1, "", payload, "")
+}
+
+// okI < 0 binds NULL — an out row has nothing to say about success.
+fn jrnInsert(dir: string, kind: string, peer: string, who: string, okI: i64, err: &string, payload: &string, pathOverride: string): void {
+    if gIns.len == 0 {
+        return
+    }
+    var text = payload.clone()
+    var trunc: i64 = 0
+    if text.len > PAYLOAD_MAX {
+        trunc = text.len
+        text = text.substr(0, PAYLOAD_MAX)
+    }
+    dbReset(gIns[0])
+    let _1 = dbBindText(gIns[0], 1, gSession.clone())
+    let _2 = dbBindInt64(gIns[0], 2, epochMillis())
+    let _3 = dbBindText(gIns[0], 3, dir)
+    let _4 = dbBindText(gIns[0], 4, kind)
+    let _5 = dbBindText(gIns[0], 5, peer)
+    let _6 = dbBindText(gIns[0], 6, who)
+    if okI < 0 {
+        let _7 = dbBindNull(gIns[0], 7)
+    } else {
+        let _7 = dbBindInt64(gIns[0], 7, okI)
+    }
+    let _8 = dbBindText(gIns[0], 8, err.clone())
+    // Promoted out of the payload because these three are what every question
+    // groups by, and json_extract is not something to bet the query layer on.
+    var path = pathOverride.clone()
+    if path.len == 0 {
+        path = jrnStr(payload, "path")
+    }
+    if path.len > 0 {
+        let _9 = dbBindText(gIns[0], 9, path)
+    } else {
+        let _9 = dbBindNull(gIns[0], 9)
+    }
+    let line = jrnI64(payload, "line")
+    if line >= 0 {
+        let _10 = dbBindInt64(gIns[0], 10, line)
+    } else {
+        let _10 = dbBindNull(gIns[0], 10)
+    }
+    let tid = jrnI64(payload, "tid")
+    if tid >= 0 {
+        let _11 = dbBindInt64(gIns[0], 11, tid)
+    } else {
+        let _11 = dbBindNull(gIns[0], 11)
+    }
+    let _12 = dbBindInt64(gIns[0], 12, trunc)
+    let textLen = text.len
+    let _13 = dbBindText(gIns[0], 13, text)
+    let _st = dbStep(gIns[0])
+    // Reset immediately, not just before the next bind: a stepped statement
+    // still holds this connection's read lock, and a checkpoint cannot reset
+    // the WAL while one is held — which is how the store stayed at its cap in
+    // the main file while the WAL grew without bound behind it.
+    dbReset(gIns[0])
+    gSinceCheck = gSinceCheck + 1
+    gSinceBytes = gSinceBytes + textLen
+    if gSinceCheck >= PRUNE_EVERY || gSinceBytes >= PRUNE_BYTES {
+        gSinceCheck = 0
+        gSinceBytes = 0
+        jrnPrune()
+    }
+}
+
+// Bytes on disk: the main file plus the WAL, since a recent burst lives in the
+// WAL until sqlite checkpoints it and counting only the main file would let the
+// store sit above the cap for as long as writes keep arriving.
+fn jrnBytes(): i64 {
+    let p = journalDbPath()
+    var total: i64 = 0
+    if let Option.Some(a) = fileSizePath(p) {
+        total = total + a
+    }
+    if let Option.Some(b) = fileSizePath(p + "-wal") {
+        total = total + b
+    }
+    return total
+}
+
+// Over the cap: drop the oldest fifth and hand the pages back to the file
+// system. A fifth rather than "just enough" so this runs rarely instead of on
+// every insert once the store is full.
+fn jrnPrune(): void {
+    let cap = jrnMaxBytes()
+    // Rounds, because a DELETE frees pages the file only gives back after the
+    // checkpoint and the vacuum, so one pass cannot know whether it did enough.
+    // Bounded: a store that will not shrink (every row belongs to one enormous
+    // session) must cost a few statements, not an unbounded loop inside a
+    // debugger event.
+    var rounds: i64 = 0
+    while rounds < 8 && jrnBytes() > cap {
+        let _d = jrnExec("DELETE FROM events WHERE seq IN (SELECT seq FROM events ORDER BY seq LIMIT (SELECT count(*) / 5 + 1 FROM events))")
+        // A finished session whose every event has aged out is a row nothing
+        // can join to. A live one is kept: its events are still arriving.
+        let _s = jrnExec("DELETE FROM sessions WHERE ended_ms IS NOT NULL AND id NOT IN (SELECT DISTINCT session FROM events)")
+        // Vacuum THEN checkpoint. In WAL mode the vacuum's truncation is
+        // written to the WAL like any other change, so the main file only
+        // actually shrinks at the next checkpoint — the other order frees pages
+        // that stay on disk until something else happens to checkpoint.
+        let _v = jrnExec("PRAGMA incremental_vacuum")
+        let _c = jrnExec("PRAGMA wal_checkpoint(TRUNCATE)")
+        rounds = rounds + 1
+    }
+}
+
+// ── Reading ──
+
+pub struct LogFilter {
+    session: string, // "" = every session
+    kind: string,    // "" = every command/message type
+    dir: string,     // "in" | "out" | "" for both
+    since: i64,      // seq > this ("resume where I left off"); 0 = from the start
+    limit: i64,      // rows, newest-last; <= 0 = 200
+}
+
+pub fn logFilter(): LogFilter {
+    return LogFilter {
+        session: "", kind: "", dir: "", since: 0 as i64, limit: 0 as i64
+    }
+}
+
+// Rows as JSON objects, oldest first. The limit takes the NEWEST rows and then
+// re-orders, because "the last 200 things that happened" is the question, and
+// "the first 200 things this database ever saw" never is.
+pub fn journalRows(f: &LogFilter): Vec<string> {
+    var out: Vec<string> = []
+    if !journalOpen() {
+        return out
+    }
+    var lim = f.limit
+    if lim <= 0 {
+        lim = 200 as i64
+    }
+    var sql: string = "SELECT seq, session, at_ms, dir, kind, peer, who, ok, err, path, line, tid, trunc, payload FROM events WHERE seq > ?"
+    if f.session.len > 0 {
+        sql = sql + " AND session = ?"
+    }
+    if f.kind.len > 0 {
+        sql = sql + " AND kind = ?"
+    }
+    if f.dir.len > 0 {
+        sql = sql + " AND dir = ?"
+    }
+    sql = sql + " ORDER BY seq DESC LIMIT ?"
+    var st = match dbQuery(gDb[0], sql) {
+        Result.Ok(s) => s,
+        Result.Err(_e) => {
+            return out
+        }
+    }
+    var idx: i32 = 1
+    let _b0 = dbBindInt64(st, idx, f.since)
+    if f.session.len > 0 {
+        idx = idx + 1
+        let _b = dbBindText(st, idx, f.session.clone())
+    }
+    if f.kind.len > 0 {
+        idx = idx + 1
+        let _b = dbBindText(st, idx, f.kind.clone())
+    }
+    if f.dir.len > 0 {
+        idx = idx + 1
+        let _b = dbBindText(st, idx, f.dir.clone())
+    }
+    idx = idx + 1
+    let _bl = dbBindInt64(st, idx, lim)
+    var rows: Vec<string> = []
+    while dbStep(st) {
+        var b = Json.obj()
+            .int("seq", dbColumnInt64(st, 0))
+            .str("session", dbColumnText(st, 1))
+            .int("at", dbColumnInt64(st, 2))
+            .str("dir", dbColumnText(st, 3))
+            .str("kind", dbColumnText(st, 4))
+        if dbColumnText(st, 5).len > 0 {
+            b = b.str("peer", dbColumnText(st, 5))
+        }
+        if dbColumnText(st, 6).len > 0 {
+            b = b.str("who", dbColumnText(st, 6))
+        }
+        if !dbColumnIsNull(st, 7) {
+            b = b.bool("ok", dbColumnInt64(st, 7) != 0)
+        }
+        if dbColumnText(st, 8).len > 0 {
+            b = b.str("error", dbColumnText(st, 8))
+        }
+        if !dbColumnIsNull(st, 9) {
+            b = b.str("path", dbColumnText(st, 9))
+        }
+        if !dbColumnIsNull(st, 10) {
+            b = b.int("line", dbColumnInt64(st, 10))
+        }
+        if !dbColumnIsNull(st, 11) {
+            b = b.int("tid", dbColumnInt64(st, 11))
+        }
+        if dbColumnInt64(st, 12) > 0 {
+            b = b.int("truncatedFrom", dbColumnInt64(st, 12))
+        }
+        b = b.str("payload", dbColumnText(st, 13))
+        rows.push(b.build())
+    }
+    dbFinalize(st)
+    var i = rows.len - 1
+    while i >= 0 {
+        out.push(rows[i].clone())
+        i = i - 1
+    }
+    return out
+}
+
+// The sessions table, newest first.
+pub fn journalSessions(limit: i64): Vec<string> {
+    var out: Vec<string> = []
+    if !journalOpen() {
+        return out
+    }
+    var lim = limit
+    if lim <= 0 {
+        lim = 50 as i64
+    }
+    var st = match dbQuery(gDb[0], "SELECT s.id, s.started_ms, s.ended_ms, s.pid, s.port, s.program, s.adapter, s.cwd, (SELECT count(*) FROM events e WHERE e.session = s.id) FROM sessions s ORDER BY s.started_ms DESC LIMIT ?") {
+        Result.Ok(s) => s,
+        Result.Err(_e) => {
+            return out
+        }
+    }
+    let _b = dbBindInt64(st, 1, lim)
+    while dbStep(st) {
+        var b = Json.obj()
+            .str("session", dbColumnText(st, 0))
+            .int("startedAt", dbColumnInt64(st, 1))
+        if !dbColumnIsNull(st, 2) {
+            b = b.int("endedAt", dbColumnInt64(st, 2))
+        }
+        out.push(b.int("pid", dbColumnInt64(st, 3))
+            .int("port", dbColumnInt64(st, 4))
+            .str("program", dbColumnText(st, 5))
+            .str("adapter", dbColumnText(st, 6))
+            .str("cwd", dbColumnText(st, 7))
+            .int("events", dbColumnInt64(st, 8))
+            .build())
+    }
+    dbFinalize(st)
+    return out
+}
+
+// Per (program, file, line): how many sessions set a breakpoint there, and in
+// how many of those the debuggee then stopped on that line.
+//
+// "Hit" is a stop that landed on the line, not a DAP stop reason — a step that
+// happens to arrive at a breakpoint line counts. That over-counts hits, which
+// is the safe direction: the row this is meant to surface is the breakpoint set
+// again and again that nothing ever reaches, and an over-count cannot invent
+// one of those.
+pub fn journalBreakpoints(program: &string, limit: i64): Vec<string> {
+    var out: Vec<string> = []
+    if !journalOpen() {
+        return out
+    }
+    var lim = limit
+    if lim <= 0 {
+        lim = 100 as i64
+    }
+    var sql: string = "WITH bp AS (SELECT s.program AS program, e.session AS session, e.path AS path, e.line AS line FROM events e JOIN sessions s ON s.id = e.session WHERE e.dir = 'in' AND e.kind = 'setBreakpoint' AND e.ok = 1 AND e.path IS NOT NULL AND e.line IS NOT NULL"
+    if program.len > 0 {
+        sql = sql + " AND s.program = ?"
+    }
+    sql = sql + " GROUP BY s.program, e.session, e.path, e.line) SELECT bp.program, bp.path, bp.line, count(*) AS setIn, sum(CASE WHEN EXISTS(SELECT 1 FROM events st WHERE st.session = bp.session AND st.dir = 'out' AND st.kind = 'stopped' AND st.path = bp.path AND st.line = bp.line) THEN 1 ELSE 0 END) AS hitIn FROM bp GROUP BY bp.program, bp.path, bp.line ORDER BY setIn DESC, hitIn ASC LIMIT ?"
+    var st = match dbQuery(gDb[0], sql) {
+        Result.Ok(s) => s,
+        Result.Err(_e) => {
+            return out
+        }
+    }
+    var idx: i32 = 1
+    if program.len > 0 {
+        let _b = dbBindText(st, idx, program.clone())
+        idx = idx + 1
+    }
+    let _bl = dbBindInt64(st, idx, lim)
+    while dbStep(st) {
+        out.push(Json.obj()
+            .str("program", dbColumnText(st, 0))
+            .str("path", dbColumnText(st, 1))
+            .int("line", dbColumnInt64(st, 2))
+            .int("sessionsSet", dbColumnInt64(st, 3))
+            .int("sessionsHit", dbColumnInt64(st, 4))
+            .build())
+    }
+    dbFinalize(st)
+    return out
+}
+
+// ── JSON scalars ──
+//
+// Same shape as web/server.milo's jStr/jI64 and deliberately not the same
+// names: milo merges same-named functions across modules into one symbol.
+
+fn jrnStr(raw: &string, key: &string): string {
+    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+        return doc.str(key) ?? ""
+    }
+    return ""
+}
+
+// -1 for absent, so a real 0 (line 0, thread 0) is not mistaken for missing.
+fn jrnI64(raw: &string, key: &string): i64 {
+    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+        return doc.i64(key) ?? (0 - 1)
+    }
+    return 0 - 1
+}

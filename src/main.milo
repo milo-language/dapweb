@@ -39,6 +39,9 @@ from "api/main" import {
 from "start" import {
     startMain
 }
+from "log" import {
+    logMain
+}
 from "version" import {
     versionText
 }
@@ -47,8 +50,9 @@ from "version" import {
 // roster + examples live in the description; `command` is a trailing positional
 // whose remaining tokens are forwarded verbatim to the chosen subcommand.
 fn topParser(): ArgParser {
-    var p = ArgParser.new("dapweb", "web + programmatic interface for any DAP debugger\n\n" + "commands:\n" + "  web     browser debugger UI + shared co-debug session server\n" + "  api     drive a running session from the CLI (list/state/request/eval/...)\n" + "  start   start a session in the background and print its id/port/url\n\n" + "run 'dapweb <command> --help' for that command's options\n\n" + "quick start (the 90% invocation — path to a binary implies `web`):\n" + "  dapweb /tmp/a.out --those --args\n" + "or boot idle and configure the target in the browser:\n" + "  dapweb web --port 8080\n" + "coordinate from an agent or a shell (same live session the browser shows):\n" + "  dapweb api request --await stopped '{\"cmd\":\"run\"}'")
-    p.addOptionalPositional("command", "web | api | start")
+    var p = ArgParser.new("dapweb", "web + programmatic interface for any DAP debugger\n\n" + "commands:\n" + "  web     browser debugger UI + shared co-debug session server\n" + "  api     drive a running session from the CLI (list/state/request/eval/...)\n" + "  start   start a session in the background and print its id/port/url\n"
+        + "  log     read the journal: what every session was asked to do, and answered\n\n" + "run 'dapweb <command> --help' for that command's options\n\n" + "quick start (the 90% invocation — path to a binary implies `web`):\n" + "  dapweb /tmp/a.out --those --args\n" + "or boot idle and configure the target in the browser:\n" + "  dapweb web --port 8080\n" + "coordinate from an agent or a shell (same live session the browser shows):\n" + "  dapweb api request --await stopped '{\"cmd\":\"run\"}'")
+    p.addOptionalPositional("command", "web | api | start | log")
     p.enableTrailingArgs() // stop parsing at the command; forward the rest as-is
     return p
 }
@@ -94,6 +98,9 @@ fn main(): i32 {
     }
     if sub == "start" {
         return startMain(subArgv)
+    }
+    if sub == "log" {
+        return logMain(subArgv)
     }
 
     // `dapweb <program> [args...]` — the 90% invocation. A path that exists is a

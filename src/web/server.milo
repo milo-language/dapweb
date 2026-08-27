@@ -64,6 +64,10 @@ from "../sessions" import {
 from "./binfo" import {
     binInfoJson
 }
+from "../journal" import {
+    journalDisable, journalSession, journalCmd, journalOut, journalEnd,
+    journalRows, journalSessions, journalBreakpoints, logFilter
+}
 from "std/signal" import {
     ignoreSignal, SIGPIPE
 }
@@ -680,6 +684,10 @@ fn broadcastLoop(bus: Channel<string>, busWakeRd: i32): void {
         while true {
             match bus.tryRecv() {
                 Option.Some(m) => {
+                    // The one funnel every broadcast passes through. Per-peer
+                    // late-join replays go straight to their own channel and
+                    // are deliberately not recorded twice.
+                    journalOut(m)
                     for sink in gSinks {
                         wsPush(sink.ch, sink.wakeWr, m.clone())
                     }
@@ -2135,6 +2143,19 @@ fn activityText(c: &string, payload: &string): string {
     return cmdVerb(c)
 }
 
+// Which file a command means, canonical. The breakpoint commands fall back to
+// the session's source when the payload names none, and this is the only place
+// that rule lives: the journal keys its breakpoint counts on the same answer the
+// breakpoint itself is stored under, and two spellings of one path is exactly
+// what would make those counts wrong.
+fn cmdPath(c: &string, payload: &string): string {
+    var path = absSourcePath(jStr(payload, "path"))
+    if path.len == 0 && (c == "setBreakpoint" || c == "clearBreakpoint") {
+        path = absSourcePath(srcPath)
+    }
+    return path
+}
+
 // Returns whether the command was recognised. A caller that answers over HTTP
 // needs that: an unknown `cmd` used to fall off the end of the if-chain, do
 // nothing, and still be answered {"ok":true}, so an agent's typo looked exactly
@@ -2144,8 +2165,10 @@ fn activityText(c: &string, payload: &string): string {
 fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): bool {
     let c = jStr(payload, "cmd")
     if !isKnownCmd(c) {
+        journalCmd(c, peerKind, peerLabel, false, "not a dapweb command", payload, "")
         return false
     }
+    journalCmd(c, peerKind, peerLabel, true, "", payload, cmdPath(c, payload))
     // A browser peer's actions are self-evident to whoever performed them; an
     // agent's are not. Announce before acting, so the human watching the UI is
     // never surprised by a program that moves on its own.
@@ -2159,10 +2182,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
     }
     if c == "setBreakpoint" || c == "clearBreakpoint" {
         let line = jI64(payload, "line", 0 as i64)
-        var path = absSourcePath(jStr(payload, "path"))
-        if path.len == 0 {
-            path = absSourcePath(srcPath)
-        }
+        let path = cmdPath(c, payload)
         // Upsert: drop any existing bp at (path, line), then re-add for
         // "set" (a condition edit is a set on an existing line).
         var keep: Vec<Bp> = []
@@ -2538,6 +2558,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         gRegionsMsg = ""
         gOutputLog = []
         gSessionId = newSessionName(sessionNameSeeds())
+        journalHere()
         logEvent("session reset", $"new session {gSessionId}")
         pushHelloState(bus, busWakeWr)
     }
@@ -2565,6 +2586,19 @@ fn registerSession(port: i64): void {
     gListenPort = port
     gStartedAt = epochMillis()
     writeSession(gSessionId, getpid() as i64, port, binPath, adapterId(), gStartedAt)
+    journalHere()
+}
+
+// The journal's copy of this session's identity. Called wherever the registry
+// descriptor is written, and on a session reset — the journal keys every event
+// on the session id, so a reset that did not tell it would file the new
+// session's events under the old id.
+fn journalHere(): void {
+    var cwd: string = ""
+    if let Result.Ok(d) = currentDir() {
+        cwd = d
+    }
+    journalSession(gSessionId, getpid() as i64, gListenPort, binPath, adapterId(), cwd)
 }
 
 // The descriptor names the program this server is debugging, and that changes
@@ -2574,11 +2608,13 @@ fn registerSession(port: i64): void {
 fn refreshSession(): void {
     if gListenPort > 0 {
         writeSession(gSessionId, getpid() as i64, gListenPort, binPath, adapterId(), gStartedAt)
+        journalHere()
     }
 }
 
 fn unregisterSession(): void {
     removeSession(gSessionId)
+    journalEnd()
 }
 
 // The dashboard's "new session" button. A session IS a server process, so making
@@ -3294,6 +3330,45 @@ fn handleConnection(fd: i32, bus: Channel<string>, busWakeWr: i32, pendCh: Chann
             close(fd)
             return
         }
+        // What this machine's sessions have done. Same rows `dapweb log` prints,
+        // over the port an agent is already talking to. Defaults to THIS
+        // session, since the caller driving it is usually asking about its own
+        // work; ?session=all widens to every session in the journal.
+        if apiPath == "/api/log" {
+            var f = logFilter()
+            f.session = gSessionId.clone()
+            let qs = queryParam(apiQuery, "session")
+            if qs == "all" {
+                f.session = ""
+            } else if qs.len > 0 {
+                f.session = qs
+            }
+            f.kind = queryParam(apiQuery, "kind")
+            f.dir = queryParam(apiQuery, "dir")
+            f.since = queryParam(apiQuery, "since").parseInt() ?? (0 as i64)
+            f.limit = queryParam(apiQuery, "limit").parseInt() ?? (0 as i64)
+            var arr: Vec<string> = []
+            if queryParam(apiQuery, "view") == "sessions" {
+                arr = journalSessions(f.limit)
+            } else if queryParam(apiQuery, "view") == "breakpoints" {
+                arr = journalBreakpoints(queryParam(apiQuery, "program"), f.limit)
+            } else {
+                arr = journalRows(f)
+            }
+            var body: string = "["
+            var ai: i64 = 0
+            while ai < arr.len {
+                if ai > 0 {
+                    body = body + ","
+                }
+                body = body + arr[ai]
+                ai = ai + 1
+            }
+            body = body + "]"
+            sendHttp(fd, 200, "application/json", Json.obj().bool("ok", true).raw("rows", body).build())
+            close(fd)
+            return
+        }
         if apiPath == "/api/sessions" {
             sendHttp(fd, 200, "application/json", sessionsJson(gSessionId))
             close(fd)
@@ -3429,6 +3504,7 @@ pub fn webMain(argv: Vec<string>): i32 {
     parser.addI64("idle-ttl", "", "end the debug session after this many seconds with no ws peers attached (0 = never)", 86400)
     parser.addString("webroot", "w", "serve the UI from this dir instead of the copy embedded in the binary (UI dev: src/web/ui/build.sh)", "")
     parser.addBool("no-browser", "", "do not open a browser tab at startup (headless hosts, and servers spawned by another dapweb)")
+    parser.addBool("no-journal", "", "do not record this session's commands and events to the journal (see `dapweb log`)")
     parser.addBool("quiet", "q", "suppress session event log lines (banner only)")
     parser.addBool("verbose", "v", "log stops and steps too (noisy)")
     // A full VS Code launch configuration (inline JSON object or a file path —
@@ -3445,6 +3521,9 @@ pub fn webMain(argv: Vec<string>): i32 {
     srcPath = absSourcePath(args.getString("source") ?? "")
     webroot = args.getString("webroot") ?? ""
     gNoBrowser = args.getBool("no-browser")
+    if args.getBool("no-journal") {
+        journalDisable()
+    }
     gLogLevel = 1
     if args.getBool("quiet") {
         gLogLevel = 0

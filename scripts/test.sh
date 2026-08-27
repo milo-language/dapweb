@@ -84,6 +84,7 @@ self_suite  e2e-attach
 self_suite  e2e-commands
 self_suite  e2e-start
 self_suite  e2e-history
+self_suite  journal
 
 rm -rf "$state"
 echo ""

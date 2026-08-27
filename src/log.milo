@@ -1,0 +1,204 @@
+// `dapweb log` — read the journal back.
+//
+// The journal (../journal.milo) is written by every session on this machine;
+// this is the reader, and it deliberately does not need a running server. The
+// session that wedged is exactly the one you cannot ask any more.
+//
+//   dapweb log                          the last 200 events, every session
+//   dapweb log --session <id> --json    one session, as JSONL for an agent
+//   dapweb log --dir in --limit 40      just what peers asked for
+//   dapweb log --kind stepOver          one command across every session
+//   dapweb log --sessions               what has been debugged, newest first
+//   dapweb log --breakpoints            per line: sessions set vs sessions hit
+//
+// --since takes a seq from a previous run, so an agent polling this reads only
+// what is new.
+
+from "std/argparse" import {
+    ArgParser
+}
+from "std/json" import {
+    Json
+}
+from "std/datetime" import {
+    DateTime
+}
+from "./journal" import {
+    journalRows, journalSessions, journalBreakpoints, logFilter, journalDbPath
+}
+
+fn logParser(): ArgParser {
+    var p = ArgParser.new("dapweb log", "read the session journal: every command a peer sent and every event a session answered with\n\n"
+        + "Reads $XDG_STATE_HOME/dapweb/journal.db directly — no server needs to be running,\n"
+        + "which is the point: the session that wedged is the one you cannot ask any more.\n\n"
+        + "  dapweb log --session <id> --json    one session, JSONL, for an agent to read back\n"
+        + "  dapweb log --dir in --limit 40      just what peers asked for\n"
+        + "  dapweb log --breakpoints            per line: how often set, how often hit")
+    p.addString("session", "s", "only this session id (default: every session)", "")
+    p.addString("kind", "k", "only this command name or message type", "")
+    p.addString("dir", "d", "only \"in\" (commands peers sent) or \"out\" (events the session answered with)", "")
+    p.addI64("since", "", "only events with a seq greater than this (poll without re-reading)", 0)
+    p.addI64("limit", "n", "how many events, newest first (then printed oldest-first)", 200)
+    p.addBool("sessions", "", "list the recorded sessions instead of events")
+    p.addBool("breakpoints", "", "per (program, file, line): sessions that set a breakpoint there vs sessions that stopped there")
+    p.addString("program", "p", "with --breakpoints: only this program", "")
+    p.addBool("json", "j", "one JSON object per line instead of the human table")
+    return p
+}
+
+fn jstr(raw: &string, key: &string): string {
+    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+        return doc.str(key) ?? ""
+    }
+    return ""
+}
+
+fn jint(raw: &string, key: &string, fallback: i64): i64 {
+    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+        return doc.i64(key) ?? fallback
+    }
+    return fallback
+}
+
+fn jhas(raw: &string, key: &string): bool {
+    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+        if let Option.Some(_v) = doc.get(key) {
+            return true
+        }
+    }
+    return false
+}
+
+fn hhmmss(ms: i64): string {
+    return DateTime.fromEpochLocal(ms / 1000).formatTime()
+}
+
+// The tail of a path. A session debugs one program, so the directory is the same
+// on every line and only costs the width that the interesting part needs.
+fn baseName(p: &string): string {
+    var cut: i64 = 0
+    var i: i64 = 0
+    while i < p.len {
+        if p[i] == '/' {
+            cut = i + 1
+        }
+        i = i + 1
+    }
+    return p.substr(cut, p.len)
+}
+
+// seq, time, direction, kind, then whatever that row is actually about.
+fn renderEvent(row: &string): string {
+    var arrow: string = "→"
+    if jstr(row, "dir") == "out" {
+        arrow = "←"
+    }
+    var detail: string = ""
+    let err = jstr(row, "error")
+    if err.len > 0 {
+        detail = $"refused: {err}"
+    } else if jhas(row, "line") {
+        let path = jstr(row, "path")
+        if path.len > 0 {
+            detail = $"{baseName(path)}:{jint(row, "line", 0 as i64)}"
+        } else {
+            detail = $"line {jint(row, "line", 0 as i64)}"
+        }
+    }
+    let who = jstr(row, "who")
+    let peer = jstr(row, "peer")
+    if who.len > 0 {
+        detail = detail + $"  ({peer}: {who})"
+    } else if peer.len > 0 && peer != "browser" {
+        detail = detail + $"  ({peer})"
+    }
+    let seq = jint(row, "seq", 0 as i64)
+    let t = hhmmss(jint(row, "at", 0 as i64))
+    let kind = jstr(row, "kind").padEnd(16, " ")
+    return $"{seq.toString().padStart(6, " ")}  {t}  {arrow} {kind}{detail}"
+}
+
+fn renderSession(row: &string): string {
+    let id = jstr(row, "session").padEnd(24, " ")
+    let t = hhmmss(jint(row, "startedAt", 0 as i64))
+    var live: string = "  "
+    if !jhas(row, "endedAt") {
+        live = " •" // still running, or a server that never got to say goodbye
+    }
+    let n = jint(row, "events", 0 as i64).toString().padStart(6, " ")
+    return $"{id}{t}{live}{n} events  {jstr(row, "program")}"
+}
+
+fn renderBreakpoint(row: &string): string {
+    let set = jint(row, "sessionsSet", 0 as i64)
+    let hit = jint(row, "sessionsHit", 0 as i64)
+    let where = $"{baseName(jstr(row, "path"))}:{jint(row, "line", 0 as i64)}".padEnd(28, " ")
+    var note: string = ""
+    if hit == 0 && set > 1 {
+        note = "   ← never stopped there"
+    }
+    return $"{where}set in {set.toString().padStart(3, " ")}  stopped in {hit.toString().padStart(3, " ")}{note}"
+}
+
+pub fn logMain(argv: Vec<string>): i32 {
+    var parser = logParser()
+    let args = parser.parseFrom(argv)
+    let asJson = args.getBool("json")
+
+    if args.getBool("sessions") {
+        let rows = journalSessions(args.getI64("limit"))
+        if rows.len == 0 {
+            return empty()
+        }
+        for r in rows {
+            if asJson {
+                print(r)
+            } else {
+                print(renderSession(r))
+            }
+        }
+        return 0
+    }
+
+    if args.getBool("breakpoints") {
+        let rows = journalBreakpoints(args.getString("program") ?? "", args.getI64("limit"))
+        if rows.len == 0 {
+            return empty()
+        }
+        for r in rows {
+            if asJson {
+                print(r)
+            } else {
+                print(renderBreakpoint(r))
+            }
+        }
+        return 0
+    }
+
+    var f = logFilter()
+    f.session = args.getString("session") ?? ""
+    f.kind = args.getString("kind") ?? ""
+    f.dir = args.getString("dir") ?? ""
+    f.since = args.getI64("since")
+    f.limit = args.getI64("limit")
+    let rows = journalRows(f)
+    if rows.len == 0 {
+        return empty()
+    }
+    for r in rows {
+        if asJson {
+            print(r)
+        } else {
+            print(renderEvent(r))
+        }
+    }
+    return 0
+}
+
+// Nothing to show is not an error, but silence looks like a broken command —
+// say which file was read, since an unexpected $XDG_STATE_HOME is the usual
+// reason a journal someone else is writing looks empty.
+fn empty(): i32 {
+    eprint($"no matching journal entries in {journalDbPath()}\n")
+    return 0
+}

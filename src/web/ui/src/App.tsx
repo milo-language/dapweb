@@ -14,6 +14,21 @@ type Watch = { expr: string; value: string | null };
 // one level of expanded members (name/type/value) rendered in the tooltip.
 type HoverInfo = { value: string; children?: HoverVar[] };
 
+// Python adapters (debugpy) return an object's dunder members behind synthetic
+// group rows — "special variables", "function variables", "class variables" —
+// and those rows come back FIRST, ahead of the attributes the object is actually
+// about. Nobody hovering `self` is asking about __delattr__, so they sort last
+// in a tree (where they are still one click away) and are dropped entirely from
+// a hover (which has room for sixteen rows total).
+const isSpecialVar = (name: string) =>
+  /^(special|function|class|protected|private|static) variables$/i.test(name) ||
+  /^__.*__$/.test(name);
+// Stable: real fields keep the adapter's order, and so do the special ones.
+const realFirst = <T extends { name: string }>(vs: T[]): T[] =>
+  vs.some((v) => isSpecialVar(v.name))
+    ? [...vs.filter((v) => !isSpecialVar(v.name)), ...vs.filter((v) => isSpecialVar(v.name))]
+    : vs;
+
 let ws: WebSocket | null = null;
 // Set by the App's ws effect: send() lives at module scope but a dropped
 // command needs to say so in the console, which only the component can reach.
@@ -260,7 +275,7 @@ export default function App() {
   // only re-seeds it on load / history restore (see cfgTextRef for the live text).
   const [cfg, setCfg] = useState<DebugConfig>({});
   const [cfgHist, setCfgHist] = useState<DebugConfig[]>([]);   // server-owned config history
-  const [tab, setTab] = useState<"term" | "mem" | "stack" | "regs">("term");
+  const [tab, setTab] = useState<"term" | "mem" | "stack" | "regs" | "bin">("term");
   const [dbgLabel, setDbgLabel] = useState("debugger");  // legend + line tag
   const [bottomH, setBottomH] = useState(240);
   const [asideW, setAsideW] = useState(340);
@@ -275,7 +290,6 @@ export default function App() {
   const [targetOpen, setTargetOpen] = useState(false);
   const targetFocused = useRef(false);
   const [binInfo, setBinInfo] = useState<any | null>(null);
-  const [showBinInfo, setShowBinInfo] = useState(false);
   const [procs, setProcs] = useState<{ pid: number; name: string; cmd: string }[] | null>(null);
   const [procErr, setProcErr] = useState("");
   const [showInfo, setShowInfo] = useState(false);    // adapter + capabilities popover
@@ -369,7 +383,8 @@ export default function App() {
   // afford, and past that the Locals tree is the right tool.
   const HOVER_KID_BUDGET = 8;
   const expandTree = useCallback(async (ref: number, depth: number): Promise<HoverVar[]> => {
-    const kids: Var[] = await expandRef(ref).catch(() => []);
+    const all: Var[] = await expandRef(ref).catch(() => []);
+    const kids = all.filter((k) => !isSpecialVar(k.name));
     if (depth <= 0) return kids;
     const grand = await Promise.all(kids.slice(0, HOVER_KID_BUDGET).map((k) =>
       k.ref > 0 ? expandTree(k.ref, depth - 1).catch(() => []) : Promise.resolve([])));
@@ -934,7 +949,6 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      setShowBinInfo(false);
       setShowConfig(false);
     };
     window.addEventListener("keydown", onKey);
@@ -948,18 +962,38 @@ export default function App() {
     return () => clearTimeout(t);
   }, [agentNote]);
 
-  const loadBinInfo = () => {
-    setShowBinInfo(true);
+  const loadBinInfo = useCallback(() => {
     setBinInfo(null);
     // A server too old for this endpoint answers a plain-text 404, so check the
-    // status before parsing: a raw SyntaxError in the modal explains nothing.
+    // status before parsing: a raw SyntaxError in the pane explains nothing.
     fetch("/api/binfo").then(async (r) => {
       if (!r.ok) throw new Error(r.status === 404
         ? "this server does not support binary inspection (built before /api/binfo)"
         : `server returned ${r.status}`);
       return r.json();
     }).then(setBinInfo).catch((e) => setBinInfo({ error: e.message || String(e) }));
-  };
+  }, []);
+
+  // Read whenever the target changes, not when the tab is opened: the answer
+  // decides whether the tab is offered at all, and a rebuild between two runs is
+  // exactly when "no debug info" starts or stops being true.
+  useEffect(() => {
+    if (program) loadBinInfo();
+    else setBinInfo(null);
+  }, [program, loadBinInfo]);
+
+  // A python script or a jar is a file, not a native binary: binfo can only
+  // answer "unknown format", and a permanent tab saying "rebuild with -g" about
+  // a .py is worse than no tab. A file that is missing or unreadable still gets
+  // one — that IS the diagnosis.
+  const binTab = !!binInfo && (!!binInfo.error || binInfo.exists === false || binInfo.format !== "unknown");
+
+  // A tab whose adapter can no longer serve it must not leave the pane blank:
+  // retargeting from lldb to debugpy takes readMemory away mid-session.
+  useEffect(() => {
+    if (!memLinks && (tab === "mem" || tab === "stack")) setTab("term");
+    if (!binTab && tab === "bin") setTab("term");
+  }, [memLinks, binTab, tab]);
 
   const run = () => {
     let config: any = undefined;
@@ -1080,10 +1114,6 @@ export default function App() {
                      setTargetText(targetLabel); (e.target as HTMLInputElement).blur();
                    }
                  }} />
-          {program && (
-            <button className="bin-chip" data-tip="Binary details — format, architecture, debug info"
-                    onMouseDown={(e) => e.preventDefault()} onClick={loadBinInfo}>info</button>
-          )}
           {targetOpen && attachMode && (
             <div className="target-menu">
               {procErr && <div className="target-note">{procErr}</div>}
@@ -1374,17 +1404,28 @@ export default function App() {
             onClose={() => setBpEdit(null)}
           />
         )}
-        {showBinInfo && <BinInfoModal info={binInfo} onClose={() => setShowBinInfo(false)} />}
       </main>
       <div className="bottom" style={{ height: bottomH }}>
         <DragBar onResize={(h) => setBottomH(h)} />
         <div className="tabs">
           <div className={"tab" + (tab === "term" ? " active" : "")} onClick={() => setTab("term")}>Terminal</div>
-          <div className={"tab" + (tab === "mem" ? " active" : "")} onClick={() => setTab("mem")}>Memory</div>
+          {/* Both views are pure readMemory consumers — the hex window IS a
+              readMemory, and the stack drawing walks the fp chain with one per
+              frame. An adapter without it (debugpy, most language adapters)
+              gave two tabs that could only ever say "unavailable", so they are
+              offered where they work, the way Registers already is. */}
+          {memLinks && (
+            <div className={"tab" + (tab === "mem" ? " active" : "")} onClick={() => setTab("mem")}>Memory</div>
+          )}
           {registersRef > 0 && (
             <div className={"tab" + (tab === "regs" ? " active" : "")} onClick={() => setTab("regs")}>Registers</div>
           )}
-          <div className={"tab" + (tab === "stack" ? " active" : "")} onClick={() => setTab("stack")}>Stack</div>
+          {memLinks && (
+            <div className={"tab" + (tab === "stack" ? " active" : "")} onClick={() => setTab("stack")}>Stack</div>
+          )}
+          {binTab && (
+            <div className={"tab" + (tab === "bin" ? " active" : "")} onClick={() => setTab("bin")}>Binary</div>
+          )}
           {tab === "term" && (
             <span className="termlegend" title="program output renders plain; debugger output is tagged and dimmed">
               <span className="sw prog" /> program
@@ -1399,7 +1440,7 @@ export default function App() {
           <DebugConsole append={consoleAppend} frame0Ref={frame0Ref}
                         canComplete={!!caps.supportsCompletionsRequest} />
         </div>
-        <div className="tabpane" style={{ display: tab === "mem" ? "flex" : "none" }}>
+        <div className="tabpane" style={{ display: tab === "mem" && memLinks ? "flex" : "none" }}>
           <MemView mem={mem} addr={memAddr} setAddr={setMemAddr} err={memErr}
                    enabled={memLinks && stopped} onLoad={viewMemory} classify={classifyRegion}
                    locals={locals} frames={frames} regFrame={regFrame} />
@@ -1416,10 +1457,19 @@ export default function App() {
         )}
         {/* Mounted only when visible: the drawing walks the fp chain with a
             readMemory round-trip per frame on every stop. */}
-        {tab === "stack" && (
+        {tab === "stack" && memLinks && (
           <div className="tabpane">
             <StackView enabled={memLinks && stopped} regFrame={regFrame} frames={frames}
                        stopSeq={stopSeq} onAddr={viewMemory} />
+          </div>
+        )}
+        {/* Was a modal behind an unlabelled chip beside the target input, in a
+            toolbar with no room to say what it was. It is a report about the
+            thing being debugged, so it belongs where the other reports are —
+            and here it has the width to print a path without wrapping. */}
+        {tab === "bin" && binTab && (
+          <div className="tabpane binpane">
+            <BinInfoView info={binInfo} />
           </div>
         )}
       </div>
@@ -1761,7 +1811,7 @@ function VarList({ vars, disabled, parentRef, onSetVar, onAddr, prevVals, gen }:
   if (!vars.length) return <span className="hint">—</span>;
   return (
     <div className="vartree">
-      {vars.map((v, i) => <VarNode key={i} v={v} disabled={disabled} parentRef={parentRef} onSetVar={onSetVar} onAddr={onAddr} prevVals={prevVals} gen={gen} />)}
+      {realFirst(vars).map((v, i) => <VarNode key={i} v={v} disabled={disabled} parentRef={parentRef} onSetVar={onSetVar} onAddr={onAddr} prevVals={prevVals} gen={gen} />)}
     </div>
   );
 }
@@ -2468,7 +2518,7 @@ function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, locals, f
 // whether it carries debug info. A binary built without -g (or stripped) is the
 // most common reason a session runs but shows no source, and nothing else in the
 // UI can tell you that.
-function BinInfoModal({ info, onClose }: { info: any | null; onClose: () => void }) {
+function BinInfoView({ info }: { info: any | null }) {
   const rows: [string, string][] = [];
   if (info && info.exists !== false && !info.error) {
     const fmt = [info.format, info.class, info.endian && info.endian + "-endian"].filter(Boolean).join(" · ");
@@ -2480,37 +2530,28 @@ function BinInfoModal({ info, onClose }: { info: any | null; onClose: () => void
     if (info.dsym) rows.push(["dSYM", info.dsym]);
   }
   return (
-    <>
-      <div className="modal-backdrop" onClick={onClose} />
-      <div className="modal">
-        <div className="modal-head">
-          <h2>Binary</h2>
-          <button className="drawer-hide" onClick={onClose}>✕</button>
-        </div>
-        <div className="modal-body">
-          {!info && <div className="hint">reading…</div>}
-          {info?.error && <div className="cfg-err">{info.error}</div>}
-          {info && info.exists === false && (
-            <div className="cfg-err">{info.path} does not exist</div>
-          )}
-          {info && info.exists !== false && !info.error && (
-            <>
-              <div className="bin-path">{info.path}</div>
-              <div className={"bin-dwarf " + (info.hasDebugInfo ? "ok" : "bad")}>
-                {info.hasDebugInfo
-                  ? `debug info: ${info.debugInfo}`
-                  : "no debug info — you will get no source or locals. Rebuild with -g."}
-              </div>
-              {rows.map(([k, v]) => (
-                <div key={k} className="info-line"><span className="info-k">{k}</span> {v}</div>
-              ))}
-              {(info.notes || []).map((n: string, i: number) => (
-                <div key={i} className="bin-note">{n}</div>
-              ))}
-            </>
-          )}
-        </div>
-      </div>
-    </>
+    <div className="bininfo">
+      {!info && <div className="hint">reading…</div>}
+      {info?.error && <div className="cfg-err">{info.error}</div>}
+      {info && info.exists === false && (
+        <div className="cfg-err">{info.path} does not exist</div>
+      )}
+      {info && info.exists !== false && !info.error && (
+        <>
+          <div className="bin-path">{info.path}</div>
+          <div className={"bin-dwarf " + (info.hasDebugInfo ? "ok" : "bad")}>
+            {info.hasDebugInfo
+              ? `debug info: ${info.debugInfo}`
+              : "no debug info — you will get no source or locals. Rebuild with -g."}
+          </div>
+          {rows.map(([k, v]) => (
+            <div key={k} className="info-line"><span className="info-k">{k}</span> {v}</div>
+          ))}
+          {(info.notes || []).map((n: string, i: number) => (
+            <div key={i} className="bin-note">{n}</div>
+          ))}
+        </>
+      )}
+    </div>
   );
 }
