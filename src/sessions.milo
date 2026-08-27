@@ -13,7 +13,13 @@
 // reads an empty registry and reports "no live sessions".
 
 from "std/os" import {
-    kill
+    kill, usleep
+}
+from "std/net" import {
+    TcpListener
+}
+from "std/process" import {
+    Command, exePath
 }
 from "std/fs" import {
     readDir, removeFile, mkdir
@@ -269,4 +275,90 @@ pub fn newSessionName(uuids: Vec<string>): string {
         return uuids[uuids.len - 1].clone()
     }
     return "session"
+}
+
+// ── Bringing a session up ───────────────────────────────────────────────────
+//
+// A session IS a server process, so starting one means spawning one. Both
+// callers that do this — the dashboard's "new session" button and `dapweb
+// start` — need the same three steps in the same order (find a port, spawn our
+// own executable on it, wait for it to appear in the registry), and the registry
+// is already the one thing they agree on. Keeping the steps here is what stops
+// the two from drifting the way the directory path once did.
+
+// First free port at or above `base`. Deliberately sequential rather than an
+// ephemeral port: 8080 → 8081 → 8082 is a number a human can remember and type,
+// which is the whole reason the dashboard exists.
+//
+// The listener is dropped on the way out, so the port is free by the time the
+// child binds it. That is a race, and losing it costs the child its bind with a
+// clear error rather than anything silent.
+pub fn freePortFrom(base: i64): i64 {
+    var p = base
+    while p < base + 200 {
+        match TcpListener.bind(p as u16) {
+            Result.Ok(_l) => {
+                return p
+            }
+            Result.Err(_e) => {
+            }
+        }
+        p = p + 1
+    }
+    return 0
+}
+
+// Spawn a detached `dapweb web` on `port` with `extra` appended verbatim.
+//
+// It spawns OUR OWN executable and nothing else: the path comes from exePath(),
+// never from a caller-supplied string. That matters less than it looks like it
+// should, since a dapweb port already forwards `evaluate` to the debugger and
+// can therefore run arbitrary code in the debuggee — which is why the README
+// says keep these ports on loopback.
+pub fn spawnSessionOn(port: i64, extra: &Vec<string>): Result<i64> {
+    let Result.Ok(exe) = exePath() else {
+        return Result.Err("could not resolve the dapweb executable")
+    }
+    // --no-browser: whoever asked for this session opens the tab themselves, on
+    // their own machine. This host may not even have a browser.
+    var cmd = Command.new(exe).arg("web").arg("--port").arg($"{port}").arg("--no-browser")
+    for a in extra {
+        cmd = cmd.arg(a.clone())
+    }
+    match cmd.spawn() {
+        Result.Ok(child) => {
+            // Deliberately not waited on: it outlives whoever started it.
+            let c = child
+            return Result.Ok(c.pid as i64)
+        }
+        Result.Err(_e) => {
+            return Result.Err("could not start a new dapweb")
+        }
+    }
+}
+
+// Block until the session belonging to `pid` shows up in the registry, or the
+// deadline passes. Polling the registry rather than the port is what makes the
+// caller's answer complete: a bound socket is only a number, whereas a
+// descriptor carries the session id an agent needs for `api --session` and a
+// human needs to recognise the tab.
+//
+// Keyed on the spawned pid and NOT on the port. Asking "is something listening
+// there yet" cannot tell our child apart from whoever already held the port, so
+// a losing bind would be reported as a success naming a session this caller did
+// not create — and then a `--port` collision looks like it worked.
+pub fn awaitSessionOn(pid: i64, timeoutMs: i64): Option<SessionRow> {
+    var waited: i64 = 0
+    while waited < timeoutMs {
+        for r in loadSessions(false) {
+            if r.pid == pid && r.alive {
+                return Option.Some(r.clone())
+            }
+        }
+        unsafe {
+            let _u = usleep(50000 as u32) // 50ms: fast enough to feel instant, cheap enough to spin on
+        }
+        waited = waited + 50
+    }
+    return Option.None
 }

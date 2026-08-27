@@ -1,0 +1,161 @@
+// `dapweb start` — bring a session up FOR someone else to watch.
+//
+// The rest of the CLI assumes a session already exists: `dapweb api` drives one,
+// the dashboard lists them, and `dapweb web` blocks in the foreground holding
+// one. That left the interesting direction unserved. An agent that wanted to
+// debug something had to find a free port, background `dapweb web`, poll until
+// it bound, and only then start driving — four steps to get right before its
+// first `api` call, and no answer at the end saying which session it had made.
+//
+// This is those four steps with the answer printed: one JSON line carrying the
+// session id, port and url. The agent drives the session over `dapweb api`; the
+// human opens the url and watches it happen. The session is an ordinary one, so
+// it is in /sessions and the dashboard alongside every hand-started server.
+//
+// Every flag except --port is forwarded to `dapweb web` verbatim and never
+// parsed here, so this command cannot drift from web's flag set:
+//   dapweb start --program /tmp/a.out --source main.c
+
+from "std/argparse" import {
+    ArgParser
+}
+from "std/json" import {
+    Json
+}
+from "./sessions" import {
+    freePortFrom, spawnSessionOn, awaitSessionOn
+}
+
+// How long to wait for the child to bind and register. Generous: on a cold page
+// cache the binary itself takes a moment to fault in, and reporting a failure
+// for a session that then appears is worse than waiting.
+let START_TIMEOUT_MS: i64 = 15000
+
+// `dapweb start --help` still has to render, and argparse is the only thing in
+// this repo allowed to format help. But argparse rejects flags it does not know,
+// and every flag here except --port belongs to `web` — so the parser is built for
+// its help text and never asked to parse. The two flags we own are scanned out of
+// argv by hand, which is also why a new `web` flag needs no change in this file.
+fn startParser(): ArgParser {
+    var p = ArgParser.new("dapweb start", "start a session in the background and print its identity\n\n"
+        + "Spawns `dapweb web`, waits for it to come up, and prints one JSON line:\n"
+        + "  {\"ok\":true,\"sessionId\":...,\"port\":...,\"url\":...,\"pid\":...}\n\n"
+        + "Every other flag is forwarded to `dapweb web` unchanged:\n"
+        + "  dapweb start --program /tmp/a.out --source main.c\n"
+        + "then drive it, while a human watches the same session in a browser:\n"
+        + "  dapweb api --session <id> request --await stopped '{\"cmd\":\"run\"}'")
+    p.addI64("port", "", "listen port (0 = first free from 8080)", 0 as i64)
+    return p
+}
+
+// The port we were asked for, or 0 for "pick one". Accepts both spellings
+// argparse would have.
+fn portFrom(argv: &Vec<string>): i64 {
+    var i: i64 = 1
+    while i < argv.len {
+        let a = argv[i].clone()
+        if a == "--port" && i + 1 < argv.len {
+            return argv[i + 1].parseInt() ?? (0 as i64)
+        }
+        if a.startsWith("--port=") {
+            return a.substr(7, a.len).parseInt() ?? (0 as i64)
+        }
+        i = i + 1
+    }
+    return 0 as i64
+}
+
+fn wantsHelp(argv: &Vec<string>): bool {
+    var i: i64 = 1
+    while i < argv.len {
+        if argv[i] == "--help" || argv[i] == "-h" {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Forward everything except our own --port, which the child gets from us.
+fn forwardedArgs(argv: &Vec<string>): Vec<string> {
+    var out: Vec<string> = []
+    var i: i64 = 1 // argv[0] is the display name
+    while i < argv.len {
+        let a = argv[i].clone()
+        if a == "--port" {
+            i = i + 2 // the flag and its value
+            continue
+        }
+        if a.startsWith("--port=") {
+            i = i + 1
+            continue
+        }
+        out.push(a)
+        i = i + 1
+    }
+    return out
+}
+
+fn fail(msg: &string): i32 {
+    print(Json.obj().bool("ok", false).str("error", msg.clone()).build())
+    return 1
+}
+
+pub fn startMain(argv: Vec<string>): i32 {
+    if wantsHelp(argv) {
+        var parser = startParser()
+        print(parser.helpText())
+        return 0
+    }
+    let want = portFrom(argv)
+
+    // 8080 is `web`'s own default, so an unconfigured `start` lands where a
+    // human would have looked for it, and only walks upward when it is taken.
+    var port = want
+    if port <= 0 {
+        port = freePortFrom(8080 as i64)
+        if port == 0 {
+            return fail("no free port in 8080-8279")
+        }
+    } else if freePortFrom(want) != want {
+        // A named port that is taken is the common mistake, and letting the
+        // child lose the bind means finding out only when the 15s wait expires.
+        // Same bind-then-release race as the auto path — losing it costs a
+        // clear error either way, just a slower one.
+        return fail($"port {want} is already in use")
+    }
+
+    let extra = forwardedArgs(argv)
+    var childPid: i64 = 0
+    match spawnSessionOn(port, extra) {
+        Result.Ok(pid) => {
+            childPid = pid
+        }
+        Result.Err(e) => {
+            return fail(e)
+        }
+    }
+
+    // The registry, not the socket: a bound port is just a number, while the
+    // descriptor carries the id `api --session` takes and a human reads off the
+    // dashboard. Waiting on OUR child's pid is what makes an explicit --port
+    // that is already taken an honest failure instead of a success naming
+    // somebody else's session. A child that dies on a bad flag never registers,
+    // so the timeout is also how a misspelled flag is reported.
+    match awaitSessionOn(childPid, START_TIMEOUT_MS) {
+        Option.Some(row) => {
+            print(Json.obj()
+                .bool("ok", true)
+                .str("sessionId", row.id.clone())
+                .int("port", row.port)
+                .str("url", $"http://localhost:{row.port}")
+                .int("pid", row.pid)
+                .str("program", row.program.clone())
+                .build())
+            return 0
+        }
+        Option.None => {
+            return fail($"the session never came up on port {port} (is that port already taken?) — run the same flags under `dapweb web` to see why")
+        }
+    }
+}

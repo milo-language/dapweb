@@ -99,6 +99,7 @@ The open tab moves to line 24 as that runs, and says who moved it:
 - Syntax highlighting
 - VS Code launch configs
 - Target history
+- Agent-started sessions
 - Binary info
 - CLI API
 - Multi-peer sessions
@@ -143,6 +144,20 @@ instead of hunting for its pid:
 ./dapweb web --port 8080          # boot idle, set the target in the browser
 ./dapweb web --launch .vscode/launch.json --config "debug tests"
 ```
+
+`dapweb web` holds the session in the foreground, which is the wrong shape when
+something else is starting it. `dapweb start` spawns one in the background,
+waits for it to come up, and prints its identity — so an agent can start a
+session and hand you the url to watch it in:
+
+```sh
+$ ./dapweb start --program /tmp/demo --source main.c
+{"ok":true,"sessionId":"jolly-ledger-guides","port":8080,"url":"http://localhost:8080",...}
+$ ./dapweb api --session jolly-ledger-guides run
+```
+
+Every flag other than `--port` is forwarded to `web` unchanged. `--port` defaults
+to the first free port from 8080.
 
 `dapweb api` drives a running session with the same `{"cmd":...}` JSON the
 browser sends, so an agent or a shell script needs no separate protocol:

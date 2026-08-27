@@ -80,6 +80,7 @@ self_suite  api
 self_suite  e2e-agent
 self_suite  e2e-config
 self_suite  e2e-attach
+self_suite  e2e-start
 self_suite  e2e-history
 
 rm -rf "$state"

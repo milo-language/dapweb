@@ -4,6 +4,7 @@
 // each of which still lives in its own module so it stays single-purpose:
 //   dapweb web    — browser UI + shared co-debug session server  (web/server.milo)
 //   dapweb api    — drive a running session from the CLI (api/main.milo)
+//   dapweb start  — spawn a session in the background, print its id/port/url (start.milo)
 //
 // `api` replaced an MCP subcommand: both drove the same session, but MCP
 // reimplemented every debug verb twice (standalone + attach). `api` instead
@@ -35,6 +36,9 @@ from "web/server" import {
 from "api/main" import {
     apiMain
 }
+from "start" import {
+    startMain
+}
 from "version" import {
     versionText
 }
@@ -43,8 +47,8 @@ from "version" import {
 // roster + examples live in the description; `command` is a trailing positional
 // whose remaining tokens are forwarded verbatim to the chosen subcommand.
 fn topParser(): ArgParser {
-    var p = ArgParser.new("dapweb", "web + programmatic interface for any DAP debugger\n\n" + "commands:\n" + "  web     browser debugger UI + shared co-debug session server\n" + "  api     drive a running session from the CLI (list/state/request/eval/...)\n\n" + "run 'dapweb <command> --help' for that command's options\n\n" + "quick start (the 90% invocation — path to a binary implies `web`):\n" + "  dapweb /tmp/a.out --those --args\n" + "or boot idle and configure the target in the browser:\n" + "  dapweb web --port 8080\n" + "coordinate from an agent or a shell (same live session the browser shows):\n" + "  dapweb api request --await stopped '{\"cmd\":\"run\"}'")
-    p.addOptionalPositional("command", "web | api")
+    var p = ArgParser.new("dapweb", "web + programmatic interface for any DAP debugger\n\n" + "commands:\n" + "  web     browser debugger UI + shared co-debug session server\n" + "  api     drive a running session from the CLI (list/state/request/eval/...)\n" + "  start   start a session in the background and print its id/port/url\n\n" + "run 'dapweb <command> --help' for that command's options\n\n" + "quick start (the 90% invocation — path to a binary implies `web`):\n" + "  dapweb /tmp/a.out --those --args\n" + "or boot idle and configure the target in the browser:\n" + "  dapweb web --port 8080\n" + "coordinate from an agent or a shell (same live session the browser shows):\n" + "  dapweb api request --await stopped '{\"cmd\":\"run\"}'")
+    p.addOptionalPositional("command", "web | api | start")
     p.enableTrailingArgs() // stop parsing at the command; forward the rest as-is
     return p
 }
@@ -87,6 +91,9 @@ fn main(): i32 {
     }
     if sub == "api" {
         return apiMain(subArgv)
+    }
+    if sub == "start" {
+        return startMain(subArgv)
     }
 
     // `dapweb <program> [args...]` — the 90% invocation. A path that exists is a

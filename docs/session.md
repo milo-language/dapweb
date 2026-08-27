@@ -167,6 +167,11 @@ go     ← types [go]                          (delve — future, same error)
 - `dapweb web` keeps current flags; `--launch` now also accepts full launch.json files with
   `--config <name>` selection. Add `--quiet`, `--verbose`.
 - `dapweb mcp` (standalone) gains the same config path via the shared session module (M5a).
+- `dapweb start` spawns a background session and prints `{ok, sessionId, port, url, pid,
+  program}`. Port choice, the spawn, and the wait live in `src/sessions.milo` alongside the
+  registry, shared with the dashboard's "new session" button so the two cannot disagree on
+  which executable to run. The wait is keyed on the spawned pid, not the port: keyed on the
+  port, a losing bind reports success naming whoever already held it.
 
 ## Non-goals (this milestone)
 

@@ -55,7 +55,8 @@ from "./jsonaccess" import {
     bodyI64, bodyStr, frame0Field, frame0Path, scopes0Ref
 }
 from "../sessions" import {
-    stateDir, writeSession, removeSession, sessionsJson, newSessionName
+    stateDir, writeSession, removeSession, sessionsJson, newSessionName,
+    freePortFrom, spawnSessionOn
 }
 from "./binfo" import {
     binInfoJson
@@ -2588,65 +2589,30 @@ fn unregisterSession(): void {
     removeSession(gSessionId)
 }
 
-// First port above ours that nothing is listening on. Deliberately sequential
-// rather than an ephemeral port: 8080 → 8081 → 8082 is a number a human can
-// remember and type, which is the whole reason the dashboard exists.
-//
-// The listener is dropped on the way out, so the port is free by the time the
-// child binds it. That is a race, and losing it costs the child its bind with a
-// clear error rather than anything silent.
-fn freePortFrom(base: i64): i64 {
-    var p = base + 1
-    while p < base + 200 {
-        match TcpListener.bind(p as u16) {
-            Result.Ok(_l) => {
-                return p
-            }
-            Result.Err(_e) => {
-            }
-        }
-        p = p + 1
-    }
-    return 0
-}
-
 // The dashboard's "new session" button. A session IS a server process, so making
 // one means spawning one — this server cannot host a second.
 //
-// It spawns OUR OWN executable and nothing else: the path comes from exePath(),
-// never from the caller. That matters less than it looks like it should, since
-// /api/cmd already forwards `evaluate` to the debugger and can therefore run
-// arbitrary code in the debuggee — which is why the README says keep this port
-// on loopback.
+// Port choice and the spawn itself live in ../sessions, shared with `dapweb
+// start`: two ways to make a session that disagreed on which executable to run
+// or which port to try is exactly the drift that module exists to prevent.
 fn spawnSessionJson(): string {
-    let port = freePortFrom(gListenPort)
+    let port = freePortFrom(gListenPort + 1)
     if port == 0 {
         return Json.obj().bool("ok", false).str("error", "no free port near this one").build()
     }
-    let exe = match exePath() {
-        Result.Ok(x) => {
-            x
-        }
-        Result.Err(_e) => {
-            return Json.obj().bool("ok", false).str("error", "could not resolve the dapweb executable").build()
-        }
-    }
-    // --no-browser: the tab is opened by whoever clicked, on their machine. This
-    // server's host may not even have a browser.
-    var cmd = Command.new(exe).arg("web").arg("--port").arg($"{port}").arg("--no-browser")
     // Inherit --webroot: without it a child serves the bundle embedded at compile
     // time, so during UI work every spawned session silently shows yesterday's UI.
+    var extra: Vec<string> = []
     if webroot.len > 0 {
-        cmd = cmd.arg("--webroot").arg(webroot.clone())
+        extra.push("--webroot")
+        extra.push(webroot.clone())
     }
-    match cmd.spawn() {
-        Result.Ok(child) => {
-            // Deliberately not waited on: it outlives this request, and us.
-            let _c = child
+    match spawnSessionOn(port, extra) {
+        Result.Ok(_pid) => {
             return Json.obj().bool("ok", true).int("port", port).build()
         }
-        Result.Err(_e) => {
-            return Json.obj().bool("ok", false).str("error", "could not start a new dapweb").build()
+        Result.Err(e) => {
+            return Json.obj().bool("ok", false).str("error", e).build()
         }
     }
 }
