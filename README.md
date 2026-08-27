@@ -88,7 +88,8 @@ The open tab moves to line 24 as that runs, and says who moved it:
 - Expression eval
 - Tab completion
 - Disassembly
-- Registers
+- Register table
+- Hex / dec / oct / bin
 - Memory viewer
 - Region colors
 - Memory annotations
