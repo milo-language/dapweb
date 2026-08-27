@@ -26,35 +26,18 @@ with the path spelled out:
 | **java-dap** | Java, and anything else on JDWP | `java-dap` on `PATH` |
 | **any other DAP adapter** | everything else | `--dapPath "gdb -i dap"`, `--dapPath /path/to/adapter` |
 
-That last row is not a footnote: CodeLLDB, `gdb -i dap` (gdb 14+), netcoredbg for
-C#/.NET, rdbg for Ruby, Xdebug for PHP, earlybird for OCaml, probe-rs and
-cortex-debug for embedded targets all arrive on the same protocol over the same
-transport. The five above are the ones dapweb can find without being told where.
+CodeLLDB, `gdb -i dap` (gdb 14+), netcoredbg for C#/.NET, rdbg for Ruby, Xdebug
+for PHP, earlybird for OCaml, probe-rs and cortex-debug for embedded targets:
 
 ```sh
 ./dapweb web --dapPath /path/to/some-dap-adapter --program ./a.out
 ```
 
-Same UI, same session, same `dapweb api` on all of them; only the source and the
-adapter tag in the corner change:
-
 ![the same dapweb stop in C, Python, Go, JavaScript and Java](docs/images/languages.png)
 
 ## An agent is a first-class user
 
-The browser tab is a client of the session, not the session. Every action in the
-UI is a `{"cmd": ...}` message, and `dapweb api` sends those same messages from a
-shell, so an agent needs no separate protocol, no headless mode, and no second
-copy of the program under test.
-
-![dapweb api stepping the session, and the browser tab showing the same stop](docs/images/api-and-browser.png)
-
-One session, two views: the agent's `step` moved the program, and the tab that
-was already open is on the new line with the new locals. It goes the other way
-too: the agent announces each command before it runs and its breakpoints appear
-in your gutter, so a program that moves on its own is never unexplained.
-
-![an agent driving the session](docs/images/agent-activity.gif)
+The session can be driven from the CLI while you watch it in the browser:
 
 ```console
 $ dapweb api step --pretty
@@ -62,7 +45,6 @@ $ dapweb api step --pretty
   "type": "stopped",
   "line": 24,
   "path": "/src/examples/nested/main.c",
-  "tid": 11751168,
   "frames": [
     { "id": 1572864, "name": "main", "line": 24, "path": "/src/examples/nested/main.c", "ipRef": "0x1026285AC" },
     { "id": 1572865, "name": "start", "line": 1797, "path": "/usr/lib/dyld`start", "ipRef": "0x189981D54" }
@@ -75,45 +57,45 @@ $ dapweb api step --pretty
 }
 ```
 
-Without `--pretty` it is one line per reply, which is what a pipe wants. A `ref`
-is expandable (`dapweb api request '{"cmd":"expand","ref":4}'`), an `mref` is a
-memory address the same session can read.
+The open tab moves to line 24 as that runs, and says who moved it:
 
-## What it does
+![dapweb api stepping the session, and the browser tab showing the same stop](docs/images/api-and-browser.png)
 
-Debugging:
+![an agent driving the session](docs/images/agent-activity.gif)
 
-- Every source file the stop walks through, in tabs, with syntax highlighting
-  (including `.milo`).
-- Click the gutter to set a breakpoint; conditions, hit counts and log points on
-  any of them, enable/disable without deleting, and they persist per program
-  between runs.
-- Run, continue, pause, step over/in/out, restart, stop, stop-at-main, and
-  single instruction stepping.
-- Call stack with frame selection, thread list, locals as a tree that expands
-  through nested structs and pointers, editable values, watch expressions, and
-  exception filters.
-- Evaluate anything in the frame you are stopped in, from the console or the
-  watch panel, with tab completion.
+## Features
 
-Down at the machine:
-
-- Disassembly, inline under each source line or in its own pane beside it.
-- Registers, grouped and editable.
-- A memory viewer with typed annotations on the bytes, pointer following, and a
-  radix toggle; a stack pane that shows the current frame's slots.
-
-Targets and sessions:
-
-- Launch a program, or attach to a running one picked by name instead of pid.
-- VS Code launch configurations, verbatim: `--launch launch.json --config name`,
-  an editor for the config in the UI, and a history of the targets you have run.
-- **info** reads the binary's headers and says whether it carries debug info at
-  all, which is the usual reason a session runs but shows no source.
-- Program output and adapter output in a real terminal, in one pane, tagged so
-  the two streams never blur.
-- Every live dapweb on the machine is listed at `/sessions`, each under a
-  three-word name you can say out loud.
+- Breakpoints
+- Conditional breakpoints
+- Hit counts
+- Log points
+- Persistent breakpoints
+- Step over/in/out
+- Instruction stepping
+- Restart
+- Attach by name
+- Stop at main
+- Call stack
+- Threads
+- Nested locals
+- Editable values
+- Watch expressions
+- Exception filters
+- Expression eval
+- Tab completion
+- Disassembly
+- Registers
+- Memory viewer
+- Pointer following
+- Stack slots
+- Program terminal
+- Syntax highlighting
+- VS Code launch configs
+- Target history
+- Binary info
+- CLI API
+- Multi-peer sessions
+- Session list
 
 ## Install
 
