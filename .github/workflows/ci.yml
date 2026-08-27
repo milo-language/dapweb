@@ -34,16 +34,22 @@ jobs:
 
       # milo needs clang 16+ (its IR uses element-type-free intrinsic mangling),
       # and 22.04 ships 15. lldb-dap is the DAP adapter every e2e suite drives;
-      # apt names it lldb-dap-18, dapweb probes bare `lldb-dap` on PATH.
-      - name: install clang + lldb 18
+      # apt names it lldb-dap-N, dapweb probes bare `lldb-dap` on PATH.
+      #
+      # 21, not 18: lldb-dap 18 answers setVariable on a scope container with an
+      # error and never answers readMemory at all, so two suites failed here for
+      # reasons no dapweb change could fix. The macOS toolchain everyone develops
+      # against is 21, and pinning the gate to the version we actually support
+      # keeps it able to fail for real reasons.
+      - name: install clang + lldb 21
         run: |
           wget -qO llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo apt-get install -y lldb-18
-          sudo ln -sf /usr/bin/clang-18 /usr/bin/clang
-          sudo ln -sf /usr/bin/clang++-18 /usr/bin/clang++
-          sudo ln -sf /usr/bin/lldb-dap-18 /usr/bin/lldb-dap
+          sudo ./llvm.sh 21
+          sudo apt-get install -y lldb-21
+          sudo ln -sf /usr/bin/clang-21 /usr/bin/clang
+          sudo ln -sf /usr/bin/clang++-21 /usr/bin/clang++
+          sudo ln -sf /usr/bin/lldb-dap-21 /usr/bin/lldb-dap
           clang --version | head -1
           lldb-dap --help > /dev/null && echo "lldb-dap runs"
 
