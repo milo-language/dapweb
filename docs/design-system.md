@@ -79,3 +79,8 @@ The recipe for a raw shot:
 The spec then crops per tile to where the content ends, sizes each grid row to
 its own tallest tile, and captions with `--chip-bg`. A caption is never a signal
 colour; the callout outline (`--agent`) is, and is spent on one thing per frame.
+
+A composite gets the mark and the name in a strip below it (`"brand": true`,
+the default), never over the picture: a watermark covers the one thing a
+screenshot exists to show. A shot that still has the app's own header in frame
+sets `"brand": false`, since the wordmark is already in it.

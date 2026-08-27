@@ -281,8 +281,40 @@ def pair(spec):
                             radius=6, fill=ACCENT)
         d.text((x + PAD, PAD - 1), label, font=cap_font, fill=(20, 12, 20))
 
+    out = _brand(out, spec)
     out.save(spec["out"])
     print(f"wrote {spec['out']}  ({out.width}x{out.height})")
+
+def _brand(img, spec):
+    """Add a footer strip carrying the mark and the name.
+
+    A composite is cropped out of the app's own chrome, so nothing left in the
+    frame says where the picture came from. It goes in a strip below the image
+    rather than on top of it: a watermark over a screenshot covers exactly the
+    thing the screenshot is there to show. The mark is the same three call-stack
+    bars the UI wears, at the SVG's proportions (viewBox 32 wide, bars at y
+    6 / 13.5 / 21, indented 3 / 6 / 9).
+    """
+    if not spec.get("brand", True):
+        return img
+    h = int(spec.get("brand_size", 24))
+    pad = int(spec.get("brand_pad", 14))
+    strip = h + 2 * pad
+    out = Image.new("RGB", (img.width, img.height + strip), tuple(spec.get("bg", (13, 17, 23))))
+    out.paste(img, (0, 0))
+    d = ImageDraw.Draw(out)
+    font = _font(int(h * 0.8))
+    label = "dapweb"
+    tw = d.textlength(label, font=font)
+    s = h / 32.0                       # the SVG's viewBox scale
+    x = out.width - pad - tw - 9 - h
+    y = img.height + pad
+    for (bx, by, bw, hue) in ((3, 6, 26, "r-code"), (6, 13.5, 23, "r-heap"), (9, 21, 20, "r-stack")):
+        d.rounded_rectangle([x + bx * s, y + by * s,
+                             x + (bx + bw) * s, y + (by + 5.5) * s],
+                            radius=max(1, round(2 * s)), fill=_rgb(hue, (137, 148, 158)))
+    d.text((x + h + 9, y + h * 0.16), label, font=font, fill=_rgb("muted", (139, 148, 158)))
+    return out
 
 def grid(spec):
     """One picture of the same UI on several debuggers.
@@ -337,6 +369,7 @@ def grid(spec):
                             radius=6, fill=lab_bg, outline=CHIP_EDGE, width=1)
         d.text((x + PAD, y + PAD - 1), label, font=font, fill=lab_fg)
         out.paste(im, (x, y + cap))
+    out = _brand(out, spec)
     out.save(spec["out"])
     print(f"wrote {spec['out']}  ({out.width}x{out.height}, {len(tiles)} tiles)")
 

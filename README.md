@@ -1,15 +1,19 @@
-# dapweb
+<p align="center">
+  <img src="src/web/ui/og.png" alt="dapweb: any DAP debugger, in a browser tab" width="900">
+</p>
 
 <p align="center">
-  <img src="docs/images/debugging.png" alt="dapweb stopped at a breakpoint: source view, call stack, nested locals, and a terminal showing both the program's output and the agent's last command" width="900">
+  <b><a href="https://github.com/milo-language/dapweb/releases/tag/latest">Download</a></b> ·
+  <b><a href="https://milo-language.github.io/milo/">Docs</a></b> ·
+  built in <a href="https://github.com/milo-language/milo">Milo</a>
 </p>
 
 A browser front end for any DAP debugger, built so that you and an AI agent can
 drive the same debuggee at the same time.
 
-**[Download](https://github.com/milo-language/dapweb/releases/tag/latest)** ·
-**[Docs](https://milo-language.github.io/milo/)** ·
-built in [Milo](https://github.com/milo-language/milo)
+<p align="center">
+  <img src="docs/images/debugging.png" alt="dapweb stopped at a breakpoint: source view, call stack, nested locals, and a terminal showing both the program's output and the agent's last command" width="900">
+</p>
 
 ## The debuggers
 
@@ -166,10 +170,13 @@ scripts/test.sh agent   # one suite (substring match)
 ```
 
 The README images are generated, not hand-cropped: `docs/shots/` holds the raw
-screenshots and `docs/*.json` the callouts drawn over them.
+screenshots, `docs/*.json` the crops and callouts drawn over them, and
+`scripts/annotate-shots.py` does the drawing (it reads the palette out of
+`styles.css`, so the pictures cannot drift from the UI). The card at the top is
+`src/web/ui/og-card.html`, screenshotted headless; the command is in its
+comment. `docs/design-system.md` is the rest of the rules.
 
 ```sh
 python3 -m venv /tmp/venv && /tmp/venv/bin/pip install Pillow
-/tmp/venv/bin/python scripts/annotate-shots.py docs/session-story.json
-/tmp/venv/bin/python scripts/annotate-shots.py docs/pair.json
+for spec in docs/*.json; do /tmp/venv/bin/python scripts/annotate-shots.py "$spec"; done
 ```
