@@ -1180,7 +1180,10 @@ export default function App() {
           </>
         ) : null}
         <div className="editor-col">
-          {tabs.length > 1 && (
+          {/* One file still gets its tab: it names what you are looking at, and a
+              bar that appears only on the second file makes the first stop look
+              like a different app than every stop after it. */}
+          {tabs.length > 0 && (
             <div className="filetabs">
               {tabs.map((p) => (
                 <div key={p} className={"filetab" + (p === viewPath ? " active" : "")}

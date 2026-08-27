@@ -20,13 +20,43 @@ The spec is JSON so the call sites stay readable:
      "gif": {"out": "docs/images/x.gif", "focus": 0}}
 """
 import json
+import os
 import re
 import sys
 from PIL import Image, ImageDraw, ImageFont
 
-ACCENT = (255, 123, 213)      # matches the UI's agent magenta
 RADIUS = 10
 PAD = 6
+
+def _tokens():
+    """The UI's own palette, read out of styles.css.
+
+    A second copy of the hex values here would be a second thing to update, and
+    the one that gets forgotten is always the one nobody looks at — which is
+    exactly what a docs image is until the day someone reads it.
+    """
+    css = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "src", "web", "ui", "src", "styles.css")
+    out = {}
+    try:
+        for name, val in re.findall(r"--([\w-]+):\s*(#[0-9a-fA-F]{6})", open(css).read()):
+            out.setdefault(name, val)
+    except OSError:
+        pass
+    return out
+
+def _rgb(name, fallback):
+    v = _tokens().get(name)
+    if not v:
+        return fallback
+    return tuple(int(v[i:i + 2], 16) for i in (1, 3, 5))
+
+# The outline colour for a callout: the UI's agent pink, which is the hue it
+# reserves for "something other than you did this".
+ACCENT = _rgb("agent", (255, 123, 213))
+CHIP_BG = _rgb("chip-bg", (33, 38, 45))
+CHIP_FG = _rgb("chip-fg", (201, 209, 217))
+CHIP_EDGE = _rgb("border", (48, 54, 61))
 
 def _font(size):
     for p in ("/System/Library/Fonts/Supplemental/Menlo.ttc",
@@ -270,8 +300,8 @@ def grid(spec):
     bg = tuple(spec.get("bg", (13, 17, 23)))
     # The callout pink is for one outlined thing in a busy frame. A caption on
     # every tile is not that, and six of them shout over the screenshots.
-    lab_bg = tuple(spec.get("label_bg", (33, 38, 45)))
-    lab_fg = tuple(spec.get("label_fg", (201, 209, 217)))
+    lab_bg = tuple(spec.get("label_bg", CHIP_BG))
+    lab_fg = tuple(spec.get("label_fg", CHIP_FG))
 
     tiles = []
     for t in spec["tiles"]:
@@ -304,7 +334,7 @@ def grid(spec):
         y = row_y[i // cols]
         lw = d.textlength(label, font=font)
         d.rounded_rectangle([x, y, x + lw + 2 * PAD, y + font.size + 2 * PAD],
-                            radius=6, fill=lab_bg, outline=(48, 54, 61), width=1)
+                            radius=6, fill=lab_bg, outline=CHIP_EDGE, width=1)
         d.text((x + PAD, y + PAD - 1), label, font=font, fill=lab_fg)
         out.paste(im, (x, y + cap))
     out.save(spec["out"])
