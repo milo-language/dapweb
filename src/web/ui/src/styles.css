@@ -21,7 +21,8 @@ body {
 .filetab, .cap, .info-line, .frame .tloc, .bpline, .bpdetail,
 .vartree .var .name, .vartree .var .vtype, .vartree .var .val, .varedit, .addr,
 .wrow .expr, .wrow .wval, .console-input input, .console-input .prompt, .comp,
-.regrow .rname, .regrow .rval, .memaddr, .membytes, .memascii, .anno,
+.regrow .rname, .regrow .rval, .regrow .rdec, .regrow .rmod, .regrow .rsym,
+.memaddr, .membytes, .memascii, .anno,
 .follow-name, .follow-type, .follow-val, .asm-zone-row, .src-hint,
 .sf-name, .sf-k, .sf-v, .sf-idx, .memctl input, .session-prog, code {
   font-family: var(--mono);
@@ -309,9 +310,36 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
 /* Flat register list: control regs pinned on top with a role label, changed
    values in amber (--stop) with a ▲ gutter mark — same cue as x64dbg. */
 .regflat { display: flex; flex-direction: column; }
+/* The register table. Column widths are fixed (in ch, so they track the mono
+   font) rather than auto: a value that lines up with the value above it is the
+   entire reason to draw a table instead of a list. */
+.regctl { display: flex; gap: 6px; padding: 4px 0 8px; }
+.regctl button { padding: 3px 9px; font-size: 11px; }
+/* Binary is 66 characters wide and that is simply how wide binary is: the pane
+   scrolls sideways rather than truncating the digits someone switched base to
+   read. */
+.regtable { display: flex; flex-direction: column; min-width: max-content; }
+/* The header's own font-size stays the row's, because the grid tracks are in ch
+   and ch resolves against the grid container: shrink the row and every column
+   shifts out from under the values it labels. The small caps live on the cells. */
+.reghead { color: var(--muted); border-bottom: 1px solid var(--border);
+           padding-bottom: 3px; margin-bottom: 3px; position: sticky; top: 0;
+           background: var(--bg); z-index: 1; }
+.reghead > span { font-size: 9px; letter-spacing: .06em; text-transform: uppercase; }
+.reghead:hover { background: var(--bg); }
+.reghead .rdec { text-align: right; }
+.regrow .rdec { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+.regrow .rmod { color: var(--muted); overflow: hidden; text-overflow: ellipsis;
+                white-space: nowrap; }
+.regrow .rsym { color: var(--fg); overflow: hidden; text-overflow: ellipsis;
+                white-space: nowrap; }
+.regrow .rsym i { color: var(--muted); }
+.regrow .rlink { text-align: center; }
 .regpane { display: flex; }
 .regview { flex: 1; min-height: 0; overflow: auto; padding: 6px 12px; }
-.regrow { display: grid; grid-template-columns: 12px 40px 78px 1fr auto;
+.regview .regctl { position: sticky; left: 0; }
+.regrow { display: grid;
+          grid-template-columns: 14px 44px 88px var(--valw, 20ch) 21ch 14ch minmax(12ch, 1fr) 18px;
           align-items: baseline; gap: 6px; padding: 1px 0; min-width: 0; }
 .regrow:hover { background: var(--row-hover); border-radius: 4px; }
 .regrow .rmark { color: var(--stop); font-size: 9px; text-align: center; }
@@ -418,7 +446,7 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
 /* Divider between radix and element-size toggles in the memory control bar. */
 .memctl-sep { width: 1px; align-self: stretch; margin: 2px 4px; background: var(--border); }
 /* Decimal echo for non-pointer register values. */
-.rdec { color: var(--muted); margin-left: 8px; font-variant-numeric: tabular-nums; }
+.rdec { color: var(--muted); font-variant-numeric: tabular-nums; }
 /* Memory viewer */
 .memview { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .memctl { flex: none; display: flex; gap: 6px; align-items: center;
