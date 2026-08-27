@@ -102,6 +102,21 @@ try {
     ok(r.code === 2 && r.json?.error === "timeout", "await timeout exits 2 with a timeout reply", { code: r.code, json: r.json });
   }
 
+  // --pretty must be the SAME document, only reformatted: the pretty text has to
+  // parse back to what the compact text parsed to, or a human reading it is
+  // reading a different reply than the agent got.
+  {
+    const compact = await api(["state"]);
+    const p = Bun.spawn([bin, "api", "--port", String(port), "state", "--pretty"], {
+      cwd: root, env: { ...process.env, XDG_STATE_HOME: xdg }, stdout: "pipe", stderr: "pipe",
+    });
+    const out = (await new Response(p.stdout).text()).trim();
+    await p.exited;
+    ok(out.includes("\n") && out.startsWith("{\n  \""), "--pretty indents the reply", out.slice(0, 80));
+    ok(JSON.stringify(JSON.parse(out)) === JSON.stringify(compact.json), "--pretty is the same document as the compact form", out.slice(0, 200));
+    ok(out.includes('"breakpoints": ['), "--pretty spaces the key separator", out.slice(0, 200));
+  }
+
   console.log(`\n${pass} checks passed`);
 } finally {
   srv.kill();

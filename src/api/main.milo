@@ -14,10 +14,10 @@ from "std/argparse" import {
     ArgParser
 }
 from "std/os" import {
-    exit, getpid
+    exit, getpid, isatty
 }
 from "std/json" import {
-    Json
+    Json, jsonPretty
 }
 from "std/env" import {
     Env
@@ -73,7 +73,10 @@ fn cmdList(): i32 {
 
 // Who the server should name when it narrates this command to the humans
 // watching the UI. DAPWEB_AGENT wins; CLAUDECODE is set by Claude Code itself, so
-// honouring it is a statement of fact rather than a guess.
+// honouring it is a statement of fact rather than a guess. Otherwise the label is
+// read off stdin: a tty means a person typed this at a shell, and calling that
+// "agent" tells the watcher the opposite of what happened. No tty (a script, a
+// pipeline, a tool harness) is the only case that stays "agent".
 fn agentLabel(): string {
     if let Option.Some(a) = Env.get("DAPWEB_AGENT") {
         if a.len > 0 {
@@ -85,18 +88,33 @@ fn agentLabel(): string {
             return "claude"
         }
     }
+    if isatty(0 as i32) == 1 {
+        return "cli"
+    }
     return "agent"
 }
 
+// One place decides how a reply reaches the terminal, so --pretty covers every
+// command that prints JSON rather than the one it was added for. Non-JSON text
+// (an error line) passes through jsonPretty untouched, so nothing has to guess
+// what the server sent back.
+fn emit(reply: &string, pretty: bool): void {
+    if pretty {
+        print(jsonPretty(reply, 2))
+    } else {
+        print(reply)
+    }
+}
+
 // POST a command body and print the reply. `awaitType` empty ⇒ fire-and-forget.
-fn postCmd(port: i64, body: string, awaitType: string, timeoutMs: i64): i32 {
+fn postCmd(port: i64, body: string, awaitType: string, timeoutMs: i64, pretty: bool): i32 {
     var path = $"/api/cmd?agent={agentLabel()}&pid={getpid() as i64}"
     if awaitType.len > 0 {
         path = path + $"&await={awaitType}&timeout={timeoutMs}"
     }
     match httpRequest(port, "POST", path, body) {
         Result.Ok(reply) => {
-            print(reply)
+            emit(reply, pretty)
             // A timeout reply is a non-zero exit so scripts can branch on it.
             if let Result.Ok(doc) = Json.parse(reply.clone()) {
                 if (doc.str("error") ?? "") == "timeout" {
@@ -112,10 +130,10 @@ fn postCmd(port: i64, body: string, awaitType: string, timeoutMs: i64): i32 {
     }
 }
 
-fn cmdState(port: i64): i32 {
+fn cmdState(port: i64, pretty: bool): i32 {
     match httpRequest(port, "GET", "/api/state", "") {
         Result.Ok(reply) => {
-            print(reply)
+            emit(reply, pretty)
             return 0
         }
         Result.Err(e) => {
@@ -180,7 +198,8 @@ fn usage(): string {
         "  --session <id>   pick a session by id prefix     --port <n>   pick by port\n" +
         "  (with exactly one live session, both are optional)\n\n" +
         "  --await <type>   block until a message of this type (default per command)\n" +
-        "  --timeout <ms>   how long to block (default 5000)\n"
+        "  --timeout <ms>   how long to block (default 5000)\n" +
+        "  --pretty         indent the JSON reply instead of printing it on one line\n"
 }
 
 // argparse has no git-style subcommands: the top parser owns the command roster +
@@ -195,6 +214,7 @@ pub fn apiMain(argv: Vec<string>): i32 {
     p.addI64("port", "", "server port", 0 as i64)
     p.addI64("timeout", "", "await timeout in ms", 5000 as i64)
     p.addI64("line", "", "line number for break", 0 as i64)
+    p.addBool("pretty", "", "indent the JSON reply")
     p.addBool("over", "", "step over (default)")
     p.addBool("in", "", "step into")
     p.addBool("out", "", "step out")
@@ -229,9 +249,10 @@ pub fn apiMain(argv: Vec<string>): i32 {
     // None only when --await is absent, whose registered default is "" — the same
     // "no await" sentinel the old string-returning getString handed back.
     let awaitFlag = parsed.getString("await") ?? ""
+    let pretty = parsed.getBool("pretty")
 
     if cmd == "state" {
-        return cmdState(port)
+        return cmdState(port, pretty)
     }
 
     if cmd == "request" {
@@ -239,7 +260,7 @@ pub fn apiMain(argv: Vec<string>): i32 {
             eprint("error: request needs a JSON argument, e.g. request '{\"cmd\":\"run\"}'\n")
             return 1
         }
-        return postCmd(port, pos[1].clone(), awaitFlag, timeout)
+        return postCmd(port, pos[1].clone(), awaitFlag, timeout, pretty)
     }
 
     if cmd == "run" {
@@ -247,7 +268,7 @@ pub fn apiMain(argv: Vec<string>): i32 {
         if at.len == 0 {
             at = "stopped"
         }
-        return postCmd(port, Json.obj().str("cmd", "run").build(), at, timeout)
+        return postCmd(port, Json.obj().str("cmd", "run").build(), at, timeout, pretty)
     }
 
     if cmd == "continue" {
@@ -255,11 +276,11 @@ pub fn apiMain(argv: Vec<string>): i32 {
         if at.len == 0 {
             at = "stopped"
         }
-        return postCmd(port, Json.obj().str("cmd", "continue").build(), at, timeout)
+        return postCmd(port, Json.obj().str("cmd", "continue").build(), at, timeout, pretty)
     }
 
     if cmd == "pause" {
-        return postCmd(port, Json.obj().str("cmd", "pause").build(), awaitFlag, timeout)
+        return postCmd(port, Json.obj().str("cmd", "pause").build(), awaitFlag, timeout, pretty)
     }
 
     if cmd == "step" {
@@ -279,7 +300,7 @@ pub fn apiMain(argv: Vec<string>): i32 {
         if tid >= 0 {
             b = b.int("tid", tid)
         }
-        return postCmd(port, b.build(), at, timeout)
+        return postCmd(port, b.build(), at, timeout, pretty)
     }
 
     if cmd == "break" {
@@ -293,7 +314,7 @@ pub fn apiMain(argv: Vec<string>): i32 {
         if path.len > 0 {
             b = b.str("path", path)
         }
-        return postCmd(port, b.build(), awaitFlag, timeout)
+        return postCmd(port, b.build(), awaitFlag, timeout, pretty)
     }
 
     if cmd == "eval" {
@@ -310,11 +331,11 @@ pub fn apiMain(argv: Vec<string>): i32 {
         if at.len == 0 {
             at = "evalResult"
         }
-        return postCmd(port, b.build(), at, timeout)
+        return postCmd(port, b.build(), at, timeout, pretty)
     }
 
     if cmd == "kill" {
-        return postCmd(port, Json.obj().str("cmd", "kill").build(), awaitFlag, timeout)
+        return postCmd(port, Json.obj().str("cmd", "kill").build(), awaitFlag, timeout, pretty)
     }
 
     eprint($"error: unknown api command '{cmd}'\n\n")

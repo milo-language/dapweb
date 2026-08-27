@@ -63,6 +63,7 @@ browser sends, so an agent or a shell script needs no separate protocol:
 ./dapweb api run                  # blocks until the first stop
 ./dapweb api eval 'x + 1'
 ./dapweb api request --await stopped '{"cmd":"continue"}'
+./dapweb api step --pretty         # same JSON, indented for a human
 ```
 
 With one live session `api` finds it; otherwise pass `--session <id>` or
