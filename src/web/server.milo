@@ -492,6 +492,28 @@ fn registersScopeRef(raw: &string): i64 {
 
 // ── Inbound browser command fields ──
 
+// What an adapter actually said when it refused. The DAP response has two
+// places for it and adapters disagree: lldb-dap puts a short line in "message",
+// while its 21 series (and js-debug) leave that empty and put the real text in
+// body.error.format. Reading only one of them turns a refusal into a blank.
+fn respErrText(raw: &string): string {
+    let m = jStr(raw, "message")
+    if m.len > 0 {
+        return m
+    }
+    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+        if let Option.Some(body) = doc.get("body") {
+            if let Option.Some(err) = body.get("error") {
+                let f = err.str("format") ?? ""
+                if f.len > 0 {
+                    return f
+                }
+            }
+        }
+    }
+    return "the adapter refused the request and said nothing about why"
+}
+
 fn jStr(raw: &string, key: &string): string {
     if let Result.Ok(doc) = Json.parse(raw.clone()) {
         return doc.str(key) ?? ""
@@ -1381,14 +1403,14 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
 
             if !msg.success {
                 if kind == "eval" {
-                    let emsg = jStr(msg.raw, "message")
+                    let emsg = respErrText(msg.raw)
                     wsPush(ch, wakeWr, Json.obj().str("type", "evalResult").int("id", pid).str("value", emsg).int("ref", 0).bool("error", true).build())
                 } else if kind == "fsc" || kind == "fvars" {
                     wsPush(ch, wakeWr, Json.obj().str("type", "frameLocals").int("id", pid).raw("vars", "[]").build())
                 } else if kind == "disasm" {
                     wsPush(ch, wakeWr, Json.obj().str("type", "disasm").int("id", pid).raw("instructions", "[]").build())
                 } else if kind == "setv" {
-                    wsPush(ch, wakeWr, Json.obj().str("type", "setVarResult").int("id", pid).str("value", jStr(msg.raw, "message")).int("ref", 0).bool("error", true).build())
+                    wsPush(ch, wakeWr, Json.obj().str("type", "setVarResult").int("id", pid).str("value", respErrText(msg.raw)).int("ref", 0).bool("error", true).build())
                 } else if kind == "ebInit" {
                     // Exception filters rejected — still finish configuration
                     // or the session never launches.
