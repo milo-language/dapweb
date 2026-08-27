@@ -14,20 +14,22 @@ built in [Milo](https://github.com/milo-language/milo)
 ## The debuggers
 
 dapweb drives a debugger through its Debug Adapter Protocol front end, which by
-now is nearly all of them. Five it finds by itself; the last column is what has
-actually been driven through dapweb:
+now is nearly all of them. Five are known by name; the rest are the same thing
+with the path spelled out:
 
-| adapter | languages | how dapweb finds it | exercised |
-| --- | --- | --- | --- |
-| **lldb-dap** | C, C++, Objective-C, Rust, Swift, Zig | `lldb-dap` on `PATH`, else `xcrun -f lldb-dap` | the whole test suite |
-| **debugpy** | Python | `python3 -m debugpy.adapter` | break, run, step, eval, continue, kill |
-| **Delve** | Go | `dlv dap` | same, for a `.go` file, a package directory and a prebuilt binary |
-| **js-debug** | JavaScript, TypeScript | `js-debug-adapter` on `PATH`, else `~/.local/share/dapweb/js-debug` | same |
-| **java-dap** | Java, and anything else on JDWP | `java-dap` on `PATH` | probe only |
+| adapter | languages | how dapweb finds it |
+| --- | --- | --- |
+| **lldb-dap** | C, C++, Objective-C, Rust, Swift, Zig | `lldb-dap` on `PATH`, else `xcrun -f lldb-dap` |
+| **debugpy** | Python | `python3 -m debugpy.adapter` |
+| **Delve** | Go | `dlv dap` |
+| **js-debug** | JavaScript, TypeScript | `js-debug-adapter` on `PATH`, else `~/.local/share/dapweb/js-debug` |
+| **java-dap** | Java, and anything else on JDWP | `java-dap` on `PATH` |
+| **any other DAP adapter** | everything else | `--dapPath "gdb -i dap"`, `--dapPath /path/to/adapter` |
 
-Every other DAP adapter is one flag away: CodeLLDB, `gdb -i dap` (gdb 14+),
-netcoredbg for C#/.NET, rdbg for Ruby, Xdebug for PHP, earlybird for OCaml,
-probe-rs and cortex-debug for embedded targets.
+That last row is not a footnote: CodeLLDB, `gdb -i dap` (gdb 14+), netcoredbg for
+C#/.NET, rdbg for Ruby, Xdebug for PHP, earlybird for OCaml, probe-rs and
+cortex-debug for embedded targets all arrive on the same protocol over the same
+transport. The five above are the ones dapweb can find without being told where.
 
 ```sh
 ./dapweb web --dapPath /path/to/some-dap-adapter --program ./a.out
