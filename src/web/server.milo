@@ -2381,7 +2381,9 @@ fn apiStateJson(): string {
 fn apiWho(query: &string): string {
     var who = queryParam(query, "agent")
     if who.len == 0 {
-        who = "agent"
+        // An unlabelled caller (curl, a hand-rolled client) is an api caller and
+        // nothing more; "agent" would be a claim about it we cannot make.
+        who = "api"
     }
     let apid = queryParam(query, "pid")
     if apid.len > 0 {
