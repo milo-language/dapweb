@@ -490,6 +490,11 @@ export default function App() {
           setSelFrame(0); setMem(null); setMemAddr(""); setMemErr("");
           if (phaseRef.current !== "idle") setPhase("idle");
           termRef.current?.clear();
+          // The banner below only prints when the state CHANGES, and clearing the
+          // terminal just erased whatever it last printed. Without this, a new
+          // session that happens to land in the same state as the old one comes
+          // up with an empty terminal and no explanation in it.
+          announcedRef.current = "";
         }
         // Session identity in the URL: shareable, and a reload/reconnect can
         // tell "same session" from "server restarted" (state resets either way).

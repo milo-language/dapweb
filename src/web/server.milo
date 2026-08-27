@@ -74,7 +74,7 @@ from "std/env" import {
     Env
 }
 from "std/process" import {
-    Child, Command, Stdio, exePath
+    Command, Stdio
 }
 from "std/fs" import {
     pathExists, makeDir, writeFile, removeFile, currentDir, splitLines
