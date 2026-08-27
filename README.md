@@ -24,37 +24,27 @@ unsigned binary on first run. Re-run the command to update.
 
 ## Using it
 
-Type a path and press Enter; arguments go on the same line, shell-split.
+Point it at a program, press Run, click a line to break on it. That is the whole
+loop:
 
-![the target bar in launch mode](docs/images/launch-args.gif)
+![a dapweb session, start to finish](docs/images/session.gif)
 
-Click **LAUNCH** to flip to **ATTACH** and pick a running process by name.
+Click **LAUNCH** to flip the bar to **ATTACH** and pick a running process by name
+instead of hunting for its pid:
 
 ![the target bar in attach mode](docs/images/attach.gif)
 
-Click **info** to find out whether the binary carries debug info at all — the
-usual reason a session runs but shows no source.
-
-| carries DWARF | built without `-g` |
-|---|---|
-| ![binary with debug info](docs/images/binary-info.png) | ![binary without debug info](docs/images/binary-info-nodebug.png) |
-
-An agent announces each command before it runs, and its breakpoints appear in
-your gutter as it sets them.
+An agent on `dapweb api` shares your session. It announces each command before it
+runs and its breakpoints land in your gutter, so a program that moves on its own
+is never unexplained:
 
 ![an agent driving the session](docs/images/agent-activity.gif)
 
-Disassembly inline under each source line, or in a pane beside it.
-
-![inline disassembly](docs/images/asm-inline.png)
-
-Milo sources get syntax highlighting; `milo build x.milo -o x -g --debug` emits
-the DWARF.
-
-![debugging a Milo program](docs/images/milo-source.png)
-
-⚙ opens the launch configuration itself — a verbatim VS Code launch config, so
-anything from your `.vscode/launch.json` works unchanged.
+Also there: **info** on the target bar reads the binary's headers and tells you
+whether it carries debug info at all (the usual reason a session runs but shows
+no source); disassembly inline under each source line or in a pane beside it;
+syntax highlighting for `.milo` sources; and ⚙ for the launch configuration
+itself, a verbatim VS Code launch config.
 
 ## CLI
 

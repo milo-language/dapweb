@@ -38,6 +38,15 @@ def _font(size):
 
 def annotate(spec):
     img = Image.open(spec["src"]).convert("RGB")
+    out = _compose(img, spec)
+    out.save(spec["out"])
+    print(f"wrote {spec['out']}  ({img.width}x{img.height})")
+    if "gif" in spec:
+        _gif(img, out, spec["regions"][spec["gif"].get("focus", 0)]["box"], spec["gif"])
+    if "reveal" in spec:
+        _reveal(img, out, spec["reveal"])
+
+def _compose(img, spec):
     W, H = img.size
     dim = float(spec.get("dim", 0.62))
     regions = spec["regions"]
@@ -73,13 +82,7 @@ def annotate(spec):
         d.rounded_rectangle([lx, ly, lx + tw + 2 * PAD, ly + th], radius=6, fill=color)
         d.text((lx + PAD, ly + PAD - 1), label, font=label_font, fill=(20, 12, 20))
 
-    out.save(spec["out"])
-    print(f"wrote {spec['out']}  ({W}x{H})")
-
-    if "gif" in spec:
-        _gif(img, out, regions[spec["gif"].get("focus", 0)]["box"], spec["gif"])
-    if "reveal" in spec:
-        _reveal(img, out, spec["reveal"])
+    return out
 
 def _reveal(raw, annotated, r):
     """Cross-fade the plain screenshot into the annotated one, and back.
@@ -168,8 +171,49 @@ def _gif(raw, annotated, box, g):
                    duration=g.get("duration", 90), loop=0, optimize=True)
     print(f"wrote {g['out']}  ({len(frames)} frames)")
 
+def story(spec):
+    """One GIF walking a real session: each step is a screenshot with the control
+    you press called out, held long enough to read, cross-fading to the next.
+
+    A gallery of feature screenshots makes a reader assemble the workflow
+    themselves. A sequence shows them the four buttons that actually matter and
+    the order to press them in.
+    """
+    steps = spec["steps"]
+    outw = int(spec.get("width", 880))
+    dim = float(spec.get("dim", 0.66))
+    step_ms = int(spec.get("step_ms", 55))
+    fade = int(spec.get("fade", 6))
+
+    shots = []
+    for i, st in enumerate(steps, 1):
+        sub = {"src": st["src"], "out": "/dev/null", "dim": dim,
+               "regions": st["regions"], "label_size": spec.get("label_size", 17)}
+        img = Image.open(st["src"]).convert("RGB")
+        ann = _compose(img, sub)
+        shots.append(ann.resize((outw, int(outw * ann.height / ann.width)), Image.LANCZOS))
+
+    frames, durations = [], []
+    for i, sh in enumerate(shots):
+        frames.append(sh)
+        durations.append(int(steps[i].get("hold_ms", spec.get("hold_ms", 2600))))
+        nxt = shots[(i + 1) % len(shots)]
+        for k in range(1, fade + 1):
+            t = k / (fade + 1)
+            frames.append(Image.blend(sh, nxt, t * t * (3 - 2 * t)))
+            durations.append(step_ms)
+
+    pal = shots[0].quantize(colors=255, method=Image.MEDIANCUT)
+    frames = [f.quantize(palette=pal, dither=Image.NONE) for f in frames]
+    frames[0].save(spec["out"], save_all=True, append_images=frames[1:],
+                   duration=durations, loop=0, optimize=True)
+    print(f"wrote {spec['out']}  ({len(frames)} frames, {sum(durations)/1000:.1f}s loop)")
+
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit(__doc__)
     for spec in json.load(open(sys.argv[1])):
-        annotate(spec)
+        if "steps" in spec:
+            story(spec)
+        else:
+            annotate(spec)
