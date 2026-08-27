@@ -160,6 +160,25 @@ go     ← types [go]                          (delve — future, same error)
   `target: /tmp/dapweb_nested (restored — Run to launch)`. No flag; good defaults over config.
   Replaces the client-driven drawer-fallback + debounced auto-apply resurrection.
 
+## 4b. The config drawer: two views, one text
+
+- Form and JSON tabs over the SAME text. The JSON is still the source of truth (App reads
+  the live text on Run); the form writes into it, so a field edit is visible as JSON one
+  click away. That relationship is the point: a launch.json should not have to be learned to
+  press Run, but it is what actually reaches the adapter.
+- Form fields are DERIVED from the same JSON schema that drives Monaco's autocomplete
+  (`src/web/ui/src/configSchema.ts`), including the per-dialect `allOf` branches — so a key
+  added for autocomplete appears as a field, with the schema's own `description` as its help.
+  There is no second list of keys.
+- `ATTACH_ONLY` / `LAUNCH_ONLY` hide fields the other request kind cannot use. That is a UI
+  judgement, not a validity one: a config carrying both still validates and still runs.
+- Keys the schema never enumerated are listed under the form, not hidden: they are valid
+  (`additionalProperties: true`) and go to the adapter verbatim, and a form edit preserves
+  them. A form edit does rewrite the text, which drops JSONC comments — the form says so,
+  and only when there are comments to lose.
+- Gated by `tests/configform.ts`, which asserts the derivation rather than listing the
+  expected fields (a hand-written list would be the third thing to drift).
+
 ## 5. CLI parity
 
 - `dapweb <program> [args...]` works: top-level positional = implicit

@@ -75,6 +75,7 @@ serve_suite e2e-restart    $((base + 30)) --program /tmp/dapweb_nested --source 
 serve_suite e2e-codebug    $((base + 40)) --program /tmp/dapweb_nested --source examples/nested/main.c
 serve_suite e2e-session    $((base + 50)) --program /tmp/dapweb_nested --source examples/nested/main.c
 serve_suite e2e-threads    $((base + 60)) --program /tmp/dapweb_threads
+self_suite  configform
 self_suite  hermetic
 self_suite  api
 self_suite  e2e-agent

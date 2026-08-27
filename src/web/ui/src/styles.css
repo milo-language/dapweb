@@ -117,6 +117,10 @@ button.run:hover:not(:disabled) { border-color: var(--ok); background: rgba(63,1
 button.run.live { border-color: var(--stop); color: var(--stop); }
 button.run.live:hover:not(:disabled) { border-color: var(--stop); background: var(--stop-bg); }
 main { flex: 1; display: flex; min-height: 0; position: relative; }
+/* main + the terminal. The target sheet is positioned against this rather than
+   against <main> so it is as tall as the window, not as tall as whatever the
+   terminal left over. */
+.workspace { flex: 1; display: flex; flex-direction: column; min-height: 0; position: relative; }
 .editor-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .filetabs { display: flex; gap: 2px; background: var(--panel); flex: none;
             border-bottom: 1px solid var(--border); overflow-x: auto; }
@@ -190,7 +194,41 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
 .run-cfg { font-size: 11px; padding: 3px 10px; background: var(--bg); color: var(--ok);
            border: 1px solid var(--border); border-radius: 4px; cursor: pointer; }
 .run-cfg:hover { border-color: currentColor; }
-.drawer-editor { flex: 1; min-height: 180px; border-bottom: 1px solid var(--border); }
+/* The config is what the drawer is for; history is a shortcut back to an old
+   one. Splitting the height evenly put three form fields on screen and eight
+   blank rows under "no previous targets". */
+.drawer-editor { flex: 3 1 0; min-height: 180px; border-bottom: 1px solid var(--border); }
+
+/* Form ⇄ JSON. Two views of one config, so the tabs sit directly on the thing
+   they switch rather than in the action row: the picker and Run act on the
+   config whichever view is up, and grouping them together would say otherwise. */
+.cfg-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); padding: 0 12px; }
+.cfg-tabs button { font-size: 11px; padding: 5px 10px; background: none; color: var(--muted);
+                   border: none; border-bottom: 2px solid transparent; cursor: pointer; }
+.cfg-tabs button:hover { color: var(--fg); }
+.cfg-tabs button.on { color: var(--fg); border-bottom-color: var(--accent); }
+
+.drawer-form { overflow: auto; }
+.ff-form { padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 9px; }
+/* label above input: the value is what you read back, so it gets the full width
+   rather than whatever a label column leaves over. */
+.ff { display: flex; flex-direction: column; gap: 2px; }
+.ff-label { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.ff input[type=text], .ff input[type=number], .ff select, .ff textarea {
+  font: 12px/1.4 var(--mono); background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; width: 100%; }
+.ff input:focus, .ff select:focus, .ff textarea:focus { outline: none; border-color: var(--accent); }
+.ff textarea { resize: vertical; }
+/* checkbox reads left-to-right, so it is the one field whose label follows it */
+.ff-bool { flex-direction: row; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ff-bool .ff-label { color: var(--fg); }
+.ff-tip { font-size: 10px; color: var(--muted); }
+.ff-json { font: 12px/1.4 var(--mono); color: var(--muted); padding: 3px 0; }
+.ff-blocked, .ff-warn, .ff-extra { font-size: 11px; padding: 8px 12px; color: var(--muted); }
+.ff-warn { color: var(--stop); background: var(--stop-bg); }
+.ff-extra code { font-family: var(--mono); color: var(--fg); margin-right: 6px; }
+.ff-adv { align-self: flex-start; font-size: 11px; padding: 2px 0; background: none;
+          border: none; color: var(--accent); cursor: pointer; }
 .cfg-note { padding: 6px 12px; font-size: 11px; color: var(--muted); }
 .cfg-err { padding: 6px 12px; font-size: 11px; color: var(--bp); white-space: pre-wrap; }
 /* Collapse chevron in the drawer header; matching reopen rail when hidden. */
@@ -230,7 +268,7 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
 .caps-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; max-height: 160px; overflow: auto; }
 .cap { font-size: 10px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 8px;
        color: var(--muted); white-space: nowrap; }
-.drawer-hist { flex: 1; overflow: auto; padding: 6px 12px; }
+.drawer-hist { flex: 0 1 auto; max-height: 30%; overflow: auto; padding: 6px 12px; }
 .hist-name { color: var(--fg); margin-right: 6px; font-weight: 600; }
 .hist-row { padding: 4px 6px; cursor: pointer; border-radius: 4px; overflow: hidden; }
 .hist-row:hover { background: rgba(255,255,255,0.06); }

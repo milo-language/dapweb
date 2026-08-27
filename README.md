@@ -98,6 +98,7 @@ The open tab moves to line 24 as that runs, and says who moved it:
 - Program terminal
 - Syntax highlighting
 - VS Code launch configs
+- Form ⇄ JSON config editor
 - Target history
 - Agent-started sessions
 - Binary info

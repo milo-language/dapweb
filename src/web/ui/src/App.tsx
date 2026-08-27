@@ -1218,21 +1218,12 @@ export default function App() {
         )}
       </header>
       {offline && <div className="offline-banner">disconnected from the dapweb server: nothing you click will reach the session until it reconnects</div>}
+      {/* main + the terminal are one workspace, and the target sheet overlays the
+          whole of it. Living inside <main> it was capped at whatever height the
+          terminal left over — about 360px — which is two form fields and a
+          scrollbar. */}
+      <div className="workspace">
       <main>
-        {showConfig ? (
-          <>
-          <div className="drawer-backdrop" onClick={() => setShowConfig(false)} />
-          <ConfigDrawer
-            config={cfg}
-            sessionActive={phase === "running" || phase === "stopped"}
-            error={configErr}
-            history={cfgHist}
-            onChange={(text: string) => { cfgTextRef.current = text; }}
-            onRun={run}
-            onClose={() => setShowConfig(false)}
-          />
-          </>
-        ) : null}
         <div className="editor-col">
           {/* One file still gets its tab: it names what you are looking at, and a
               bar that appears only on the second file makes the first stop look
@@ -1426,6 +1417,21 @@ export default function App() {
                        stopSeq={stopSeq} onAddr={viewMemory} />
           </div>
         )}
+      </div>
+      {showConfig ? (
+        <>
+          <div className="drawer-backdrop" onClick={() => setShowConfig(false)} />
+          <ConfigDrawer
+            config={cfg}
+            sessionActive={phase === "running" || phase === "stopped"}
+            error={configErr}
+            history={cfgHist}
+            onChange={(text: string) => { cfgTextRef.current = text; }}
+            onRun={run}
+            onClose={() => setShowConfig(false)}
+          />
+        </>
+      ) : null}
       </div>
     </div>
   );
