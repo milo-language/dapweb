@@ -95,63 +95,122 @@ const TEMPLATES: { label: string; text: string }[] = [
   },
 ];
 
-type Field = { key: string; schema: any };
+// One field, rendered from its schema entry. The widget follows the schema's
+// own `type`, so a key added there arrives here with the right control and its
+// description as the help text — no per-key rendering table to keep in step.
+function FormField({ f, cfg, set }: { f: Field; cfg: DebugConfig; set: (k: string, v: any) => void }) {
+  const { key, schema } = f;
+  const v = (cfg as any)[key];
+  const tip = schema?.description || "";
+  const label = <label className="ff-label" htmlFor={`ff-${key}`} title={tip}>{key}</label>;
 
-// Which keys make sense for launch vs attach. The schema branches on `type`
-// only, because that is all a JSON validator can usefully say — "args is
-// meaningless when attaching" is a UI judgement, not a validity one, and a
-// config carrying both still passes and still runs.
-const ATTACH_ONLY = new Set(["pid", "processId", "connect", "waitFor", "attachCommands"]);
-const LAUNCH_ONLY = new Set(["args", "cwd", "console", "mode", "buildFlags", "module",
-                             "runtimeExecutable", "runtimeArgs", "launchCommands", "stopOnEntry"]);
-
-// The handful worth seeing before anything else: what to debug, and how to
-// name it. Everything else lands under Advanced, because a form that opens with
-// thirty inputs is the sidebar we are trying to stop shipping.
-const PRIMARY = ["type", "request", "program", "pid", "processId", "args", "source", "name", "stopAtMain"];
-
-function branchProps(type: string | undefined): Record<string, any> {
-  for (const b of SCHEMA.allOf as any[]) {
-    if (b.if?.properties?.type?.const === type) return b.then?.properties ?? {};
+  if (schema?.type === "boolean") {
+    return (
+      <div className="ff ff-bool">
+        <input id={`ff-${key}`} type="checkbox" checked={v === true}
+               onChange={(e) => set(key, e.target.checked ? true : undefined)} />
+        {label}
+        {tip && <span className="ff-tip">{tip}</span>}
+      </div>
+    );
   }
-  return {};
-}
-
-function fieldsFor(cfg: DebugConfig): { primary: Field[]; advanced: Field[] } {
-  const all: Record<string, any> = { ...COMMON, ...branchProps(cfg.type) };
-  const attach = cfg.request === "attach";
-  const keep = Object.keys(all).filter((k) => (attach ? !LAUNCH_ONLY.has(k) : !ATTACH_ONLY.has(k)));
-  const primary: Field[] = [];
-  for (const k of PRIMARY) if (keep.includes(k)) primary.push({ key: k, schema: all[k] });
-  const seen = new Set(primary.map((f) => f.key));
-  const advanced = keep.filter((k) => !seen.has(k)).sort().map((k) => ({ key: k, schema: all[k] }));
-  return { primary, advanced };
-}
-
-// Keys the user wrote that the schema has never heard of. They are valid and go
-// to the adapter verbatim (additionalProperties stays true), so the form has to
-// admit they exist — silently not rendering them is how a form convinces someone
-// their config is smaller than it is.
-function unknownKeys(cfg: DebugConfig): string[] {
-  const known = new Set([...Object.keys(COMMON), ...Object.keys(branchProps(cfg.type)), "lastRunAt"]);
-  return Object.keys(cfg).filter((k) => !known.has(k));
-}
-
-// An array of strings edits as one entry per line: `args` is almost always a
-// short list, and a line is the shape people already have in their shell history.
-const linesOf = (v: any): string => Array.isArray(v) ? v.join("\n") : "";
-const toLines = (s: string): string[] => s.split("\n").map((x) => x.trim()).filter(Boolean);
-// env edits as KEY=value per line, for the same reason.
-const envOf = (v: any): string =>
-  v && typeof v === "object" ? Object.entries(v).map(([k, x]) => `${k}=${x}`).join("\n") : "";
-const toEnv = (s: string): Record<string, string> => {
-  const out: Record<string, string> = {};
-  for (const line of toLines(s)) {
-    const i = line.indexOf("=");
-    if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1);
+  if (schema?.enum) {
+    return (
+      <div className="ff">
+        {label}
+        <select id={`ff-${key}`} value={v ?? ""} onChange={(e) => set(key, e.target.value || undefined)}>
+          <option value="">—</option>
+          {schema.enum.map((o: string) => <option key={o} value={o}>{o}</option>)}
+        </select>
+        {tip && <span className="ff-tip">{tip}</span>}
+      </div>
+    );
   }
-  return out;
-};
+  if (schema?.type === "array") {
+    return (
+      <div className="ff">
+        {label}
+        <textarea id={`ff-${key}`} rows={Math.min(6, Math.max(2, linesOf(v).split("\n").length))}
+                  value={linesOf(v)} spellCheck={false}
+                  onChange={(e) => set(key, e.target.value.trim() ? toLines(e.target.value) : undefined)} />
+        <span className="ff-tip">{tip ? tip + " — " : ""}one per line</span>
+      </div>
+    );
+  }
+  if (key === "env") {
+    return (
+      <div className="ff">
+        {label}
+        <textarea id={`ff-${key}`} rows={3} value={envOf(v)} spellCheck={false}
+                  onChange={(e) => set(key, e.target.value.trim() ? toEnv(e.target.value) : undefined)} />
+        <span className="ff-tip">{tip ? tip + " — " : ""}KEY=value, one per line</span>
+      </div>
+    );
+  }
+  if (schema?.type === "object") {
+    // connect{} and friends: rare, nested, and better served by the tab that
+    // already edits JSON properly than by a form-shaped imitation of one.
+    return (
+      <div className="ff">
+        {label}
+        <div className="ff-json">{v ? JSON.stringify(v) : "—"}<span className="ff-tip"> edit in the JSON tab</span></div>
+      </div>
+    );
+  }
+  const num = schema?.type === "integer";
+  return (
+    <div className="ff">
+      {label}
+      <input id={`ff-${key}`} type={num ? "number" : "text"} value={v ?? ""} spellCheck={false}
+             onChange={(e) => {
+               const t = e.target.value;
+               if (!t) return set(key, undefined);
+               set(key, num ? Number(t) : t);
+             }} />
+      {tip && <span className="ff-tip">{tip}</span>}
+    </div>
+  );
+}
+
+// The form tab. It never holds state of its own: every edit re-serialises the
+// parsed config back into the shared text, which is what makes the JSON tab show
+// the change and what keeps keys this form cannot render from being dropped.
+function FormView({ text, setText }: { text: string; setText: (t: string) => void }) {
+  const [showAdv, setShowAdv] = useState(false);
+  let cfg: DebugConfig | null = null;
+  try { cfg = JSON.parse(stripJsonc(text) || "{}"); } catch {}
+  if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
+    return <div className="ff-blocked">the config is not valid JSON right now — fix it in the JSON tab and this form comes back</div>;
+  }
+  // Re-serialising is also what drops any comments the user wrote. Say so when
+  // there ARE comments to lose, and say nothing when there are not — a warning
+  // that is always on is not a warning.
+  const hasComments = stripJsonc(text).replace(/\s+/g, "") !== text.replace(/\s+/g, "");
+  const set = (k: string, v: any) => {
+    const next: any = { ...cfg };
+    if (v === undefined || v === "") delete next[k]; else next[k] = v;
+    setText(JSON.stringify(next, null, 2));
+  };
+  const { primary, advanced } = fieldsFor(cfg);
+  const extras = unknownKeys(cfg);
+  return (
+    <div className="ff-form">
+      {hasComments && <div className="ff-warn">this config has comments — editing a field here rewrites the JSON and drops them</div>}
+      {primary.map((f) => <FormField key={f.key} f={f} cfg={cfg!} set={set} />)}
+      {extras.length > 0 && (
+        <div className="ff-extra">
+          keys this form does not know, passed to the adapter as written:{" "}
+          {extras.map((k) => <code key={k}>{k}</code>)}
+        </div>
+      )}
+      <button className="ff-adv" onClick={() => setShowAdv((v) => !v)}>
+        {showAdv ? "▾" : "▸"} advanced ({advanced.length})
+      </button>
+      {showAdv && advanced.map((f) => <FormField key={f.key} f={f} cfg={cfg!} set={set} />)}
+    </div>
+  );
+}
+
 
 export default function ConfigDrawer({ config, sessionActive, error, history, onChange, onRun, onClose }: {
   config: DebugConfig; sessionActive: boolean; error: string;
@@ -195,6 +254,11 @@ export default function ConfigDrawer({ config, sessionActive, error, history, on
     catch (e: any) { setParseErr(`invalid JSON: ${e.message}`); }
   };
 
+  // Hand App the text once on mount. The JSON editor used to do this as a side
+  // effect of being created, which stopped being true the moment the drawer could
+  // open on a tab that has no editor in it.
+  useEffect(() => { onChangeRef.current(textRef.current); validate(textRef.current); }, []);
+
   // Re-created whenever the JSON tab comes back: Monaco cannot outlive the div
   // it was given, and the div only exists while that tab is showing.
   useEffect(() => {
@@ -212,7 +276,6 @@ export default function ConfigDrawer({ config, sessionActive, error, history, on
     });
     edRef.current = ed;
     (window as any).__dapwebConfigEditor = ed;  // test hook (browser_repro2)
-    onChangeRef.current(ed.getValue());
     const sub = ed.onDidChangeModelContent(() => {
       const v = ed.getValue();
       validate(v);

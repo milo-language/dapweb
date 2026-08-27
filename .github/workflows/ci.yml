@@ -63,6 +63,12 @@ jobs:
         working-directory: src/web/ui
         run: bun install --frozen-lockfile
 
+      # Also run by build.sh; called out here so a type error reports as its own
+      # failed step instead of as "the build broke".
+      - name: typecheck ui
+        working-directory: src/web/ui
+        run: bunx tsc --noEmit
+
       - name: build
         run: MILO=.milo-src/src/main.ts scripts/build.sh
 

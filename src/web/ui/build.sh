@@ -4,6 +4,11 @@
 # starting the server, no server recompile needed for UI changes.
 set -e
 cd "$(dirname "$0")"
+# Typecheck BEFORE bundling. `bun build` emits a bundle that references an
+# identifier nothing defines without complaint, and the failure then arrives as
+# a blank page in someone's browser rather than as a build error here.
+bunx tsc --noEmit
+
 rm -rf dist && mkdir dist
 bun build src/main.tsx --outdir dist --minify
 mv dist/main.js dist/app.js
