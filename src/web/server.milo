@@ -2277,8 +2277,6 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         logEvent("kill requested", $"(by {peerKind} peer)")
         if gDapIn >= 0 {
             gOddSeq = gOddSeq + 2
-            sendReqFd(gDapIn, gOddSeq, "terminate", "{}")
-            gOddSeq = gOddSeq + 2
             let _p = pendCh.trySend(Pending {
                 seq: gOddSeq, kind: "disc", id: 0, extra: ""
             }
