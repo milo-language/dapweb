@@ -2,13 +2,12 @@
  {
   "out": "docs/images/panes.png",
   "cols": 1,
-  "tile_width": 1100,
-  "label_size": 24,
-  "crop": [0, 268, 1372, 600],
+  "tile_width": 1000,
+  "label_size": 22,
   "tiles": [
-   { "src": "docs/shots/pane-memory.jpg", "label": "MEMORY" },
-   { "src": "docs/shots/pane-registers.jpg", "label": "REGISTERS" },
-   { "src": "docs/shots/pane-stack.jpg", "label": "STACK" }
+   { "src": "docs/shots/pane-memory.jpg", "label": "MEMORY", "crop": [0, 268, 790, 600] },
+   { "src": "docs/shots/pane-registers.jpg", "label": "REGISTERS", "crop": [0, 268, 800, 600] },
+   { "src": "docs/shots/pane-stack.jpg", "label": "STACK", "crop": [0, 268, 1160, 600] }
   ]
  }
 ]

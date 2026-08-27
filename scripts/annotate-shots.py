@@ -268,29 +268,44 @@ def grid(spec):
     gap = int(spec.get("gap", 18))
     font = _font(int(spec.get("label_size", 20)))
     bg = tuple(spec.get("bg", (13, 17, 23)))
+    # The callout pink is for one outlined thing in a busy frame. A caption on
+    # every tile is not that, and six of them shout over the screenshots.
+    lab_bg = tuple(spec.get("label_bg", (33, 38, 45)))
+    lab_fg = tuple(spec.get("label_fg", (201, 209, 217)))
 
     tiles = []
     for t in spec["tiles"]:
         im = Image.open(t["src"]).convert("RGB")
-        if crop:
-            im = im.crop((crop[0], crop[1], crop[0] + crop[2], crop[1] + crop[3]))
+        # Per-tile crop wins: these are screenshots of panes that fill different
+        # amounts of the window, and one rectangle for all of them either cuts
+        # content off the tall ones or pads the short ones with dead space.
+        c = t.get("crop", crop)
+        if c:
+            im = im.crop((c[0], c[1], c[0] + c[2], c[1] + c[3]))
         th = int(tw * im.height / im.width)
         tiles.append((im.resize((tw, th), Image.LANCZOS), t["label"]))
 
-    th = tiles[0][0].height
     rows = (len(tiles) + cols - 1) // cols
     cap = font.size + 2 * PAD + 8
+    # Per-row heights, not one height for the grid: these panes are different
+    # shapes, and padding every tile to the tallest one puts a field of
+    # background under the short ones that reads as a layout mistake.
+    row_h = [max(im.height for im, _ in tiles[r * cols:(r + 1) * cols]) for r in range(rows)]
+    row_y, acc = [], 0
+    for h in row_h:
+        row_y.append(acc)
+        acc += h + cap + gap
     W = cols * tw + (cols - 1) * gap
-    H = rows * (th + cap) + (rows - 1) * gap
+    H = acc - gap
     out = Image.new("RGB", (W, H), bg)
     d = ImageDraw.Draw(out)
     for i, (im, label) in enumerate(tiles):
         x = (i % cols) * (tw + gap)
-        y = (i // cols) * (th + cap + gap)
+        y = row_y[i // cols]
         lw = d.textlength(label, font=font)
         d.rounded_rectangle([x, y, x + lw + 2 * PAD, y + font.size + 2 * PAD],
-                            radius=6, fill=ACCENT)
-        d.text((x + PAD, y + PAD - 1), label, font=font, fill=(20, 12, 20))
+                            radius=6, fill=lab_bg, outline=(48, 54, 61), width=1)
+        d.text((x + PAD, y + PAD - 1), label, font=font, fill=lab_fg)
         out.paste(im, (x, y + cap))
     out.save(spec["out"])
     print(f"wrote {spec['out']}  ({out.width}x{out.height}, {len(tiles)} tiles)")
