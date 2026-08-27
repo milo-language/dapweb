@@ -54,6 +54,9 @@ from "std/json" import {
 from "./jsonaccess" import {
     bodyI64, bodyStr, frame0Field, frame0Path, scopes0Ref
 }
+from "../commands" import {
+    isKnownCmd, cmdVerb, cmdNames, commandsJson
+}
 from "../sessions" import {
     stateDir, writeSession, removeSession, sessionsJson, newSessionName,
     freePortFrom, spawnSessionOn
@@ -2114,24 +2117,9 @@ fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): b
 // One human-readable line for what a command is about to do. Only the verbs an
 // onlooker would care about get spelled out; anything else falls back to its name.
 fn activityText(c: &string, payload: &string): string {
-    if c == "run" {
-        return "launch the program"
-    }
-    if c == "continue" {
-        return "continue"
-    }
-    if c == "pause" {
-        return "pause the program"
-    }
-    if c == "kill" {
-        return "terminate the program"
-    }
-    if c == "restart" {
-        return "restart the program"
-    }
-    if c == "stepOver" || c == "stepIn" || c == "stepOut" {
-        return c.clone()
-    }
+    // Only the cases that can say something the table cannot — which line, which
+    // expression. Everything else takes the table's verb, so there is no second
+    // list of commands here to fall behind the first.
     if c == "evaluate" {
         return $"evaluate `{jStr(payload, "expr")}`"
     }
@@ -2144,17 +2132,20 @@ fn activityText(c: &string, payload: &string): string {
     if c == "setVar" {
         return $"set {jStr(payload, "name")} = {jStr(payload, "value")}"
     }
-    if c == "setConfig" {
-        return "change the debug target"
-    }
-    if c == "newSession" {
-        return "reset the session"
-    }
-    return c.clone()
+    return cmdVerb(c)
 }
 
-fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): void {
+// Returns whether the command was recognised. A caller that answers over HTTP
+// needs that: an unknown `cmd` used to fall off the end of the if-chain, do
+// nothing, and still be answered {"ok":true}, so an agent's typo looked exactly
+// like success. The check comes BEFORE the activity announcement too — telling
+// the human "the agent is attempting to frobnicate" about a command that will
+// not run is worse than saying nothing.
+fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): bool {
     let c = jStr(payload, "cmd")
+    if !isKnownCmd(c) {
+        return false
+    }
     // A browser peer's actions are self-evident to whoever performed them; an
     // agent's are not. Announce before acting, so the human watching the UI is
     // never surprised by a program that moves on its own.
@@ -2550,6 +2541,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         logEvent("session reset", $"new session {gSessionId}")
         pushHelloState(bus, busWakeWr)
     }
+    return true
 }
 
 // ── session registry ──
@@ -2755,12 +2747,28 @@ fn queryParam(query: &string, key: &string): string {
 // Run one command and, when `awaitType` is set, block until a broadcast of that
 // type arrives (or the deadline passes). Registering as a Sink first means no
 // reply can slip through between dispatch and listening.
+// The refusal an unknown command gets. It names the vocabulary rather than just
+// saying no, because the caller that sent a typo is usually a script that cannot
+// go and read the source.
+fn unknownCmdJson(c: &string): string {
+    var what = c.clone()
+    if what.len == 0 {
+        what = "(missing \"cmd\")"
+    }
+    return Json.obj().bool("ok", false)
+        .str("error", $"unknown command {what} — known commands: {cmdNames()}. Run `dapweb api spec` for what each one takes.")
+        .build()
+}
+
 fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): string {
     // An agent driving the session IS activity: without this an --idle-ttl server
     // reaps the debuggee out from under a caller that has no WS peer holding it.
     gLastActivityMs = epochMillis()
     if awaitType.len == 0 {
-        dispatchClientCmd(body, "api", who, bus, busWakeWr, pendCh)
+        let known = jStr(body, "cmd")
+        if !dispatchClientCmd(body.clone(), "api", who, bus, busWakeWr, pendCh) {
+            return unknownCmdJson(known)
+        }
         return Json.obj().bool("ok", true).build()
     }
     let ch = Channel<string>.new(256)!
@@ -2777,7 +2785,11 @@ fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: 
     unsafe {
         let _w = write(busWakeWr, one as *u8, 1)
     }
-    dispatchClientCmd(body, "api", who, bus, busWakeWr, pendCh)
+    let wantCmd = jStr(body, "cmd")
+    if !dispatchClientCmd(body.clone(), "api", who, bus, busWakeWr, pendCh) {
+        sinkUnregister(clientId)
+        return unknownCmdJson(wantCmd)
+    }
 
     let deadline = epochMillis() + timeoutMs
     var out: string = ""
@@ -2888,7 +2900,9 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, busWakeWr:
             }
         }
 
-        dispatchClientCmd(payload.clone(), peerKind.clone(), peerKind.clone(), bus, busWakeWr, pendCh)
+        if !dispatchClientCmd(payload.clone(), peerKind.clone(), peerKind.clone(), bus, busWakeWr, pendCh) {
+            wsPush(bus, busWakeWr, configErrMsg($"unknown command {jStr(payload, "cmd")}"))
+        }
     }
 
     // Leave the shared session; sinkUnregister closes our wake fd.
@@ -3273,6 +3287,13 @@ fn handleConnection(fd: i32, bus: Channel<string>, busWakeWr: i32, pendCh: Chann
         }
         // Every live dapweb on this machine, for the /sessions dashboard. Reads
         // the same registry `dapweb api list` does, and prunes it on the way.
+        // The vocabulary, so a caller can discover it over the same port it
+        // drives the session on rather than by reading the source.
+        if apiPath == "/api/commands" {
+            sendHttp(fd, 200, "application/json", commandsJson())
+            close(fd)
+            return
+        }
         if apiPath == "/api/sessions" {
             sendHttp(fd, 200, "application/json", sessionsJson(gSessionId))
             close(fd)

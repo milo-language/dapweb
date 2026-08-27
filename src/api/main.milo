@@ -28,6 +28,9 @@ from "std/time" import {
 from "./client" import {
     httpRequest
 }
+from "../commands" import {
+    commandsText
+}
 from "../sessions" import {
     loadSessions, SessionRow
 }
@@ -115,10 +118,16 @@ fn postCmd(port: i64, body: string, awaitType: string, timeoutMs: i64, pretty: b
     match httpRequest(port, "POST", path, body) {
         Result.Ok(reply) => {
             emit(reply, pretty)
-            // A timeout reply is a non-zero exit so scripts can branch on it.
+            // A timeout reply is a non-zero exit so scripts can branch on it,
+            // and so is a refusal: a rejected command that exits 0 is the same
+            // trap as the {"ok":true} this reply replaced — the caller reads
+            // success and carries on as though the session moved.
             if let Result.Ok(doc) = Json.parse(reply.clone()) {
                 if (doc.str("error") ?? "") == "timeout" {
                     return 2
+                }
+                if (doc.bool("ok") ?? true) == false {
+                    return 3
                 }
             }
             return 0
@@ -188,6 +197,7 @@ fn usage(): string {
         "  list                     list live sessions (prunes dead ones)\n" +
         "  state                    print the current session snapshot (JSON)\n" +
         "  request <json>           send raw {\"cmd\":...} JSON; --await <type> blocks for a reply\n" +
+        "  spec                     print the {\"cmd\":...} vocabulary and where the DAP spec is\n" +
         "  continue | pause         resume / interrupt the debuggee\n" +
         "  step [--over|--in|--out] single step (default: over)\n" +
         "  break --line N [--path P]  set a breakpoint\n" +
@@ -234,6 +244,13 @@ pub fn apiMain(argv: Vec<string>): i32 {
 
     if cmd == "list" {
         return cmdList()
+    }
+    // Before the port lookup, like `list`: the vocabulary is compiled in, so
+    // asking what the commands are must not require a session to already exist —
+    // which is exactly the moment someone needs to ask.
+    if cmd == "spec" {
+        print(commandsText())
+        return 0
     }
 
     let port = match resolvePort(parsed.getString("session") ?? "", parsed.getI64("port")) {

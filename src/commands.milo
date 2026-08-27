@@ -1,0 +1,147 @@
+// The command vocabulary: the `{"cmd":...}` messages a browser peer, an agent
+// over `dapweb api`, and a shell script all send. One table, because there were
+// three lists of these and nothing kept them in step —
+//
+//   * dispatchClientCmd's if-chain, which decides what actually runs,
+//   * activityText's if-chain, which phrases what an agent is doing for the
+//     human watching, and
+//   * nothing at all telling a caller what the vocabulary IS, which is why an
+//     unrecognised command used to answer {"ok":true} and do nothing.
+//
+// A command missing from this table is rejected, so the table cannot silently
+// fall behind the dispatcher: adding a case without adding an entry means the
+// command stops working, which is a failure someone notices.
+//
+// This is dapweb's own vocabulary, not DAP's. Where a command forwards to the
+// adapter, `dap` names the DAP request it becomes, so the spec is one search
+// away — see DAP_SPEC_URL.
+
+from "std/json" import {
+    Json
+}
+
+pub let DAP_SPEC_URL: string = "https://microsoft.github.io/debug-adapter-protocol/specification"
+
+pub struct CmdSpec {
+    name: string,
+    args: string,    // payload keys besides "cmd"; "?" marks optional
+    summary: string, // one line, imperative
+    awaits: string,  // the reply `type` --await usually wants ("" = no reply)
+    dap: string,     // the DAP request this becomes ("" = handled by dapweb alone)
+    verb: string,    // how an agent's use of it is announced to a watching human
+}
+
+// Ordered roughly by how often a caller reaches for it, because this is also
+// what `dapweb api spec` prints and a list sorted alphabetically buries `run`.
+pub fn commandSpecs(): Vec<CmdSpec> {
+    var v: Vec<CmdSpec> = []
+    v.push(CmdSpec { name: "run", args: "stopAtMain?, force?, config?", summary: "launch (or relaunch) the configured target", awaits: "stopped", dap: "launch/attach", verb: "launch the program" })
+    v.push(CmdSpec { name: "continue", args: "tid?", summary: "resume the debuggee", awaits: "stopped", dap: "continue", verb: "continue" })
+    v.push(CmdSpec { name: "pause", args: "tid?", summary: "interrupt the running debuggee", awaits: "stopped", dap: "pause", verb: "pause the program" })
+    v.push(CmdSpec { name: "stepOver", args: "tid?, granularity?", summary: "step one line, over calls", awaits: "stopped", dap: "next", verb: "stepOver" })
+    v.push(CmdSpec { name: "stepIn", args: "tid?, granularity?", summary: "step into the call at the current line", awaits: "stopped", dap: "stepIn", verb: "stepIn" })
+    v.push(CmdSpec { name: "stepOut", args: "tid?, granularity?", summary: "run to the caller and stop there", awaits: "stopped", dap: "stepOut", verb: "stepOut" })
+    v.push(CmdSpec { name: "restart", args: "", summary: "restart the debuggee, keeping breakpoints", awaits: "stopped", dap: "restart", verb: "restart the program" })
+    v.push(CmdSpec { name: "kill", args: "", summary: "terminate the debuggee", awaits: "terminated", dap: "disconnect", verb: "terminate the program" })
+    v.push(CmdSpec { name: "setBreakpoint", args: "line, path?, condition?, hitCondition?, logMessage?, enabled?", summary: "set or update a breakpoint", awaits: "breakpoint", dap: "setBreakpoints", verb: "set a breakpoint" })
+    v.push(CmdSpec { name: "clearBreakpoint", args: "line, path?", summary: "remove a breakpoint", awaits: "breakpoint", dap: "setBreakpoints", verb: "clear a breakpoint" })
+    v.push(CmdSpec { name: "setExceptions", args: "filters", summary: "choose which exception filters break", awaits: "", dap: "setExceptionBreakpoints", verb: "change exception breakpoints" })
+    v.push(CmdSpec { name: "evaluate", args: "expr, id?, frameId?, context?", summary: "evaluate an expression in a stopped frame", awaits: "evaluated", dap: "evaluate", verb: "evaluate an expression" })
+    v.push(CmdSpec { name: "complete", args: "text, column?, id?, frameId?", summary: "completions for a partial expression", awaits: "completions", dap: "completions", verb: "complete an expression" })
+    v.push(CmdSpec { name: "expand", args: "ref, id?", summary: "children of a structured value", awaits: "expanded", dap: "variables", verb: "expand a value" })
+    v.push(CmdSpec { name: "setVar", args: "ref, name, value, id?", summary: "assign a new value to a variable", awaits: "varSet", dap: "setVariable", verb: "set a variable" })
+    v.push(CmdSpec { name: "frameScopes", args: "frameId, id?", summary: "locals and scopes for one stack frame", awaits: "frameLocals", dap: "scopes", verb: "read a frame's locals" })
+    v.push(CmdSpec { name: "threadStack", args: "tid, id?", summary: "the call stack of one thread", awaits: "threadStack", dap: "stackTrace", verb: "read a thread's stack" })
+    v.push(CmdSpec { name: "readMem", args: "memoryReference, offset?, count?, id?", summary: "read raw memory", awaits: "mem", dap: "readMemory", verb: "read memory" })
+    v.push(CmdSpec { name: "disassemble", args: "memoryReference, id?", summary: "disassemble around an address", awaits: "disasm", dap: "disassemble", verb: "disassemble" })
+    v.push(CmdSpec { name: "stdin", args: "data", summary: "write to the debuggee's terminal", awaits: "", dap: "", verb: "type into the program" })
+    v.push(CmdSpec { name: "openSource", args: "path", summary: "load a source file into the editor", awaits: "source", dap: "", verb: "open a source file" })
+    v.push(CmdSpec { name: "setConfig", args: "type, program|pid, ...", summary: "change the debug target (idle sessions only)", awaits: "hello", dap: "", verb: "change the debug target" })
+    v.push(CmdSpec { name: "importHistory", args: "entries", summary: "merge config history entries (one-shot migration)", awaits: "historyChanged", dap: "", verb: "import config history" })
+    v.push(CmdSpec { name: "newSession", args: "", summary: "reset the session, keeping the target", awaits: "hello", dap: "", verb: "reset the session" })
+    return v
+}
+
+// Whether `c` is a command at all. The gate that turns a typo into an error
+// instead of a cheerful {"ok":true} answered to nobody.
+pub fn isKnownCmd(c: &string): bool {
+    for s in commandSpecs() {
+        if s.name == c {
+            return true
+        }
+    }
+    return false
+}
+
+// How to announce an agent's use of this command. Callers that can say
+// something more specific (which line, which expression) override it.
+pub fn cmdVerb(c: &string): string {
+    for s in commandSpecs() {
+        if s.name == c {
+            return s.verb.clone()
+        }
+    }
+    return c.clone()
+}
+
+// Comma-separated names, for an error that tells the caller what it may say.
+pub fn cmdNames(): string {
+    var out: string = ""
+    for s in commandSpecs() {
+        if out.len > 0 {
+            out = out + ", "
+        }
+        out = out + s.name
+    }
+    return out
+}
+
+pub fn commandsJson(): string {
+    var arr = Json.arr()
+    for s in commandSpecs() {
+        arr = arr.obj(Json.obj()
+            .str("cmd", s.name.clone())
+            .str("args", s.args.clone())
+            .str("summary", s.summary.clone())
+            .str("awaits", s.awaits.clone())
+            .str("dap", s.dap.clone()))
+    }
+    return Json.obj().raw("commands", arr.build()).str("dapSpec", DAP_SPEC_URL.clone()).build()
+}
+
+// The same table as something to read in a terminal.
+pub fn commandsText(): string {
+    var out: string = "dapweb command vocabulary — the {\"cmd\":...} JSON every peer sends.\n"
+        + "Send one with:  dapweb api request --await <type> '{\"cmd\":\"...\"}'\n\n"
+    for s in commandSpecs() {
+        var line = "  " + s.name.clone()
+        while line.len < 20 {
+            line = line + " "
+        }
+        line = line + s.summary.clone()
+        out = out + line + "\n"
+        var detail: string = ""
+        if s.args.len > 0 {
+            detail = "args: " + s.args.clone()
+        }
+        if s.awaits.len > 0 {
+            if detail.len > 0 {
+                detail = detail + "   "
+            }
+            detail = detail + "--await " + s.awaits.clone()
+        }
+        if s.dap.len > 0 {
+            if detail.len > 0 {
+                detail = detail + "   "
+            }
+            detail = detail + "DAP: " + s.dap.clone()
+        }
+        if detail.len > 0 {
+            out = out + "                    " + detail + "\n"
+        }
+    }
+    out = out + "\nA `DAP:` line names the Debug Adapter Protocol request the command becomes;\n"
+        + "its arguments and reply are that request's, documented at\n  " + DAP_SPEC_URL.clone() + "\n"
+        + "Anything without one is dapweb's own.\n"
+    return out
+}

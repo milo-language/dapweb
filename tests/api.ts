@@ -96,10 +96,20 @@ try {
     ok(r.json?.type === "stopped" && r.json?.line === 5, "raw continue loops back to the breakpoint", r.json);
   }
 
-  // await timeout is a distinct non-zero exit code, so scripts can branch on it
+  // await timeout is a distinct non-zero exit code, so scripts can branch on it.
+  // The command has to be a REAL one that simply never produces the awaited
+  // reply — this used to send {"cmd":"state"}, which is not a command at all
+  // (state is a GET endpoint) and only reached the timeout because the
+  // dispatcher accepted anything. It is refused now, which is exit 3, not 2.
   {
-    const r = await api(["request", "--await", "nonexistent-type", "--timeout", "800", JSON.stringify({ cmd: "state" })]);
+    const r = await api(["request", "--await", "nonexistent-type", "--timeout", "800", JSON.stringify({ cmd: "stdin", data: "" })]);
     ok(r.code === 2 && r.json?.error === "timeout", "await timeout exits 2 with a timeout reply", { code: r.code, json: r.json });
+  }
+  // A refused command is a DIFFERENT non-zero code, so a script can tell "the
+  // session did not answer in time" from "you sent something I do not know".
+  {
+    const r = await api(["request", "--await", "stopped", "--timeout", "800", JSON.stringify({ cmd: "state" })]);
+    ok(r.code === 3 && r.json?.ok === false, "an unknown command exits 3, not the timeout code", { code: r.code, json: r.json });
   }
 
   // --pretty must be the SAME document, only reformatted: the pretty text has to

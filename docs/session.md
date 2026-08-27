@@ -179,6 +179,22 @@ go     ← types [go]                          (delve — future, same error)
 - Gated by `tests/configform.ts`, which asserts the derivation rather than listing the
   expected fields (a hand-written list would be the third thing to drift).
 
+## 4c. The command vocabulary
+
+- `src/commands.milo` is the ONE list of `{"cmd":...}` names. It replaced three that could
+  drift: the dispatcher's if-chain, `activityText`'s phrasing chain, and nothing at all
+  telling a caller what the vocabulary is.
+- A command absent from the table is REFUSED, so the table cannot silently fall behind the
+  dispatcher — adding a case without an entry stops the command working, which someone
+  notices. `tests/e2e-commands.ts` compares the two in both directions anyway.
+- Served at `/api/commands`, printed by `dapweb api spec` (compiled in, so it works with no
+  session running). Each entry carries the DAP request it becomes, so the spec is one search
+  away; commands dapweb serves itself name no DAP request.
+- `/api/cmd` answered `{"ok":true}` to ANY payload, including `{}` — an agent's typo looked
+  exactly like success, and was announced to the watching human as though it had happened.
+  Now it is `{"ok":false}` naming the vocabulary, the announcement is skipped, and
+  `dapweb api request` exits 3.
+
 ## 5. CLI parity
 
 - `dapweb <program> [args...]` works: top-level positional = implicit

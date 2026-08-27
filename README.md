@@ -175,6 +175,14 @@ browser sends, so an agent or a shell script needs no separate protocol:
 With one live session `api` finds it; otherwise pass `--session <id>` or
 `--port <n>`. `dapweb <command> --help` lists the rest.
 
+`dapweb api spec` prints the whole `{"cmd":...}` vocabulary — what each command
+takes, which reply `--await` should block for, and which DAP request it becomes.
+The same table is served at `/api/commands`. Where a command forwards to the
+adapter, its arguments and reply are that DAP request's, specified at
+<https://microsoft.github.io/debug-adapter-protocol/specification>; the rest are
+dapweb's own. An unrecognised command is refused and names the vocabulary back
+at you, and `api request` exits non-zero so a script can branch on it.
+
 > Unauthenticated, and `eval` reaches the debugger — an exposed port is remote
 > code execution. Keep it on localhost.
 
