@@ -6,6 +6,7 @@
 // which port a session is on, so the screen you need is the one you can reach
 // without already being in a session.
 import React, { useCallback, useEffect, useState } from "react";
+import { Mark } from "./App";
 
 type Row = {
   id: string; pid: number; port: number;
@@ -62,7 +63,7 @@ export default function Sessions() {
     <div className="sessions-page">
       <header>
         <div className="sessions-head">
-          <a className="logo" href="/" title="Back to this session">DAPWEB</a>
+          <a className="logo" href="/" title="Back to this session"><Mark /><span>dapweb</span></a>
           <span className="sessions-title">sessions</span>
           <button className="ghost-btn" onClick={load}>refresh</button>
         </div>

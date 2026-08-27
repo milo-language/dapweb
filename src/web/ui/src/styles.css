@@ -68,10 +68,15 @@ header {
   display: inline-flex; align-items: center; justify-content: center;
   padding: 3px 6px; min-width: 28px; height: 24px;
 }
-header .logo { font-weight: 700; letter-spacing: 1px; color: var(--accent);
-               text-decoration: none; flex: none; }
-header .logo:hover { color: var(--fg); }
-header .logo::before { content: "⚡ "; }
+/* Wordmark: the letters stay neutral and the mark carries the colour. Setting
+   the name in the accent would have it claim "this toggle is on", which is what
+   that blue means eight inches to the right of it. */
+.logo { display: inline-flex; align-items: center; gap: 7px; text-decoration: none;
+        flex: none; color: var(--fg); font-weight: 600; letter-spacing: 0.5px;
+        font-family: var(--mono); }
+.logo .mark { flex: none; opacity: 0.92; }
+.logo:hover { color: var(--fg); }
+.logo:hover .mark { opacity: 1; }
 header .prog { color: var(--muted); font-size: 11px; margin-left: 8px; }
 /* A short pill with the full sentence on hover. The prose it used to hold ("no
    source configured — Run stops at main and loads it") is guidance, and guidance

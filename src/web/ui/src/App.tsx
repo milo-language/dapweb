@@ -205,6 +205,23 @@ function buildAsm(d: { lines: Insn[]; pc: string }): { text: string; pcLine: num
   return { text, pcLine };
 }
 
+// The wordmark. A bolt said "fast", which every tool claims and this one does
+// not particularly promise. The five bars are the region colours from the memory
+// view (stack, heap, code, const, data), which is a picture no other debugger
+// front end has. Colour lives in the mark and never in the letters, so the
+// wordmark cannot be read as one of the states those same hues mean elsewhere.
+export function Mark({ size = 15 }: { size?: number }) {
+  const hues = ["--r-stack", "--r-heap", "--r-code", "--r-const", "--r-data"];
+  return (
+    <svg className="mark" width={size * 23 / 15} height={size} viewBox="0 0 23 15" aria-hidden="true">
+      {hues.map((h, i) => (
+        <rect key={h} x={i * 5} y={i === 2 ? 0 : 2} width="3" height={i === 2 ? 15 : 11}
+              rx="1.5" fill={`var(${h})`} />
+      ))}
+    </svg>
+  );
+}
+
 export default function App() {
   // The header is one row and the target bar has first claim on it, so the state
   // readout is a short pill (`short`) with the full sentence on hover (`text`).
@@ -1001,7 +1018,9 @@ export default function App() {
         {/* The wordmark goes to the other screen. Sending it off to GitHub would
             make the one always-present, always-clickable thing in the app a way
             to leave the app. */}
-        <a className="logo" href="/sessions" data-tip="All live dapweb sessions">DAPWEB</a>
+        <a className="logo" href="/sessions" data-tip="All live dapweb sessions">
+          <Mark /><span>dapweb</span>
+        </a>
         <span className="targetbar">
           <select className={"mode-select" + (attachMode ? " attach" : "")} value={cfg.request || "launch"}
                   data-tip={attachMode ? "Attaching to a process that is already running"
