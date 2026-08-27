@@ -36,20 +36,21 @@ jobs:
       # and 22.04 ships 15. lldb-dap is the DAP adapter every e2e suite drives;
       # apt names it lldb-dap-N, dapweb probes bare `lldb-dap` on PATH.
       #
-      # 21, not 18: lldb-dap 18 answers setVariable on a scope container with an
-      # error and never answers readMemory at all, so two suites failed here for
-      # reasons no dapweb change could fix. The macOS toolchain everyone develops
-      # against is 21, and pinning the gate to the version we actually support
-      # keeps it able to fail for real reasons.
-      - name: install clang + lldb 21
+      # 22, not 18: lldb-dap 18 never answers readMemory, and 21 refuses
+      # setVariable on a scope container it just enumerated ("could not find
+      # variable in scope"). Both are adapter-side and no dapweb change fixes
+      # them, so the gate could not pass for reasons that had nothing to do with
+      # this repo. 22 is what the developers here run, so the gate now fails only
+      # for real reasons.
+      - name: install clang + lldb 22
         run: |
           wget -qO llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 21
-          sudo apt-get install -y lldb-21
-          sudo ln -sf /usr/bin/clang-21 /usr/bin/clang
-          sudo ln -sf /usr/bin/clang++-21 /usr/bin/clang++
-          sudo ln -sf /usr/bin/lldb-dap-21 /usr/bin/lldb-dap
+          sudo ./llvm.sh 22
+          sudo apt-get install -y lldb-22
+          sudo ln -sf /usr/bin/clang-22 /usr/bin/clang
+          sudo ln -sf /usr/bin/clang++-22 /usr/bin/clang++
+          sudo ln -sf /usr/bin/lldb-dap-22 /usr/bin/lldb-dap
           clang --version | head -1
           lldb-dap --help > /dev/null && echo "lldb-dap runs"
 
