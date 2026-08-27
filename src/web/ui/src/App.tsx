@@ -298,6 +298,7 @@ export default function App() {
   watchesRef.current = watches;
   const viewPathRef = useRef("");
   viewPathRef.current = viewPath;
+  const bpsRef = useRef<Map<string, BpMeta>>(new Map());
   const srcPathRef = useRef("");   // ws handler ([] deps) needs the live source path on terminate
   srcPathRef.current = srcPath;
   const filesRef = useRef(files);
@@ -701,42 +702,38 @@ export default function App() {
     }
   }, [caps, excInit]);
 
+  // None of these touch `bps` — the server's echo is the only writer. It
+  // canonicalises the path (cwd-relative → absolute, "." / ".." collapsed) and
+  // every peer keys on that spelling, so an optimistic insert under the path we
+  // happened to be viewing made one gutter click two identical rows in the
+  // panel, and no ack could ever remove the stray one. The echo is one local
+  // websocket hop away.
   const toggleBp = (ln: number) => {
     const path = viewPathRef.current;
-    setBps((prev) => {
-      const next = new Map(prev);
-      const k = bpKey(path, ln);
-      if (next.has(k)) { next.delete(k); send({ cmd: "clearBreakpoint", path, line: ln }); }
-      else { next.set(k, {}); send({ cmd: "setBreakpoint", path, line: ln }); }
-      return next;
-    });
+    if (bpsRef.current.has(bpKey(path, ln))) send({ cmd: "clearBreakpoint", path, line: ln });
+    else send({ cmd: "setBreakpoint", path, line: ln });
   };
 
   // upsert a breakpoint with condition/hitCondition/logMessage (server
   // treats setBreakpoint on an existing line as a replace).
-  const setBpMetaAt = (path: string, ln: number, meta: BpMeta) => {
-    setBps((prev) => new Map(prev).set(bpKey(path, ln), meta));
+  const setBpMetaAt = (path: string, ln: number, meta: BpMeta) =>
     send({ cmd: "setBreakpoint", path, line: ln, ...meta });
-  };
   const setBpMeta = (ln: number, meta: BpMeta) => setBpMetaAt(viewPathRef.current, ln, meta);
 
-  const removeBp = (path: string, ln: number) => {
-    setBps((prev) => { const next = new Map(prev); next.delete(bpKey(path, ln)); return next; });
-    send({ cmd: "clearBreakpoint", path, line: ln });
-  };
+  const removeBp = (path: string, ln: number) => send({ cmd: "clearBreakpoint", path, line: ln });
 
   // Enable/disable keeps the bp in the list; the server omits disabled ones
   // from the DAP request (absent = enabled, DAP has no per-bp enable).
   const setBpEnabled = (path: string, ln: number, meta: BpMeta) => {
     const nm: BpMeta = { ...meta };
     if (nm.enabled === false) delete nm.enabled; else nm.enabled = false;
-    setBps((prev) => new Map(prev).set(bpKey(path, ln), nm));
     send({ cmd: "setBreakpoint", path, line: ln, ...nm });
   };
   const bpEntries = () => [...bps.entries()].map(([k, m]) => {
     const i = k.indexOf("\n");
     return { path: k.slice(0, i), line: Number(k.slice(i + 1)), meta: m };
   });
+  bpsRef.current = bps;
   const anyBpEnabled = [...bps.values()].some((m) => m.enabled !== false);
   const toggleAllBps = () => {
     for (const { path, line, meta } of bpEntries()) {
@@ -1042,7 +1039,8 @@ export default function App() {
           )}
         </span>
         <span className="toolbar">
-          <button className="run" data-tip={phase === "idle" ? "Run — start the program"
+          <button className={phase === "idle" ? "run" : "run live"}
+                  data-tip={phase === "idle" ? "Run — start the program"
                                             : "Run — relaunch with whatever the target bar says now"} onClick={run}><Ico g={CI.run} /></button>
           <button disabled={!stopped} data-tip={stopped ? "Continue" : "Continue (needs a stopped program)"}
                   onClick={() => resume("continue")}><Ico g={CI.cont} /></button>

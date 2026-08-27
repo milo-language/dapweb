@@ -9,7 +9,7 @@ from "std/json" import {
     Json
 }
 from "std/fs" import {
-    pathExists
+    pathExists, isDir
 }
 from "std/env" import {
     Env
@@ -100,14 +100,40 @@ fn dialects(): Vec<Dialect> {
     var out: Vec<Dialect> = []
     out.push(mkDialect("lldb", "lldb|cppdbg|lldb-dap", "lldb-dap|xcrun -f lldb-dap", "lldb", true))
     out.push(mkDialect("python", "python|debugpy", "python3 -m debugpy.adapter", "debugpy", true))
-    out.push(mkDialect("node", "node|pwa-node", "", "node", false))
-    // delve's DAP mode is a subcommand: `dlv dap` (stdio, Content-Length framed —
-    // same transport as lldb-dap). adapterId "dlv" so an explicit adapter cmd
-    // reverse-maps to go via kindForAdapterCmd.
+    // vscode-js-debug's DAP server. It only listens on TCP (no stdio mode), so
+    // the probe result is spawned with a port argument and connected to — see
+    // startRun's node path. `js-debug-adapter` is the name mason and npm wrappers
+    // install under; the ~/.local/share/dapweb copy is what probeErr tells the
+    // user to download. adapterId "js-debug" so an explicit dapPath containing
+    // "js-debug" reverse-maps here.
+    let jsDebug = Env.getOr("HOME", "") + "/.local/share/dapweb/js-debug/src/dapDebugServer.js"
+    out.push(mkDialect("node", "node|pwa-node|js|javascript|typescript", "js-debug-adapter|node " + jsDebug, "js-debug", true))
+    // delve's DAP mode reads like a stdio subcommand and is not one: `dlv dap`
+    // always starts a TCP server (see tcpListenArgs), so it is spawned with a
+    // listen address and connected to. adapterId "dlv" so an explicit adapter
+    // cmd reverse-maps to go via kindForAdapterCmd.
     out.push(mkDialect("go", "go", "dlv dap", "dlv", true))
-    // java-dap is this repo's own adapter (examples/tools/java-dap) — a DAP↔JDWP
-    // translator. Probe finds it on PATH; otherwise set "dapPath" to the binary.
+    // java-dap ships with the milo compiler (milo's examples/tools/java-dap, not
+    // this repo) — a DAP↔JDWP translator. Probe finds it on PATH; otherwise set
+    // "dapPath" to the binary.
     out.push(mkDialect("java", "java|java-dap", "java-dap", "java-dap", true))
+    return out
+}
+
+// Adapters that speak DAP over a socket only. dapweb spawns them with these
+// extra args (bind a port the OS picks, print it), reads the port off stdout and
+// connects; an empty result means the dialect talks over the pipes we hand it.
+// Both of these look like stdio commands and are not: `dlv dap` with no --listen
+// binds 127.0.0.1:0 and waits for a client, so piping its stdin hangs forever.
+pub fn tcpListenArgs(kind: &string): Vec<string> {
+    var out: Vec<string> = []
+    if kind == "node" {
+        // js-debug's dapDebugServer.js takes <port> <host> positionally
+        out.push("0")
+        out.push("127.0.0.1")
+    } else if kind == "go" {
+        out.push("--listen=127.0.0.1:0")
+    }
     return out
 }
 
@@ -272,6 +298,12 @@ fn probeAdapterCmd(probe: &string): Option<string> {
         return Option.None
     }
     let head = cmdHead(probe)
+    // an interpreter probe (`node /path/to/server.js`) resolves on the head
+    // alone, so a script argument must itself exist or the probe is a false hit.
+    let tail = cmdTail(probe)
+    if tail.endsWith(".js") && !pathExists(tail.substr(1, tail.len)) {
+        return Option.None
+    }
     match findInPath(head) {
         Option.Some(abs) => {
             return Option.Some(abs + cmdTail(probe))
@@ -303,11 +335,14 @@ fn probeErr(d: &Dialect): string {
     if d.kind == "python" {
         return "debugpy not found — pip install debugpy, or set \"dapPath\" to its command"
     }
+    if d.kind == "node" {
+        return "js-debug not found — download vscode-js-debug's DAP server:\n  mkdir -p ~/.local/share/dapweb && curl -sL https://github.com/microsoft/vscode-js-debug/releases/download/v1.117.0/js-debug-dap-v1.117.0.tar.gz | tar xz -C ~/.local/share/dapweb\nor install `js-debug-adapter` on PATH, or set \"dapPath\" to its command"
+    }
     if d.kind == "go" {
         return "dlv (delve) not found — go install github.com/go-delve/delve/cmd/dlv@latest, or set \"dapPath\" to its command"
     }
     if d.kind == "java" {
-        return "java-dap not found — build it (milo build examples/tools/java-dap/src/main.milo -o ~/bin/java-dap), or set \"dapPath\" to the binary"
+        return "java-dap not found — build it from the milo repo (milo build examples/tools/java-dap/src/main.milo -o ~/bin/java-dap), or set \"dapPath\" to the binary"
     }
     return d.kind + " adapter not found — install it or set \"dapPath\" to its command"
 }
@@ -632,10 +667,30 @@ pub fn initArgsFor(kind: &string): string {
         .bool("linesStartAt1", true)
         .bool("columnsStartAt1", true)
         .bool("supportsRunInTerminalRequest", true)
+    // js-debug hands the debuggee to a child session via the startDebugging
+    // reverse request and gates that on this flag; other adapters ignore it.
+        .bool("supportsStartDebuggingRequest", true)
     // Without this, adapters omit memoryReference on variables/evaluate
     // and the memory viewer has almost no entry points.
         .bool("supportsMemoryReferences", true)
         .build()
+}
+
+// dirname without a std/path dependency: everything before the last '/',
+// or "." for a bare filename.
+fn dirnameOf(p: &string): string {
+    var last: i64 = -1 as i64
+    var i: i64 = 0
+    while i < p.len {
+        if p[i] == '/' {
+            last = i
+        }
+        i = i + 1
+    }
+    if last <= 0 {
+        return "."
+    }
+    return p.substr(0, last)
 }
 
 fn launchExtraDoc(raw: &string): Option<Json> {
@@ -693,6 +748,63 @@ pub fn launchArgsFor(spec: &LaunchSpec, stopMain: bool): string {
         }
         if !extraHas(extra, "justMyCode") {
             b = b.bool("justMyCode", true)
+        }
+    } else if spec.adapterKind == "node" {
+        // js-debug resolves the debugger flavor from `type` INSIDE the launch
+        // body (it errors without one), unlike every other adapter, which keys
+        // off the initialize adapterID. type/request are meta keys stripped
+        // from launchExtra, so inject them unconditionally.
+        b = b.str("type", "pwa-node")
+        b = b.str("request", launchRequestOf(spec))
+        if spec.request != "attach" {
+            if !extraHas(extra, "cwd") {
+                b = b.str("cwd", dirnameOf(spec.binPath))
+            }
+            // internalConsole: program output arrives as DAP output events (the
+            // go/dlv display path). integratedTerminal (our pty, via
+            // runInTerminal) is what every other dialect uses, but js-debug ends
+            // the parent session the moment it hands the program to a terminal
+            // it does not own, and the run is over before it starts.
+            if !extraHas(extra, "console") {
+                b = b.str("console", "internalConsole")
+            }
+        }
+        // no "main" symbol to function-breakpoint on (and js-debug doesn't
+        // support function breakpoints) — stop-at-main is launch stopOnEntry.
+        if stopMain && !extraHas(extra, "stopOnEntry") {
+            b = b.bool("stopOnEntry", true)
+        }
+    } else if spec.adapterKind == "go" {
+        // delve builds the target itself unless told otherwise: "debug" compiles
+        // a package or .go file, "exec" runs an already-built binary. Neither is
+        // a safe default for the other (delve rejects a binary in debug mode),
+        // so pick from what `program` actually points at.
+        if !extraHas(extra, "mode") {
+            if spec.binPath.endsWith(".go") || isDir(spec.binPath) {
+                b = b.str("mode", "debug")
+            } else {
+                b = b.str("mode", "exec")
+            }
+        }
+        // Two different working directories, and the build cares about the one
+        // that is easy to miss: "cwd" is the debuggee's, "dlvCwd" is delve's own
+        // and is where `go build` runs. Left unset, delve builds from OUR cwd
+        // (wherever dapweb was started), so a package path resolves outside its
+        // module and the launch fails with a bare "Build error".
+        if spec.request != "attach" {
+            var wd = dirnameOf(spec.binPath)
+            if isDir(spec.binPath) {
+                wd = spec.binPath.clone() // a package path IS its own directory
+            }
+            if !extraHas(extra, "cwd") {
+                b = b.str("cwd", wd.clone())
+            }
+            if !extraHas(extra, "dlvCwd") {
+                b = b.str("dlvCwd", wd.clone())
+            }
+        }
+        if stopMain && !extraHas(extra, "stopOnEntry") {
+            b = b.bool("stopOnEntry", true)
         }
     } else if spec.adapterKind == "java" {
         // java-dap derives mainClass/classPaths from `program` when unset and

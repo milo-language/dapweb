@@ -1,7 +1,7 @@
 # dapweb
 
 <p align="center">
-  <img src="docs/images/debugging.png" alt="dapweb stopped at a breakpoint: source view, call stack, locals, and an lldb terminal" width="900">
+  <img src="docs/images/debugging.png" alt="dapweb stopped at a breakpoint: source view, call stack, nested locals, and a terminal showing both the program's output and the agent's last command" width="900">
 </p>
 
 A browser front end for any DAP debugger, built so that you and an AI agent can
@@ -13,31 +13,27 @@ built in [Milo](https://github.com/milo-language/milo)
 
 ## The debuggers
 
-Every debugger worth using now ships a Debug Adapter Protocol front end, so
-dapweb talks to that instead of to any one debugger's own API. Four of them it
-finds by itself:
+dapweb drives a debugger through its Debug Adapter Protocol front end, which by
+now is nearly all of them. Five it finds by itself; the last column is what has
+actually been driven through dapweb:
 
-| adapter | languages | how dapweb finds it |
-| --- | --- | --- |
-| **lldb-dap** | C, C++, Objective-C, Rust, Swift, Zig | `lldb-dap` on `PATH`, else `xcrun -f lldb-dap` |
-| **debugpy** | Python | `python3 -m debugpy.adapter` |
-| **Delve** | Go | `dlv dap` |
-| **java-dap** | Java, and anything else on JDWP | `java-dap` on `PATH` |
+| adapter | languages | how dapweb finds it | exercised |
+| --- | --- | --- | --- |
+| **lldb-dap** | C, C++, Objective-C, Rust, Swift, Zig | `lldb-dap` on `PATH`, else `xcrun -f lldb-dap` | the whole test suite |
+| **debugpy** | Python | `python3 -m debugpy.adapter` | break, run, step, eval, continue, kill |
+| **Delve** | Go | `dlv dap` | same, for a `.go` file, a package directory and a prebuilt binary |
+| **js-debug** | JavaScript, TypeScript | `js-debug-adapter` on `PATH`, else `~/.local/share/dapweb/js-debug` | same |
+| **java-dap** | Java, and anything else on JDWP | `java-dap` on `PATH` | probe only |
 
-Those four it probes for by name; the test suite itself runs on lldb-dap. Every
-other DAP adapter speaks the same protocol over the same stdio transport, so it
-is one flag away: CodeLLDB, `gdb --interpreter=dap` (gdb 14+), netcoredbg for
-C#/.NET, rdbg for Ruby, Xdebug for PHP, earlybird for OCaml, probe-rs and
-cortex-debug for embedded targets.
+Every other DAP adapter is one flag away: CodeLLDB, `gdb -i dap` (gdb 14+),
+netcoredbg for C#/.NET, rdbg for Ruby, Xdebug for PHP, earlybird for OCaml,
+probe-rs and cortex-debug for embedded targets.
 
 ```sh
 ./dapweb web --dapPath /path/to/some-dap-adapter --program ./a.out
 ```
 
-(`js-debug` for Node/TypeScript is recognised as a launch `type` but refuses to
-start: that slot is still empty.)
-
-## AI-first
+## An agent is a first-class user
 
 The browser tab is a client of the session, not the session. Every action in the
 UI is a `{"cmd": ...}` message, and `dapweb api` sends those same messages from a
@@ -52,6 +48,65 @@ too: the agent announces each command before it runs and its breakpoints appear
 in your gutter, so a program that moves on its own is never unexplained.
 
 ![an agent driving the session](docs/images/agent-activity.gif)
+
+```console
+$ dapweb api step --pretty
+{
+  "type": "stopped",
+  "line": 24,
+  "path": "/src/examples/nested/main.c",
+  "tid": 11751168,
+  "frames": [
+    { "id": 1572864, "name": "main", "line": 24, "path": "/src/examples/nested/main.c", "ipRef": "0x1026285AC" },
+    { "id": 1572865, "name": "start", "line": 1797, "path": "/usr/lib/dyld`start", "ipRef": "0x189981D54" }
+  ],
+  "locals": [
+    { "name": "shapes", "value": "Shape[2]", "type": "Shape[2]", "ref": 4, "mref": "0x16D7D6918" },
+    { "name": "list", "value": "0x0000000102c0dcb0", "type": "Node *", "ref": 5, "mref": "0x16D7D6858" },
+    { "name": "p", "value": "5.196152422706632", "type": "double", "ref": 0, "mref": "0x16D7D6838" }
+  ]
+}
+```
+
+Without `--pretty` it is one line per reply, which is what a pipe wants. A `ref`
+is expandable (`dapweb api request '{"cmd":"expand","ref":4}'`), an `mref` is a
+memory address the same session can read.
+
+## What it does
+
+Debugging:
+
+- Every source file the stop walks through, in tabs, with syntax highlighting
+  (including `.milo`).
+- Click the gutter to set a breakpoint; conditions, hit counts and log points on
+  any of them, enable/disable without deleting, and they persist per program
+  between runs.
+- Run, continue, pause, step over/in/out, restart, stop, stop-at-main, and
+  single instruction stepping.
+- Call stack with frame selection, thread list, locals as a tree that expands
+  through nested structs and pointers, editable values, watch expressions, and
+  exception filters.
+- Evaluate anything in the frame you are stopped in, from the console or the
+  watch panel, with tab completion.
+
+Down at the machine:
+
+- Disassembly, inline under each source line or in its own pane beside it.
+- Registers, grouped and editable.
+- A memory viewer with typed annotations on the bytes, pointer following, and a
+  radix toggle; a stack pane that shows the current frame's slots.
+
+Targets and sessions:
+
+- Launch a program, or attach to a running one picked by name instead of pid.
+- VS Code launch configurations, verbatim: `--launch launch.json --config name`,
+  an editor for the config in the UI, and a history of the targets you have run.
+- **info** reads the binary's headers and says whether it carries debug info at
+  all, which is the usual reason a session runs but shows no source.
+- Program output and adapter output in a real terminal, in one pane, tagged so
+  the two streams never blur.
+- Every live dapweb on the machine is listed at `/sessions`, each under a
+  three-word name you can say out loud.
 
 ## Install
 
@@ -75,12 +130,6 @@ Click **LAUNCH** to flip the bar to **ATTACH** and pick a running process by nam
 instead of hunting for its pid:
 
 ![the target bar in attach mode](docs/images/attach.gif)
-
-Also there: **info** on the target bar reads the binary's headers and tells you
-whether it carries debug info at all (the usual reason a session runs but shows
-no source); disassembly inline under each source line or in a pane beside it;
-syntax highlighting for `.milo` sources; and ⚙ for the launch configuration
-itself, a verbatim VS Code launch config.
 
 ## CLI
 

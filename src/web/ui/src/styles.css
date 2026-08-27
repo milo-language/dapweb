@@ -89,9 +89,17 @@ button {
   background: #21262d; color: var(--fg); border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 11px; cursor: pointer; font: inherit;
 }
-button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+/* Hover is not a state, so it does not get a colour: it lifts the surface and
+   nothing else. Colour on these buttons means one thing only — green: this
+   starts the program; amber: a program is live under it; blue: this toggle is
+   on — and a blue-on-hover rule made every button in the bar say all three. */
+button:hover:not(:disabled) { background: #2d333b; border-color: var(--muted); }
 button:disabled { opacity: 0.4; cursor: default; }
 button.run { border-color: var(--ok); color: var(--ok); }
+button.run:hover:not(:disabled) { border-color: var(--ok); background: rgba(63,185,80,0.16); }
+/* Same button, live program under it: pressing it now kills and relaunches. */
+button.run.live { border-color: var(--stop); color: var(--stop); }
+button.run.live:hover:not(:disabled) { border-color: var(--stop); background: var(--stop-bg); }
 main { flex: 1; display: flex; min-height: 0; position: relative; }
 .editor-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .filetabs { display: flex; gap: 2px; background: var(--panel); flex: none;
@@ -589,9 +597,11 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
 .sessions-hint { margin-top: 8px; font-size: 11px; }
 /* Directly under the last row. Pinned to the window bottom it sat a screen away
    from the thing it explains and read as a status bar nobody looks at. */
-.sessions-foot { margin-top: 14px; color: var(--muted); font-size: 11px; }
-.sessions-foot a { color: var(--muted); }
-.sessions-foot a:hover { color: var(--accent); }
+.sessions-foot { margin-top: 14px; color: var(--muted); font-size: 12.5px; line-height: 1.6; }
+/* The repo link is the one thing in the footer anyone clicks, so it is not
+   footnote-sized: same weight as the prose, but at full foreground contrast. */
+.sessions-foot a { color: var(--fg); text-decoration: none; }
+.sessions-foot a:hover { color: var(--accent); text-decoration: underline; }
 /* The only control on this page that starts a process, so it is filled rather
    than outlined: an outline reads as secondary sitting above a list of rows
    that are themselves outlined boxes. Hairline border and the 1px shadow are

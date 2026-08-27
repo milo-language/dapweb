@@ -129,6 +129,53 @@ try {
     ws.close();
   }
 
+  // ── a re-hello carries the breakpoint set it invalidates ──
+  {
+    const { port: p } = await serve();
+    const ws = new WebSocket(`ws://localhost:${p}/ws`);
+    const seen: any[] = [];
+    ws.onmessage = (e) => seen.push(JSON.parse(String(e.data)));
+    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+    await sleep(300);
+    ws.send(JSON.stringify({ cmd: "setBreakpoint", path: SRC, line: 23 }));
+    await sleep(400);
+    seen.length = 0;
+
+    // Run carries its config inline, so it re-applies the target and re-hellos.
+    // A hello is a full resync — the browser empties its breakpoint map on one —
+    // so the set has to arrive behind it, or the panel reads "none" and the
+    // gutter dot vanishes while the server still holds the breakpoint.
+    ws.send(JSON.stringify({ cmd: "run", stopAtMain: true,
+                             config: { type: "lldb", program: prog, source: SRC } }));
+    for (let i = 0; i < 60 && !seen.some((m) => m.type === "hello"); i++) await sleep(100);
+    await sleep(500);
+    const hi = seen.findIndex((m) => m.type === "hello");
+    ok(hi >= 0, "run with an inline config re-hellos", seen.map((m) => m.type));
+    // The store is keyed by program and the earlier blocks used this one, so the
+    // replay is the whole persisted set, not just the line set above.
+    const syncs = seen.slice(hi).filter((m) => m.type === "bpSync");
+    ok(syncs.some((m) => m.line === 23 && m.path === SRC),
+       "the breakpoint set is replayed behind the hello that invalidates it", syncs);
+
+    // Same again through the force path: a live session is killed and relaunched
+    // from D's teardown, which applies the config there. applyConfig empties the
+    // set, so that path needs its own reload — otherwise a second Run drops the
+    // breakpoints server-side, not just in the browser.
+    seen.length = 0;
+    ws.send(JSON.stringify({ cmd: "run", stopAtMain: true, force: true,
+                             config: { type: "lldb", program: prog, source: SRC } }));
+    for (let i = 0; i < 80 && !seen.some((m) => m.type === "hello"); i++) await sleep(100);
+    await sleep(500);
+    const fi = seen.findIndex((m) => m.type === "hello");
+    const fsyncs = seen.slice(fi).filter((m) => m.type === "bpSync");
+    ok(fi >= 0 && fsyncs.some((m) => m.line === 23), "a forced relaunch replays them too", fsyncs);
+    ok((await state(p)).breakpoints.some((b: any) => b.line === 23),
+       "and the server still holds them after the relaunch", (await state(p)).breakpoints);
+    ws.send(JSON.stringify({ cmd: "kill" }));
+    await sleep(400);
+    ws.close();
+  }
+
   // ── an await returns the refusal instead of sitting out its timeout ──
   {
     const { port: p } = await serve();

@@ -200,6 +200,11 @@ impl DapClient {
         let disc: string = "{}"
         let _d = self.send("disconnect", disc)
         self.child.close()
-        let _s = self.child.wait()
+        // synthetic TCP child (pid -1): nothing to reap — and waitpid(-1) is
+        // "wait for ANY child", which blocks the whole scheduler thread when
+        // some other child (a spawned js-debug server) is still alive.
+        if self.child.pid > 0 {
+            let _s = self.child.wait()
+        }
     }
 }

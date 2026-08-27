@@ -103,6 +103,7 @@ from "../dap/framing" import {
 from "../dap/session" import {
     LaunchSpec, AdapterSel, resolveConfig, resolveAdapterCmd,
     adapterIdForKind, initArgsFor, launchRequestOf, adapterArgvOf, launchArgsFor,
+    tcpListenArgs,
     mainSymbolFor, histEntryFor, histInsert, histMergeMany, specConfigJson,
 }
 
@@ -127,6 +128,25 @@ var gConfigName: string = "" // optional launch-config "name" label — shown in
 var gDapPathRaw: string = "" // user's explicit "dapPath" verbatim ("" = probed) — config echo only
 var gDapHost: string = "" // TCP transport host (gDapPort>0); "" = stdio spawn
 var gDapPort: i64 = 0 // TCP transport port; 0 = spawn adapterCmd over stdio
+// js-debug support: its DAP server only listens on TCP, so the node dialect
+// spawns it (`node dapDebugServer.js 0`), parses the printed port, and connects.
+// gSrvPid/gSrvPort are that spawned server (0 = none this run) — the pid is
+// SIGTERMed at session teardown, since closing the sockets leaves it listening.
+var gSrvPid: i64 = 0
+var gSrvPort: i64 = 0
+// pid of a LAUNCHED debuggee, from the adapter's `process` event (0 = none/attach).
+// Behind a spawned TCP adapter the debuggee is our grandchild: killing the
+// adapter server orphans it instead of ending it, so teardown checks this pid.
+var gDebuggeePid: i64 = 0
+// Write fd of the PARENT session after a js-debug child handoff (-1 = none).
+// The parent is the session that owns the launched process: a disconnect sent
+// only to the child ends the debug connection and leaves the program running.
+var gParentIn: i32 = -1
+// js-debug runs the debuggee under a CHILD session it asks us to start (the
+// startDebugging reverse request). The child's launch body arrives in that
+// request and replaces our built launch args — set at handoff, "" otherwise.
+var gChildLaunch: string = ""
+var gChildReq: string = "" // "launch" | "attach" — the child's DAP command
 // A force-run's config, applied after the old session's teardown completes
 // (D's terminated cleanup consumes it; "" = rerun the current config).
 var gPendingConfig: string = ""
@@ -717,6 +737,21 @@ fn bpSyncMsg(b: &Bp): string {
         .build()
 }
 
+// A hello is a full resync — the browser drops its whole breakpoint map on
+// receipt — so every hello has to be followed by the set it replaced. Only the
+// connect path did that, which is why changing the target (Run with a config,
+// setConfig, newSession) emptied the BREAKPOINTS panel and the gutter until a
+// reload, while the server still held the bps.
+fn pushHelloState(bus: &Channel<string>, wakeWr: i32): void {
+    wsPush(bus, wakeWr, helloMsg())
+    if srcPath.len > 0 {
+        wsPush(bus, wakeWr, sourceMsg(srcPath))
+    }
+    for bp in gBps {
+        wsPush(bus, wakeWr, bpSyncMsg(bp))
+    }
+}
+
 fn configErrMsg(err: &string): string {
     return Json.obj().str("type", "configError").str("error", err.clone()).build()
 }
@@ -856,7 +891,7 @@ fn applyConfig(raw: string, selectName: string): string {
     match resolveConfig(raw, selectName) {
         Result.Ok(spec) => {
             binPath = spec.binPath.clone()
-            srcPath = spec.srcPath.clone()
+            srcPath = absSourcePath(spec.srcPath)
             adapterCmd = spec.adapterCmd.clone()
             adapterKind = spec.adapterKind.clone()
             launchExtra = spec.launchExtra.clone()
@@ -1191,6 +1226,10 @@ fn handleRunInTerminal(cl: &mut DapClient, raw: &string, reqSeq: i64, ch: &Chann
             match pty.spawn(program, args) {
                 Result.Ok(pid) => {
                     logEvent("debuggee spawned", $"pid {pid}")
+                    // Ours to reap: an adapter that routes the debuggee through
+                    // our pty is not the process's parent and cannot be relied on
+                    // to end it (js-debug's server does not).
+                    gDebuggeePid = pid as i64
                     cl.respond(reqSeq, "runInTerminal", Json.obj().int("processId", pid as i64).build())
                     let master = pty.masterFd
                     // direct global set (same scheduler thread) — and flush
@@ -1222,6 +1261,46 @@ fn handleRunInTerminal(cl: &mut DapClient, raw: &string, reqSeq: i64, ch: &Chann
             return -1
         }
     }
+}
+
+// After the js-debug child handoff, the parent session matters only as an event
+// source (the debuggee's stdio arrives there as output events) and as a peer
+// that must not stall (reverse requests get a success reply). Session end is
+// the CHILD's story — parent EOF just ends the drain, pushing nothing.
+fn parentDrainLoop(client: DapClient, ch: Channel<string>, wakeWr: i32): void {
+    var cl = client
+    while true {
+        match cl.recv() {
+            Result.Ok(m) => {
+                if m.kind == "event" && m.event == "output" {
+                    let ocat = bodyStr(m.raw, "category")
+                    if ocat != "telemetry" {
+                        gOutputLog.push(OutLine {
+                            text: bodyStr(m.raw, "output"), category: ocat.clone()
+                        }
+                        )
+                        if gOutputLog.len > OUTLOG_MAX {
+                            let _d = gOutputLog.remove(0)
+                        }
+                        wsPush(ch, wakeWr, outputMsg(m.raw))
+                    }
+                } else if m.kind == "request" {
+                    let rc = m.command.clone()
+                    if rc == "runInTerminal" {
+                        // js-debug asks whichever session it launches from; an
+                        // empty ack here would leave the program never started.
+                        let _m = handleRunInTerminal(cl, m.raw, m.seq, ch, wakeWr)
+                    } else {
+                        cl.respond(m.seq, rc, "{}")
+                    }
+                }
+            }
+            Result.Err(_e) => {
+                break
+            }
+        }
+    }
+    cl.child.close()
 }
 
 fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Channel<Pending>): void {
@@ -1334,7 +1413,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                     // restart but never advertises supportsRestartRequest, so
                     // try-then-fallback beats capability gating here.
                     wsPush(ch, wakeWr, Json.obj().str("type", "restartFailed").build())
-                } else if kind == "initialize" || kind == "launch" || kind == "sbInit" {
+                } else if kind == "initialize" || kind == "launch" || kind == "childLaunch" || kind == "sbInit" {
                     eprint($"[srv] {msg.command} failed: {msg.raw}\n")
                     wsPush(ch, wakeWr, terminatedMsg())
                     break
@@ -1345,9 +1424,20 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 // .body and gates features on it.
                 gCapsMsg = Json.obj().str("type", "capabilities").str("raw", msg.raw.clone()).build()
                 wsPush(ch, wakeWr, gCapsMsg.clone())
-                let s = cl.send(launchRequest(), launchArgs())
+                // a js-debug child session launches with the configuration the
+                // startDebugging request handed us, not our built launch args;
+                // "childLaunch" so its ack doesn't re-append history.
+                var lreq = launchRequest()
+                var largs = launchArgs()
+                var lkind: string = "launch"
+                if gChildLaunch.len > 0 {
+                    lreq = gChildReq.clone()
+                    largs = gChildLaunch.clone()
+                    lkind = "childLaunch"
+                }
+                let s = cl.send(lreq, largs)
                 pend.push(Pending {
-                    seq: s, kind: "launch", id: 0, extra: ""
+                    seq: s, kind: lkind, id: 0, extra: ""
                 }
                 )
             } else if kind == "launch" {
@@ -1506,7 +1596,9 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 // (plain stopOnEntry would strand the user at dyld's entry with
                 // no source). Python uses launch stopOnEntry instead — see
                 // launchArgs(). Failure is tolerated: fbInit response is a no-op.
-                if stopAtMain && adapterKind != "python" {
+                // python and node stop at entry via launch stopOnEntry instead
+                // (no "main" symbol; js-debug has no function breakpoints).
+                if stopAtMain && adapterKind != "python" && adapterKind != "node" {
                     let fb = Json.obj().arr("breakpoints", Json.arr().obj(Json.obj().str("name", mainSymbolFor(adapterKind)))).build()
                     let fs = cl.send("setFunctionBreakpoints", fb)
                     pend.push(Pending {
@@ -1562,6 +1654,13 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                     }
                 }
                 wsPush(ch, wakeWr, outputMsg(msg.raw))
+            } else if msg.event == "process" {
+                // "launch" only: an ATTACHED process was running before this
+                // session and has to outlive it: reaping it would turn a
+                // detach into a kill.
+                if bodyStr(msg.raw, "startMethod") == "launch" {
+                    gDebuggeePid = bodyI64(msg.raw, "systemProcessId", 0 as i64)
+                }
             } else if msg.event == "exited" {
                 // Not session end (restart emits it for the old process) —
                 // just remember the code for the run-exited log line.
@@ -1597,6 +1696,68 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 // here — its own pump owns it and closes it when the dead child
                 // EOFs the master.
                 let _m = handleRunInTerminal(cl, msg.raw, msg.seq, ch, wakeWr)
+            } else if msg.command == "startDebugging" {
+                // js-debug: the debuggee lives in a CHILD session the adapter
+                // asks us to open — a second connection to the same server,
+                // launched with the configuration riding in this request. The
+                // child is where stops/threads/frames happen, so the loop swaps
+                // onto it; the parent is left to a drain task (its output
+                // events still carry the program's stdio).
+                cl.respond(msg.seq, "startDebugging", "{}")
+                var childCfg: string = ""
+                var childReq: string = "launch"
+                if let Result.Ok(doc) = Json.parse(msg.raw.clone()) {
+                    match doc.get("arguments") {
+                        Option.Some(args) => {
+                            childReq = args.str("request") ?? "launch"
+                            match args.get("configuration") {
+                                Option.Some(c) => {
+                                    childCfg = c.rawStr()
+                                }
+                                Option.None => {
+                                }
+                            }
+                        }
+                        Option.None => {
+                        }
+                    }
+                }
+                var host: string = "127.0.0.1"
+                if gDapPort > 0 && gDapHost.len > 0 {
+                    host = gDapHost.clone()
+                }
+                if childCfg.len == 0 || gSrvPort <= 0 {
+                    eprint("[srv] startDebugging without a child config/port — ignored\n")
+                } else {
+                    match DapClient.startTcp(host, gSrvPort) {
+                        Result.Ok(childCl) => {
+                            gChildLaunch = childCfg
+                            gChildReq = childReq
+                            var parentCl = cl
+                            gParentIn = parentCl.child.stdinFd
+                            cl = childCl
+                            // parent pendings can never match child seqs — drop
+                            // them (the drain task ignores stray responses).
+                            pend = []
+                            gDapIn = cl.child.stdinFd
+                            let dch = ch.clone()
+                            Task.spawn(move(): void => {
+                                parentDrainLoop(parentCl, dch, wakeWr)
+                            }
+                            )
+                            let s = cl.send("initialize", initArgs())
+                            pend.push(Pending {
+                                seq: s, kind: "initialize", id: 0, extra: ""
+                            }
+                            )
+                        }
+                        Result.Err(e) => {
+                            eprint($"[srv] child session connect failed: {e}\n")
+                            wsPush(ch, wakeWr, terminatedMsg())
+                            break
+                        }
+                    }
+                }
             }
         }
     }
@@ -1612,6 +1773,16 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
     // Session over: re-arm `run` directly (globals, same scheduler
     // thread). Stale pendings must not collide with the next adapter's seq
     // numbers, which restart at 1.
+    if gParentIn >= 0 {
+        // adapter EOF / a `terminated` we did not ask for: same reasoning as the
+        // kill path, and it costs one write to a fd that is about to close.
+        sendReqFd(gParentIn, 999999 as i64, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
+        gParentIn = -1
+    }
+    killAdapterSrv()
+    reapDebuggee()
+    gChildLaunch = ""
+    gChildReq = ""
     gStarted = false
     gDapIn = -1
     gPtyFd = -1
@@ -1642,10 +1813,12 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
             err = applyConfig(gPendingConfig.clone(), "")
             gPendingConfig = ""
             if err.len == 0 {
-                wsPush(ch, wakeWr, helloMsg())
-                if srcPath.len > 0 {
-                    wsPush(ch, wakeWr, sourceMsg(srcPath))
-                }
+                // applyConfig empties gBps (the new config may be a different
+                // program); reload the program-keyed store before the hello, or
+                // a forced relaunch of the same target silently throws away the
+                // breakpoints the user set for it.
+                loadBps()
+                pushHelloState(ch, wakeWr)
             }
         }
         if err.len > 0 {
@@ -1657,12 +1830,135 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
     }
 }
 
+// "Debug server listening at 127.0.0.1:61234" → 61234, or 0 while incomplete.
+// No trailing space in the needle: delve punctuates it "listening at: host:port".
+fn parseListenPort(s: &string): i64 {
+    let Option.Some(at) = s.indexOf("listening at") else {
+        return 0
+    }
+    let rest = s.substr(at, s.len)
+    let Option.Some(nl) = rest.indexOf("\n") else {
+        return 0 // line still arriving — wait for more stdout
+    }
+    let line = rest.substr(0, nl)
+    let Option.Some(colon) = line.lastIndexOf(":") else {
+        return 0
+    }
+    return line.substr(colon + 1, line.len).trim().parseInt() ?? (0 as i64)
+}
+
+// Spawn a TCP-only adapter (js-debug's dapDebugServer) with a port argument of
+// 0, read the port the OS picked off its stdout, and leave both output streams
+// pumped. Returns the port to connect to; the server pid lands in gSrvPid for
+// teardown (closing our sockets leaves it listening forever).
+fn spawnTcpAdapter(prog: &string, args: &Vec<string>): Result<i64> {
+    let child = Child.spawn(prog, args, false)?
+    gSrvPid = child.pid as i64
+    let errFd = child.stderrFd
+    if errFd >= 0 {
+        // same pre-handshake crash capture as stdio adapters
+        Task.spawn(move(): void => {
+            adapterStderrPump(errFd)
+        }
+        )
+    }
+    let outFd = child.stdoutFd
+    var chOut = fdChannel(outFd)
+    var acc: string = ""
+    var port: i64 = 0
+    for chunk in chOut {
+        acc = acc + chunk
+        port = parseListenPort(acc)
+        // 4KB with no listen line = it's printing something else (a crash, a
+        // usage error) — stop accumulating and fail with what it said.
+        if port > 0 || acc.len > 4096 {
+            break
+        }
+    }
+    if port <= 0 {
+        return Result.Err("adapter never printed its listen port" + (if acc.len > 0 { ":\n" + acc } else { "" }))
+    }
+    // keep draining stdout or a chatty server fills the pipe and stalls
+    Task.spawn(move(): void => {
+        var rest = chOut
+        for c in rest {
+            eprint("[adapter] " + c)
+        }
+        unsafe {
+            close(outFd)
+        }
+    }
+    )
+    return Result.Ok(port)
+}
+
+// SIGTERM + reap the spawned TCP adapter server, if any. Synthetic Child: only
+// the pid matters; the stdio fds are owned (and closed) by their pump tasks.
+// signal 0 delivers nothing and only asks "could I signal this pid?", the
+// portable liveness check for a process that is not our child (so not waitable).
+fn pidAlive(c: &mut Child): bool {
+    if let Result.Ok(_) = c.signal(0) {
+        return true
+    }
+    return false
+}
+
+fn killAdapterSrv(): void {
+    if gSrvPid > 0 {
+        var c = Child {
+            pid: gSrvPid as i32, stdinFd: -1 as i32, stdoutFd: -1 as i32, stderrFd: -1 as i32
+        }
+        // Let it exit on its own first: the disconnect we just sent is what makes
+        // it kill the debuggee, and SIGTERMing it mid-teardown skips that.
+        var waited: i64 = 0
+        while waited < 1000 && pidAlive(c) {
+            unsafe {
+                let _u = usleep(50000 as u32)
+            }
+            waited = waited + 50
+        }
+        let _k = c.signal(15)
+        let _w = c.wait()
+    }
+    gSrvPid = 0
+    gSrvPort = 0
+}
+
+// Make sure a launched debuggee is actually dead at session end. lldb-dap and
+// debugpy kill their child themselves, but js-debug and dlv run the program
+// under a SERVER we spawned: SIGTERMing that server reparents the program to
+// init and dapweb reports "idle" while it is still running (and still holding
+// the port/file the next run wants). Give it a moment to go on its own, then
+// SIGTERM it. Not a child of ours, so signal, never wait.
+fn reapDebuggee(): void {
+    if gDebuggeePid > 0 {
+        var c = Child {
+            pid: gDebuggeePid as i32, stdinFd: -1 as i32, stdoutFd: -1 as i32, stderrFd: -1 as i32
+        }
+        var waited: i64 = 0
+        while waited < 500 && pidAlive(c) {
+            unsafe {
+                let _u = usleep(50000 as u32)
+            }
+            waited = waited + 50
+        }
+        if pidAlive(c) {
+            let _k = c.signal(15)
+            logEvent("debuggee reaped", $"pid {gDebuggeePid} outlived the adapter (SIGTERM)")
+        }
+    }
+    gDebuggeePid = 0
+}
+
 // spawn the DAP adapter for the current config and drive the handshake.
 // Shared by the run command (R) and restart-with-staged auto-rerun (D). Assumes
 // binPath set and !gStarted. Broadcasts terminated and returns false if the
 // adapter fails to spawn. bus/busWakeWr are the broadcast channel + wake fd.
 fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): bool {
     gStarted = true
+    // reset BEFORE any spawn: the node path starts its stderr pump inside
+    // spawnTcpAdapter, and a reset after it would wipe an early crash capture.
+    gAdapterStderr = ""
     // Transport: TCP connects to a running adapter (gDapPort>0); stdio spawns
     // the resolved adapter command. Both yield a DapClient whose child.stdinFd
     // is the DAP write fd — the rest of the handshake is identical.
@@ -1671,6 +1967,42 @@ fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): b
     if gDapPort > 0 {
         label = $"tcp {gDapHost}:{gDapPort}"
         startRes = DapClient.startTcp(gDapHost, gDapPort)
+        // a user-run js-debug server also hands the debuggee to a child session;
+        // remember where to open that second connection (see startDebugging).
+        if adapterKind == "node" {
+            gSrvPort = gDapPort
+        }
+    } else if tcpListenArgs(adapterKind).len > 0 {
+        // A socket-only adapter (js-debug, dlv): spawn it asking for port 0,
+        // read the port it bound off stdout, connect. From here the handshake is
+        // the same as any TCP adapter.
+        var argv = adapterArgvOf(adapterCmd)
+        if argv.len == 0 {
+            eprint("[srv] no adapter configured\n")
+            gStarted = false
+            wsPush(bus, busWakeWr, terminatedMsg())
+            return false
+        }
+        var prog: string = argv[0].clone()
+        var rest: Vec<string> = []
+        var ai: i64 = 1
+        while ai < argv.len {
+            rest.push(argv[ai].clone())
+            ai = ai + 1
+        }
+        for la in tcpListenArgs(adapterKind) {
+            rest.push(la.clone())
+        }
+        label = $"adapter {Path.basename(prog)}"
+        match spawnTcpAdapter(prog, rest) {
+            Result.Ok(port) => {
+                gSrvPort = port
+                startRes = DapClient.startTcp("127.0.0.1", port)
+            }
+            Result.Err(e) => {
+                startRes = Result.Err(e)
+            }
+        }
     } else {
         var argv = adapterArgvOf(adapterCmd)
         // adapterCmd is always set by config-apply before a stdio run reaches here.
@@ -1699,7 +2031,6 @@ fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): b
             gDapIn = cl.child.stdinFd
             // Drain + capture adapter stderr (stdio spawns only; TCP has no child
             // stderr, errFd -1). Must start before cl moves into the reader task.
-            gAdapterStderr = ""
             let errFd = cl.child.stderrFd
             if errFd >= 0 {
                 // Hand the descriptor to the pump: -1 here makes Child.close()
@@ -1726,7 +2057,9 @@ fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): b
         }
         Result.Err(e) => {
             eprint($"[srv] adapter spawn failed: {e}\n")
+            killAdapterSrv()
             gStarted = false
+            wsPush(bus, busWakeWr, configErrMsg($"adapter failed to start: {e}"))
             wsPush(bus, busWakeWr, terminatedMsg())
             return false
         }
@@ -1867,10 +2200,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
                 if cfgErr.len == 0 {
                     logEvent("target changed", $"{binPath}  (by {peerKind} peer)")
                     loadBps()
-                    wsPush(bus, busWakeWr, helloMsg())
-                    if srcPath.len > 0 {
-                        wsPush(bus, busWakeWr, sourceMsg(srcPath))
-                    }
+                    pushHelloState(bus, busWakeWr)
                 }
             }
             if cfgErr.len > 0 {
@@ -1947,11 +2277,19 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         logEvent("kill requested", $"(by {peerKind} peer)")
         if gDapIn >= 0 {
             gOddSeq = gOddSeq + 2
+            sendReqFd(gDapIn, gOddSeq, "terminate", "{}")
+            gOddSeq = gOddSeq + 2
             let _p = pendCh.trySend(Pending {
                 seq: gOddSeq, kind: "disc", id: 0, extra: ""
             }
             )
             sendReqFd(gDapIn, gOddSeq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
+        }
+        // The child session debugs the process; the PARENT is what spawned it.
+        // Disconnecting only the child leaves the program running with nobody
+        // attached, which reads in the UI as "killed" and is not.
+        if gParentIn >= 0 {
+            sendReqFd(gParentIn, gOddSeq + 1, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
         }
     } else if c == "evaluate" {
         if gDapIn >= 0 {
@@ -2123,10 +2461,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             } else {
                 logEvent("target changed", $"{binPath}  (by {peerKind} peer)")
                     loadBps()
-                wsPush(bus, busWakeWr, helloMsg())
-                if srcPath.len > 0 {
-                    wsPush(bus, busWakeWr, sourceMsg(srcPath))
-                }
+                pushHelloState(bus, busWakeWr)
             }
         }
     } else if c == "importHistory" {
@@ -2172,10 +2507,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         gOutputLog = []
         gSessionId = newSessionName(sessionNameSeeds())
         logEvent("session reset", $"new session {gSessionId}")
-        wsPush(bus, busWakeWr, helloMsg())
-        if srcPath.len > 0 {
-            wsPush(bus, busWakeWr, sourceMsg(srcPath))
-        }
+        pushHelloState(bus, busWakeWr)
     }
 }
 
@@ -3080,7 +3412,10 @@ pub fn webMain(argv: Vec<string>): i32 {
     // getString is None only when the flag is absent AND its registered default
     // is empty, so `?? ""` is exactly the value the old string-returning API gave.
     binPath = args.getString("program") ?? ""
-    srcPath = args.getString("source") ?? ""
+    // Canonical from the start: bp paths go through absSourcePath, so a relative
+    // --source would have the browser keying its gutter on a spelling the
+    // breakpoint acks never use.
+    srcPath = absSourcePath(args.getString("source") ?? "")
     webroot = args.getString("webroot") ?? ""
     gNoBrowser = args.getBool("no-browser")
     gLogLevel = 1
@@ -3166,6 +3501,19 @@ pub fn webMain(argv: Vec<string>): i32 {
         if err.len > 0 {
             eprint($"error: --launch: {err}\n")
             return 1
+        }
+    } else if binPath.len > 0 && adapterArg == "lldb-dap" {
+        // --program alone: the dapPath default hardwires lldb, but a .js/.py/.go
+        // program names its own dialect — route through the config path so the
+        // right adapter is probed. Best-effort like the history restore: a probe
+        // miss leaves the session idle and the run command reports it.
+        var b = Json.obj().str("program", binPath.clone())
+        if srcPath.len > 0 {
+            b = b.str("source", srcPath.clone())
+        }
+        let err = applyConfig(b.build(), "")
+        if err.len > 0 {
+            eprint($"warning: {err}\n")
         }
     }
 
