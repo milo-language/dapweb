@@ -19,6 +19,7 @@
     --bg: #0d1117; --panel: #161b22; --border: #30363d; --fg: #c9d1d9;
     --muted: #8b949e; --accent: #58a6ff; --bp: #f85149; --stop: #d29922;
     --ok: #3fb950; --agent: #ff7bd5;
+    --r-code: #79c0ff; --r-heap: #f778ba; --r-stack: #3fb950;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     --ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
   }
@@ -36,9 +37,11 @@
 
   /* ── left: what it is ─────────────────────────────────────────────────── */
   .left { width: 452px; flex: none; }
-  .logo { font-size: 76px; font-weight: 800; letter-spacing: 1px; color: var(--accent);
-          line-height: 1; display: flex; align-items: center; gap: 18px; }
-  .bolt { color: var(--stop); font-size: 60px; }
+  /* Letters neutral, colour in the mark: the accent means "on" everywhere else. */
+  .logo { font-size: 76px; font-weight: 700; letter-spacing: 1px; color: var(--fg);
+          font-family: var(--mono); line-height: 1; display: flex; align-items: center; gap: 20px; }
+  .moth { width: 78px; height: 78px; flex: none; }
+  .moth-sm { width: 15px; height: 15px; flex: none; }
   .tag { font-size: 27px; line-height: 1.42; margin-top: 30px; color: var(--fg); }
   .tag b { color: var(--accent); font-weight: 600; }
   .tag .m { color: var(--agent); font-weight: 600; }
@@ -54,8 +57,9 @@
          box-shadow: 0 30px 70px rgba(0,0,0,0.62); }
   .bar { display: flex; align-items: center; gap: 9px; padding: 10px 12px;
          background: var(--panel); border-bottom: 1px solid var(--border); }
-  .bar .mark { font-weight: 800; font-size: 13px; letter-spacing: 0.6px;
-               color: var(--accent); flex: none; }
+  .bar .mark { font-weight: 600; font-size: 13px; letter-spacing: 0.4px;
+               color: var(--fg); font-family: var(--mono); flex: none;
+               display: inline-flex; align-items: center; gap: 5px; }
   .sel { font-size: 12px; padding: 4px 18px 4px 8px; color: var(--fg);
          background: #21262d; border: 1px solid var(--border);
          border-radius: 4px 0 0 4px; position: relative; flex: none; }
@@ -99,7 +103,11 @@
 </head>
 <body>
   <div class="left">
-    <div class="logo"><span class="bolt">⚡</span>dapweb</div>
+    <div class="logo"><svg class="moth" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="3" y="6" width="26" height="5.5" rx="2" fill="var(--r-code)"/>
+        <rect x="6" y="13.5" width="23" height="5.5" rx="2" fill="var(--r-heap)"/>
+        <rect x="9" y="21" width="20" height="5.5" rx="2" fill="var(--r-stack)"/>
+      </svg>dapweb</div>
     <div class="tag">
       Any <b>DAP</b> debugger, in a browser tab. Share the URL and you are both
       driving the same session. So can an <span class="m">agent</span>.
@@ -107,6 +115,9 @@
     <div class="chips">
       <div class="chip">lldb-dap</div>
       <div class="chip">debugpy</div>
+      <div class="chip">delve</div>
+      <div class="chip">js-debug</div>
+      <div class="chip">java-dap</div>
       <div class="chip">any DAP adapter</div>
       <div class="chip on">agent-driven</div>
     </div>
@@ -114,7 +125,11 @@
 
   <div class="win">
     <div class="bar">
-      <span class="mark">⚡DAPWEB</span>
+      <span class="mark"><svg class="moth-sm" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="3" y="6" width="26" height="5.5" rx="2" fill="var(--r-code)"/>
+        <rect x="6" y="13.5" width="23" height="5.5" rx="2" fill="var(--r-heap)"/>
+        <rect x="9" y="21" width="20" height="5.5" rx="2" fill="var(--r-stack)"/>
+      </svg>dapweb</span>
       <span class="sel">launch</span>
       <span class="inp">/tmp/demo --verbose</span>
       <span class="btn go">▶</span>

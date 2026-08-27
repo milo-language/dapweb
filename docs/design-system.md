@@ -46,6 +46,16 @@ identifiers, addresses, registers, program output. Everything else is `--ui`.
 
 Radii are `4` (chip), `6` (control), `8` (panel). The 7px region swatch is `2`.
 
+## The mark
+
+Three stacked bars: a call stack, indented the way frames are, in the region
+colours the memory view uses (code blue, heap pink, stack green). It is three
+rounded rectangles, so the mark is an SVG in the source rather than an asset,
+and it still reads at 16px.
+
+The letters stay `--fg`. Colour belongs to the mark, because every hue in this
+app already means something and a name is not a state.
+
 ## Screenshots
 
 Every image in `docs/images/` is generated from a raw shot in `docs/shots/` and
