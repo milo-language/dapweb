@@ -54,6 +54,9 @@ from "std/json" import {
 from "./jsonaccess" import {
     bodyI64, bodyStr, frame0Field, frame0Path, scopes0Ref
 }
+from "../sessions" import {
+    stateDir, writeSession, removeSession, sessionsJson
+}
 from "./binfo" import {
     binInfoJson
 }
@@ -70,7 +73,7 @@ from "std/env" import {
     Env
 }
 from "std/process" import {
-    Child, Command, Stdio
+    Child, Command, Stdio, exePath
 }
 from "std/fs" import {
     pathExists, makeDir, writeFile, removeFile, currentDir, splitLines
@@ -108,6 +111,7 @@ extern fn usleep(usec: u32): i32
 // NOTE: module-scope string initializers are NYI in Milo and silently produce
 // "" — every one of these is assigned in main() before any request is served.
 var binPath: string = ""
+var gStartedAt: i64 = 0     // when this server bound its port, for the dashboard
 var srcPath: string = ""
 var adapterCmd: string = "" // full command line, first token resolved via PATH
 var adapterKind: string = "" // dialect kind (lldb|python|node|go) — selects launch/init dialect, see Dialect registry
@@ -160,6 +164,8 @@ let OUTLOG_MAX: i64 = 400
 var gNextClient: i64 = 1
 var gBps: Vec<Bp> = [] // shared breakpoint set (was per-connection before the shared session)
 var gSessionId: string = "" // uuid in hello — a reloaded tab detects same-vs-new session
+var gListenPort: i64 = 0    // the port we bound; the registry descriptor carries it
+var gNoBrowser: bool = false
 var gPeers: i64 = 0 // attached WS peers (browser tabs; `api` callers are one-shot HTTP)
 var gLastActivityMs: i64 = 0 // epochMillis of the last peer event OR api call — idle-ttl clock
 var gIdleTtlSecs: i64 = 0 // --idle-ttl; 0 = never reap
@@ -860,6 +866,7 @@ fn applyConfig(raw: string, selectName: string): string {
             gDapPort = spec.port
             gBps = []
             gOutputLog = []
+            refreshSession()
             return ""
         }
         Result.Err(e) => {
@@ -922,12 +929,7 @@ fn mergeCliDefaults(text: string, prog: &string, src: &string): string {
 // saved). $XDG_STATE_HOME/dapweb/history.json, default ~/.local/state/dapweb.
 
 fn histDir(): string {
-    if let Option.Some(x) = Env.get("XDG_STATE_HOME") {
-        if x.len > 0 {
-            return x + "/dapweb"
-        }
-    }
-    return Env.getOr("HOME", "") + "/.local/state/dapweb"
+    return stateDir()
 }
 
 fn histFilePath(): string {
@@ -2177,41 +2179,88 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
 
 // ── session registry ──
 //
-// One `dapweb web` process hosts one session, so a session is identified by the
-// server that owns it. Each server drops a descriptor here at startup and removes
-// it at exit; `dapweb api list` reads the directory and prunes descriptors whose
-// pid is gone (a killed server never gets to clean up after itself).
-fn sessionsDir(): string {
-    return histDir() + "/sessions"
-}
-
-fn sessionFilePath(id: &string): string {
-    return sessionsDir() + "/" + id + ".json"
-}
-
+// This server IS its session's identity (one process, one session), so the
+// descriptor it drops in the registry is what `dapweb api list` and the
+// /sessions dashboard read. Directory layout and pruning live in ../sessions.
 fn registerSession(port: i64): void {
-    ensureDir(sessionsDir())
-    let doc = Json.obj()
-        .str("id", gSessionId.clone())
-        .int("pid", getpid() as i64)
-        .int("port", port)
-        .str("program", binPath.clone())
-        .str("adapter", adapterId())
-        .int("startedAt", epochMillis())
-        .build()
-    match writeFile(sessionFilePath(gSessionId), doc) {
-        Result.Ok(_n) => {
-        }
-        Result.Err(_e) => {
-        }
+    gListenPort = port
+    gStartedAt = epochMillis()
+    writeSession(gSessionId, getpid() as i64, port, binPath, adapterId(), gStartedAt)
+}
+
+// The descriptor names the program this server is debugging, and that changes
+// whenever someone retargets from the browser. Written once at startup it would
+// go stale on the first retarget, and the dashboard's whole job is to say what
+// each session is on — so rewrite it, keeping the original start time.
+fn refreshSession(): void {
+    if gListenPort > 0 {
+        writeSession(gSessionId, getpid() as i64, gListenPort, binPath, adapterId(), gStartedAt)
     }
 }
 
 fn unregisterSession(): void {
-    match removeFile(sessionFilePath(gSessionId)) {
-        Result.Ok(_x) => {
+    removeSession(gSessionId)
+}
+
+// First port above ours that nothing is listening on. Deliberately sequential
+// rather than an ephemeral port: 8080 → 8081 → 8082 is a number a human can
+// remember and type, which is the whole reason the dashboard exists.
+//
+// The listener is dropped on the way out, so the port is free by the time the
+// child binds it. That is a race, and losing it costs the child its bind with a
+// clear error rather than anything silent.
+fn freePortFrom(base: i64): i64 {
+    var p = base + 1
+    while p < base + 200 {
+        match TcpListener.bind(p as u16) {
+            Result.Ok(_l) => {
+                return p
+            }
+            Result.Err(_e) => {
+            }
+        }
+        p = p + 1
+    }
+    return 0
+}
+
+// The dashboard's "new session" button. A session IS a server process, so making
+// one means spawning one — this server cannot host a second.
+//
+// It spawns OUR OWN executable and nothing else: the path comes from exePath(),
+// never from the caller. That matters less than it looks like it should, since
+// /api/cmd already forwards `evaluate` to the debugger and can therefore run
+// arbitrary code in the debuggee — which is why the README says keep this port
+// on loopback.
+fn spawnSessionJson(): string {
+    let port = freePortFrom(gListenPort)
+    if port == 0 {
+        return Json.obj().bool("ok", false).str("error", "no free port near this one").build()
+    }
+    let exe = match exePath() {
+        Result.Ok(x) => {
+            x
         }
         Result.Err(_e) => {
+            return Json.obj().bool("ok", false).str("error", "could not resolve the dapweb executable").build()
+        }
+    }
+    // --no-browser: the tab is opened by whoever clicked, on their machine. This
+    // server's host may not even have a browser.
+    var cmd = Command.new(exe).arg("web").arg("--port").arg($"{port}").arg("--no-browser")
+    // Inherit --webroot: without it a child serves the bundle embedded at compile
+    // time, so during UI work every spawned session silently shows yesterday's UI.
+    if webroot.len > 0 {
+        cmd = cmd.arg("--webroot").arg(webroot.clone())
+    }
+    match cmd.spawn() {
+        Result.Ok(child) => {
+            // Deliberately not waited on: it outlives this request, and us.
+            let _c = child
+            return Json.obj().bool("ok", true).int("port", port).build()
+        }
+        Result.Err(_e) => {
+            return Json.obj().bool("ok", false).str("error", "could not start a new dapweb").build()
         }
     }
 }
@@ -2722,7 +2771,10 @@ fn serveStatic(fd: i32, reqPath: &string, origin: &string): void {
         }
         qi = qi + 1
     }
-    if p == "/" {
+    // The dashboard is a route of the same single-page bundle, so it resolves to
+    // index.html and App.tsx branches on the pathname. A second HTML entry point
+    // would mean a second bundle to keep in sync for one extra screen.
+    if p == "/" || p == "/sessions" {
         p = "/index.html"
     }
     // No parent traversal out of the webroot.
@@ -2865,6 +2917,23 @@ fn handleConnection(fd: i32, bus: Channel<string>, busWakeWr: i32, pendCh: Chann
             close(fd)
             return
         }
+        // Every live dapweb on this machine, for the /sessions dashboard. Reads
+        // the same registry `dapweb api list` does, and prunes it on the way.
+        if apiPath == "/api/sessions" {
+            sendHttp(fd, 200, "application/json", sessionsJson(gSessionId))
+            close(fd)
+            return
+        }
+        if apiPath == "/api/spawn" {
+            if rl.method != "POST" {
+                sendHttp(fd, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
+                close(fd)
+                return
+            }
+            sendHttp(fd, 200, "application/json", spawnSessionJson())
+            close(fd)
+            return
+        }
         if apiPath == "/api/binfo" {
             sendHttp(fd, 200, "application/json", binInfoJson(binPath))
             close(fd)
@@ -2984,6 +3053,7 @@ pub fn webMain(argv: Vec<string>): i32 {
     parser.addI64("port", "", "listen port", 8080)
     parser.addI64("idle-ttl", "", "end the debug session after this many seconds with no ws peers attached (0 = never)", 86400)
     parser.addString("webroot", "w", "serve the UI from this dir instead of the copy embedded in the binary (UI dev: src/web/ui/build.sh)", "")
+    parser.addBool("no-browser", "", "do not open a browser tab at startup (headless hosts, and servers spawned by another dapweb)")
     parser.addBool("quiet", "q", "suppress session event log lines (banner only)")
     parser.addBool("verbose", "v", "log stops and steps too (noisy)")
     // A full VS Code launch configuration (inline JSON object or a file path —
@@ -2996,6 +3066,7 @@ pub fn webMain(argv: Vec<string>): i32 {
     binPath = args.getString("program") ?? ""
     srcPath = args.getString("source") ?? ""
     webroot = args.getString("webroot") ?? ""
+    gNoBrowser = args.getBool("no-browser")
     gLogLevel = 1
     if args.getBool("quiet") {
         gLogLevel = 0
@@ -3162,12 +3233,16 @@ pub fn webMain(argv: Vec<string>): i32 {
                 print("  target:   (none — configure in the browser via the ⚙ drawer)")
             }
             print($"  drive:    dapweb api state --port {port}   (or: dapweb api run / step / eval ...)")
+            print($"  sessions: http://localhost:{port}/sessions   (every live dapweb on this machine)")
+            print("  docs:     https://github.com/milo-language/dapweb")
             registerSession(port)
             if gLogLevel >= 1 {
                 print("")
             }
             flush()
-            openBrowser($"http://localhost:{port}")
+            if !gNoBrowser {
+                openBrowser($"http://localhost:{port}")
+            }
             let acceptBus = bus.clone()
             let acceptPend = pendCh.clone()
             Task.spawn(move(): void => {

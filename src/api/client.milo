@@ -6,20 +6,11 @@
 from "std/net" import {
     TcpStream, ip4
 }
-from "std/os" import {
-    kill
-}
-from "std/fs" import {
-    readDir, removeFile
-}
 from "std/json" import {
     Json
 }
 from "std/env" import {
     Env
-}
-from "std/io" import {
-    readFile
 }
 
 // One request/response against 127.0.0.1:port. `body` empty ⇒ GET. Returns the
@@ -72,75 +63,3 @@ pub fn httpRequest(port: i64, method: string, path: string, body: string): Resul
     return Result.Err("malformed HTTP response")
 }
 
-struct SessionRow {
-    id: string,
-    pid: i64,
-    port: i64,
-    program: string,
-    alive: bool,
-}
-
-fn sessionsDirPath(): string {
-    // Mirror the server (histDir): XDG_STATE_HOME or ~/.local/state.
-    match Env.get("XDG_STATE_HOME") {
-        Option.Some(x) => {
-            if x.len > 0 {
-                return x + "/dapweb/sessions"
-            }
-        }
-        Option.None => {
-        }
-    }
-    return Env.getOr("HOME", "") + "/.local/state/dapweb/sessions"
-}
-
-// Read the registry, probing each pid with kill(pid, 0). A server that was
-// signal-killed never removed its own descriptor, so prune the dead ones here —
-// `api list` is the lazy GC for the registry.
-pub fn loadSessions(prune: bool): Vec<SessionRow> {
-    let dir = sessionsDirPath()
-    // No registry dir yet (nothing has ever run) is not an error — it means no
-    // sessions, which is what the old Vec-returning readDir handed back.
-    let Result.Ok(entries) = readDir(dir) else {
-        return []
-    }
-    var rows: Vec<SessionRow> = []
-    for ent in entries {
-        if !ent.name.endsWith(".json") {
-            continue
-        }
-        let path = dir + "/" + ent.name
-        let text = match readFile(path) {
-            Result.Ok(t) => {
-                t
-            }
-            Result.Err(_e) => {
-                continue
-            }
-        }
-        let doc = match Json.parse(text) {
-            Result.Ok(d) => {
-                d
-            }
-            Result.Err(_e) => {
-                continue
-            }
-        }
-        let pid = doc.i64("pid") ?? (0 as i64)
-        // kill(pid, 0): 0 ⇒ alive, -1/ESRCH ⇒ gone. No signal is delivered.
-        let alive = pid > 0 && kill(pid as i32, 0) == 0
-        if !alive && prune {
-            let _r = removeFile(path)
-            continue
-        }
-        rows.push(SessionRow {
-            id: doc.str("id") ?? "",
-            pid: pid,
-            port: doc.i64("port") ?? (0 as i64),
-            program: doc.str("program") ?? "",
-            alive: alive,
-        }
-        )
-    }
-    return rows
-}

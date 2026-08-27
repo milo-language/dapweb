@@ -26,7 +26,10 @@ from "std/time" import {
     epochMillis
 }
 from "./client" import {
-    httpRequest, loadSessions, SessionRow
+    httpRequest
+}
+from "../sessions" import {
+    loadSessions, SessionRow
 }
 
 // Resolve which server to talk to. --port wins; else --session picks by id; else

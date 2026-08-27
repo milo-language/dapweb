@@ -172,12 +172,13 @@ function shellSplit(s: string): string[] {
 
 // VS Code codicon glyphs (font ships inside monaco; build.sh copies the ttf).
 // Codepoints from monaco's codiconsLibrary.js — stable public API of the font.
+// Only the transport controls are glyphs now: they are the buttons you press
+// constantly and they have universally-understood shapes. Everything else in the
+// header is a word (add/gear/info went with the three-glyph cluster they named).
 const CI = {
   run: 0xead3, cont: 0xeacf, pause: 0xead1,
   stepOver: 0xead6, stepInto: 0xead4, stepOut: 0xead5,
-  restart: 0xead2, stop: 0xead7, chip: 0xec19, add: 0xea60, gear: 0xeaf8,
-  chevRight: 0xeab6,   // 0xeab5 (chevron-left) used directly in ConfigDrawer
-  info: 0xea74,
+  restart: 0xead2, stop: 0xead7, chip: 0xec19,
 };
 const Ico = ({ g, sub }: { g: number; sub?: string }) => (
   <>
@@ -201,7 +202,11 @@ function buildAsm(d: { lines: Insn[]; pc: string }): { text: string; pcLine: num
 }
 
 export default function App() {
-  const [status, setStatus] = useState({ text: "connecting…", cls: "" });
+  // The header is one row and the target bar has first claim on it, so the state
+  // readout is a short pill (`short`) with the full sentence on hover (`text`).
+  // Anything that is guidance rather than state belongs in the console, where it
+  // scrolls with the session instead of holding a strip of chrome forever.
+  const [status, setStatus] = useState({ text: "connecting to the session…", short: "connecting", cls: "" });
   const [program, setProgram] = useState("");
   const [srcPath, setSrcPath] = useState("");   // configured main source (hello)
   const [viewPath, setViewPath] = useState(""); // file currently displayed
@@ -240,7 +245,8 @@ export default function App() {
   const [showBinInfo, setShowBinInfo] = useState(false);
   const [procs, setProcs] = useState<{ pid: number; name: string; cmd: string }[] | null>(null);
   const [procErr, setProcErr] = useState("");
-  const [showInfo, setShowInfo] = useState(false);     // ⓘ session-info popover
+  const [showInfo, setShowInfo] = useState(false);    // adapter + capabilities popover
+  const [showMenu, setShowMenu] = useState(false);     // the header's "session ▾" menu
   const [configErr, setConfigErr] = useState("");
   const [caps, setCaps] = useState<Record<string, any>>({});
   const [stopMain, setStopMain] = useState(() => localStorage.getItem("dapweb.stopAtMain") !== "0");
@@ -391,14 +397,14 @@ export default function App() {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const connect = () => {
     ws = new WebSocket(`ws://${location.host}/ws`);
-    ws.onopen = () => { retries = 0; setStatus({ text: "ready — set breakpoints, then Run", cls: "" }); };
+    ws.onopen = () => { retries = 0; setStatus({ text: "ready — set breakpoints, then Run", short: "ready", cls: "" }); };
     // The server session survives disconnects and replays full state on
     // rejoin, so a dropped socket is always worth retrying.
     ws.onclose = () => {
       if (gone) return;
       const delay = Math.min(500 * 2 ** retries, 5000);
       retries++;
-      setStatus({ text: "disconnected — reconnecting…", cls: "" });
+      setStatus({ text: "disconnected — reconnecting…", short: "offline", cls: "warn" });
       timer = setTimeout(connect, delay);
     };
     ws.onmessage = (ev) => {
@@ -437,7 +443,7 @@ export default function App() {
           history.replaceState(null, "", u);
         }
         // joining a live shared session — a stopped replay may refine this.
-        if (m.phase === "running") { setPhase("running"); setStatus({ text: "joined live session…", cls: "running" }); }
+        if (m.phase === "running") { setPhase("running"); setStatus({ text: "joined a live session already in progress", short: "running", cls: "running" }); }
         // History is server-owned: seed it from hello, then run the one-shot
         // localStorage → server migration and retire the client-local store.
         setCfgHist(m.history || []);
@@ -454,10 +460,14 @@ export default function App() {
         // restore, open the drawer.
         if (!m.program) {
           setShowConfig(true);
-          setStatus({ text: "configure a debug target (⚙) to begin", cls: "" });
+          setStatus({ text: "no debug target configured", short: "no target", cls: "warn" });
+          consoleAppend("no debug target yet — type a program in the bar at the top left, or open Session ▸ Configure target for the full launch config\n");
         }
         // no --source — the first stop's frame fills the editor.
-        else if (!m.sourcePath) setStatus({ text: "no source configured — Run stops at main and loads it", cls: "" });
+        else if (!m.sourcePath) {
+          setStatus({ text: "no source configured — Run stops at main and loads it", short: "no source", cls: "" });
+          consoleAppend("no source configured — Run stops at main and loads whatever file the first frame names\n");
+        }
       }
       // Any peer's breakpoint change, including our own echo. Applying it here
       // rather than only optimistically means a breakpoint an agent sets appears
@@ -551,7 +561,7 @@ export default function App() {
         setRegistersRef(m.registersRef || 0);
         setStopSeq((s) => s + 1);
         setPhase("stopped");
-        setStatus({ text: `stopped at line ${m.line}`, cls: "stopped" });
+        setStatus({ text: `stopped at line ${m.line}`, short: `stopped:${m.line}`, cls: "stopped" });
         // Keep the asm pane live across steps; auto-open it for no-source frames.
         if (f0 && (!hasSrc(f0.path) || disasmOpenRef.current) && f0.ipRef) requestDisasm(f0);
         else setDisasm(null);
@@ -656,7 +666,7 @@ export default function App() {
           runRef.current();
           return;
         }
-        setStatus({ text: "program exited — Run to start again", cls: "done" });
+        setStatus({ text: "the program exited — press Run to start it again", short: "exited", cls: "done" });
         termRef.current?.write("\r\n\x1b[2m[dapweb] session ended — press ▶ Run to start again\x1b[0m\r\n");
       }
     };
@@ -875,7 +885,7 @@ export default function App() {
     if (force && !confirm("This will kill the existing debug session. Start a new one?")) return;
     setConfigErr("");
     setPhase("running");
-    setStatus({ text: force ? "restarting with new target…" : "running…", cls: "running" });
+    setStatus({ text: force ? "restarting with the new target…" : "running…", short: "running", cls: "running" });
     setStopLine(0);
     send({ cmd: "run", stopAtMain: stopMain, ...(config ? { config } : {}), ...(force ? { force: true } : {}) });
     termRef.current?.focus();
@@ -887,13 +897,13 @@ export default function App() {
   const restart = () => {
     if (phase !== "running" && phase !== "stopped") return;
     setPhase("running");
-    setStatus({ text: "restarting…", cls: "running" });
+    setStatus({ text: "restarting…", short: "restarting", cls: "running" });
     setStopLine(0);
     send({ cmd: "restart" });
   };
   const resume = (cmd: string, granularity?: string) => {
     setPhase("running");
-    setStatus({ text: "running…", cls: "running" });
+    setStatus({ text: "running…", short: "running", cls: "running" });
     setStopLine(0);
     send({ cmd, tid: tidRef.current, ...(granularity ? { granularity } : {}) });
   };
@@ -950,7 +960,68 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <span className="logo">DAPWEB</span>
+        {/* The wordmark goes to the other screen. Sending it off to GitHub would
+            make the one always-present, always-clickable thing in the app a way
+            to leave the app. */}
+        <a className="logo" href="/sessions" title="All live dapweb sessions">DAPWEB</a>
+        <span className="targetbar">
+          <select className={"mode-select" + (attachMode ? " attach" : "")} value={cfg.request || "launch"}
+                  title={attachMode ? "Attaching to a process that is already running"
+                                    : "Launching a program from a path"}
+                  onChange={(e) => setMode(e.target.value === "attach")}>
+            <option value="launch">launch</option>
+            <option value="attach">attach</option>
+          </select>
+          <input className="target-input" value={targetText} spellCheck={false}
+                 placeholder={attachMode ? "pid, or a process name" : "path to a program, plus arguments"}
+                 title={cfg.port ? `tcp: ${cfg.host || "127.0.0.1"}:${cfg.port}` : (adapterCmd ? `adapter: ${adapterCmd}` : "")}
+                 onChange={(e) => setTargetText(e.target.value)}
+                 onFocus={() => { targetFocused.current = true; setTargetOpen(true); if (attachMode) loadProcs(); }}
+                 onBlur={() => { targetFocused.current = false; setTimeout(() => setTargetOpen(false), 120); }}
+                 onKeyDown={(e) => {
+                   if (e.key === "Enter") {
+                     applyTarget(targetText); setTargetOpen(false);
+                     (e.target as HTMLInputElement).blur();
+                     runRef.current?.();
+                   } else if (e.key === "Escape") {
+                     setTargetText(targetLabel); (e.target as HTMLInputElement).blur();
+                   }
+                 }} />
+          {program && (
+            <button className="bin-chip" title="Binary details — format, architecture, debug info"
+                    onMouseDown={(e) => e.preventDefault()} onClick={loadBinInfo}>info</button>
+          )}
+          {targetOpen && attachMode && (
+            <div className="target-menu">
+              {procErr && <div className="target-note">{procErr}</div>}
+              {!procs && !procErr && <div className="target-note">reading process list…</div>}
+              {(procs || [])
+                .filter((pr) => !targetText.trim() ||
+                                String(pr.pid).startsWith(targetText.trim()) ||
+                                (pr.cmd || pr.name || "").toLowerCase().includes(targetText.trim().toLowerCase()))
+                .slice(0, 200)
+                .map((pr) => (
+                  <div key={pr.pid} className="target-item"
+                       onMouseDown={(e) => { e.preventDefault(); setTargetText(String(pr.pid)); applyTarget(String(pr.pid)); setTargetOpen(false); }}>
+                    <span className="proc-pid">{pr.pid}</span>{pr.cmd || pr.name}
+                  </div>
+                ))}
+            </div>
+          )}
+          {targetOpen && !attachMode && cfgHist.length > 0 && (
+            <div className="target-menu">
+              {cfgHist.map((h, i) => {
+                const label = [h.program || "", ...((h.args as string[]) || [])].join(" ").trim();
+                return (
+                  <div key={i} className="target-item"
+                       onMouseDown={(e) => { e.preventDefault(); setTargetText(label); applyTarget(label); setTargetOpen(false); }}>
+                    {h.type && <span className={"hist-type dt-" + h.type}>{h.type}</span>}{label}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </span>
         <span className="toolbar">
           <button className="run" title={phase === "idle" ? "Run — start the program" : "Run — kill the current session and relaunch"} onClick={run}><Ico g={CI.run} /></button>
           <button disabled={!stopped} title={stopped ? "Continue" : "Continue (needs a stopped program)"}
@@ -1002,89 +1073,55 @@ export default function App() {
             localStorage.setItem("dapweb.stopAtMain", e.target.checked ? "1" : "0");
           }} /> stop at main
         </label>
-        <span className="targetbar">
-          <button className={"mode-chip" + (attachMode ? " attach" : "")}
-                  title={attachMode ? "Attaching to a running process — click to launch one instead"
-                                    : "Launching a program — click to attach to a running process instead"}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => setMode(!attachMode)}>{attachMode ? "attach" : "launch"}</button>
-          <input className="target-input" value={targetText} spellCheck={false}
-                 placeholder={attachMode ? "pid, or a process name" : "path to a program, plus arguments"}
-                 title={cfg.port ? `tcp: ${cfg.host || "127.0.0.1"}:${cfg.port}` : (adapterCmd ? `adapter: ${adapterCmd}` : "")}
-                 onChange={(e) => setTargetText(e.target.value)}
-                 onFocus={() => { targetFocused.current = true; setTargetOpen(true); if (attachMode) loadProcs(); }}
-                 onBlur={() => { targetFocused.current = false; setTimeout(() => setTargetOpen(false), 120); }}
-                 onKeyDown={(e) => {
-                   if (e.key === "Enter") {
-                     applyTarget(targetText); setTargetOpen(false);
-                     (e.target as HTMLInputElement).blur();
-                     runRef.current?.();
-                   } else if (e.key === "Escape") {
-                     setTargetText(targetLabel); (e.target as HTMLInputElement).blur();
-                   }
-                 }} />
-          {program && (
-            <button className="bin-chip" title="Binary details — format, architecture, debug info"
-                    onMouseDown={(e) => e.preventDefault()} onClick={loadBinInfo}>info</button>
-          )}
-          {targetOpen && attachMode && (
-            <div className="target-menu">
-              {procErr && <div className="target-note">{procErr}</div>}
-              {!procs && !procErr && <div className="target-note">reading process list…</div>}
-              {(procs || [])
-                .filter((pr) => !targetText.trim() ||
-                                String(pr.pid).startsWith(targetText.trim()) ||
-                                (pr.cmd || pr.name || "").toLowerCase().includes(targetText.trim().toLowerCase()))
-                .slice(0, 200)
-                .map((pr) => (
-                  <div key={pr.pid} className="target-item"
-                       onMouseDown={(e) => { e.preventDefault(); setTargetText(String(pr.pid)); applyTarget(String(pr.pid)); setTargetOpen(false); }}>
-                    <span className="proc-pid">{pr.pid}</span>{pr.cmd || pr.name}
-                  </div>
-                ))}
-            </div>
-          )}
-          {targetOpen && !attachMode && cfgHist.length > 0 && (
-            <div className="target-menu">
-              {cfgHist.map((h, i) => {
-                const label = [h.program || "", ...((h.args as string[]) || [])].join(" ").trim();
-                return (
-                  <div key={i} className="target-item"
-                       onMouseDown={(e) => { e.preventDefault(); setTargetText(label); applyTarget(label); setTargetOpen(false); }}>
-                    {h.type && <span className={"hist-type dt-" + h.type}>{h.type}</span>}{label}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </span>
         {agentNote && <span className="agent-note" title={agentNote.text}>◆ {agentNote.text}</span>}
-        <span className={"status " + status.cls}>{status.text}</span>
-        {Object.keys(caps).length > 0 && (
-          <span className="info-wrap">
-            <button className="gear info-btn" title="Session info — adapter & capabilities"
-                    onClick={() => setShowInfo((v) => !v)}><Ico g={CI.info} /></button>
-            {showInfo && (
-              <div className="info-pop" onMouseLeave={() => setShowInfo(false)}>
-                <div className="info-line"><span className="info-k">adapter</span> {dbgLabel}{adapterCmd ? ` — ${adapterCmd}` : ""}</div>
-                <div className="info-line"><span className="info-k">session</span> {sidRef.current || "—"}</div>
-                <details>
-                  <summary>capabilities</summary>
-                  <div className="caps-list">
-                    {Object.keys(caps).filter((k) => caps[k] === true).sort()
-                      .map((k) => <span key={k} className="cap">{k.replace(/^supports/, "")}</span>)}
-                  </div>
-                </details>
-              </div>
-            )}
-          </span>
-        )}
-        <button className="gear" title="New session — end this one, keep the target config"
-                onClick={() => {
+        <span className={"status " + status.cls} title={status.text}>{status.short}</span>
+        {/* Three unlabelled glyphs (ⓘ, +, ⚙) asked the reader to remember which
+            was which. One labelled menu says what it opens, and has room for the
+            things that had nowhere to live — like the list of other sessions. */}
+        <span className="menu-wrap">
+          <button className="menu-btn" onClick={() => setShowMenu((v) => !v)}>
+            session <span className="menu-caret">▾</span>
+          </button>
+          {showMenu && (
+            <>
+              <div className="menu-backdrop" onClick={() => setShowMenu(false)} />
+              <div className="menu-pop">
+                <button className="menu-item" onClick={() => { setShowMenu(false); setShowConfig(true); }}>
+                  Configure target… <span className="menu-hint">launch.json</span>
+                </button>
+                <button className="menu-item" onClick={() => { setShowMenu(false); setShowInfo(true); }}
+                        disabled={Object.keys(caps).length === 0}>
+                  Session info <span className="menu-hint">{dbgLabel || "—"}</span>
+                </button>
+                <div className="menu-sep" />
+                <button className="menu-item" onClick={() => {
+                  setShowMenu(false);
                   if (phase !== "idle" && !confirm("End the current debug session and start a new one?")) return;
                   send({ cmd: "newSession" });
-                }}><Ico g={CI.add} /></button>
-        <button className="gear" title="Debug target config" onClick={() => setShowConfig((v) => !v)}><Ico g={CI.gear} /></button>
+                }}>New session <span className="menu-hint">keeps the target</span></button>
+                <a className="menu-item" href="/sessions" onClick={() => setShowMenu(false)}>
+                  All sessions… <span className="menu-hint">every live server</span>
+                </a>
+              </div>
+            </>
+          )}
+        </span>
+        {showInfo && (
+          <>
+            <div className="menu-backdrop" onClick={() => setShowInfo(false)} />
+            <div className="info-pop">
+              <div className="info-line"><span className="info-k">adapter</span> {dbgLabel}{adapterCmd ? ` — ${adapterCmd}` : ""}</div>
+              <div className="info-line"><span className="info-k">session</span> {sidRef.current || "—"}</div>
+              <details>
+                <summary>capabilities</summary>
+                <div className="caps-list">
+                  {Object.keys(caps).filter((k) => caps[k] === true).sort()
+                    .map((k) => <span key={k} className="cap">{k.replace(/^supports/, "")}</span>)}
+                </div>
+              </details>
+            </div>
+          </>
+        )}
       </header>
       <main>
         {showConfig ? (

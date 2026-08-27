@@ -1,0 +1,167 @@
+// The live-session registry: one JSON descriptor per running `dapweb web`.
+//
+// One server process hosts exactly one debug session, so the server IS the
+// session's identity. Each drops a descriptor here at startup and removes it at
+// exit; anything that wants to know what else is running reads the directory and
+// prunes descriptors whose pid is gone, because a signal-killed server never gets
+// to clean up after itself.
+//
+// This module exists because the writer (web/server) and the readers (api list,
+// the /sessions dashboard) each had their own copy of the directory path and the
+// XDG fallback. Two copies of a path that must agree is a drift waiting to
+// happen: the day one of them starts honouring a new env var, the other silently
+// reads an empty registry and reports "no live sessions".
+
+from "std/os" import {
+    kill
+}
+from "std/fs" import {
+    readDir, removeFile, mkdir
+}
+from "std/io" import {
+    readFile, writeFile
+}
+from "std/json" import {
+    Json
+}
+from "std/env" import {
+    Env
+}
+
+pub struct SessionRow {
+    id: string,
+    pid: i64,
+    port: i64,
+    program: string,
+    adapter: string,
+    startedAt: i64,
+    alive: bool,
+}
+
+// XDG_STATE_HOME or ~/.local/state — the same root the command history uses.
+pub fn stateDir(): string {
+    if let Option.Some(x) = Env.get("XDG_STATE_HOME") {
+        if x.len > 0 {
+            return x + "/dapweb"
+        }
+    }
+    return Env.getOr("HOME", "") + "/.local/state/dapweb"
+}
+
+pub fn sessionsDir(): string {
+    return stateDir() + "/sessions"
+}
+
+pub fn sessionFilePath(id: &string): string {
+    return sessionsDir() + "/" + id + ".json"
+}
+
+// mkdir -p: create each ancestor in turn, ignoring already-exists errors (0755).
+fn ensureDir(path: &string): void {
+    var i: i64 = 1
+    while i <= path.len {
+        if i == path.len || path[i] == '/' {
+            let _r = mkdir(path.substr(0, i), 493)
+        }
+        i = i + 1
+    }
+}
+
+pub fn writeSession(id: &string, pid: i64, port: i64, program: &string, adapter: &string, startedAt: i64): void {
+    ensureDir(sessionsDir())
+    let doc = Json.obj()
+        .str("id", id.clone())
+        .int("pid", pid)
+        .int("port", port)
+        .str("program", program.clone())
+        .str("adapter", adapter.clone())
+        .int("startedAt", startedAt)
+        .build()
+    match writeFile(sessionFilePath(id), doc) {
+        Result.Ok(_n) => {
+        }
+        Result.Err(_e) => {
+        }
+    }
+}
+
+pub fn removeSession(id: &string): void {
+    match removeFile(sessionFilePath(id)) {
+        Result.Ok(_x) => {
+        }
+        Result.Err(_e) => {
+        }
+    }
+}
+
+// Read the registry, probing each pid with kill(pid, 0). `prune` deletes the
+// descriptors of servers that are gone, which is the only GC this registry has.
+pub fn loadSessions(prune: bool): Vec<SessionRow> {
+    // No registry dir yet (nothing has ever run) is not an error — it means no
+    // sessions.
+    let Result.Ok(entries) = readDir(sessionsDir()) else {
+        return []
+    }
+    var rows: Vec<SessionRow> = []
+    for ent in entries {
+        if !ent.name.endsWith(".json") {
+            continue
+        }
+        let path = sessionsDir() + "/" + ent.name
+        let text = match readFile(path) {
+            Result.Ok(t) => {
+                t
+            }
+            Result.Err(_e) => {
+                continue
+            }
+        }
+        let doc = match Json.parse(text) {
+            Result.Ok(d) => {
+                d
+            }
+            Result.Err(_e) => {
+                continue
+            }
+        }
+        let pid = doc.i64("pid") ?? (0 as i64)
+        // kill(pid, 0): 0 ⇒ alive, -1/ESRCH ⇒ gone. No signal is delivered.
+        let alive = pid > 0 && kill(pid as i32, 0) == 0
+        if !alive && prune {
+            let _r = removeFile(path)
+            continue
+        }
+        rows.push(SessionRow {
+            id: doc.str("id") ?? "",
+            pid: pid,
+            port: doc.i64("port") ?? (0 as i64),
+            program: doc.str("program") ?? "",
+            adapter: doc.str("adapter") ?? "",
+            startedAt: doc.i64("startedAt") ?? (0 as i64),
+            alive: alive,
+        }
+        )
+    }
+    return rows
+}
+
+// What the /sessions dashboard fetches. `selfId` marks the row the caller is
+// already looking at, so the page can say "this one" without the browser having
+// to compare its own port against a list.
+pub fn sessionsJson(selfId: &string): string {
+    var arr = Json.arr()
+    var n: i64 = 0
+    for r in loadSessions(true) {
+        arr = arr.raw(Json.obj()
+            .str("id", r.id.clone())
+            .int("pid", r.pid)
+            .int("port", r.port)
+            .str("program", r.program.clone())
+            .str("adapter", r.adapter.clone())
+            .int("startedAt", r.startedAt)
+            .bool("self", r.id == selfId)
+            .build())
+        n = n + 1
+    }
+    return Json.obj().arr("sessions", arr).int("count", n).build()
+}
