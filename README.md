@@ -86,6 +86,8 @@ The open tab moves to line 24 as that runs, and says who moved it:
 - Disassembly
 - Registers
 - Memory viewer
+- Region colors
+- Memory annotations
 - Pointer following
 - Stack slots
 - Program terminal
@@ -96,6 +98,15 @@ The open tab moves to line 24 as that runs, and says who moved it:
 - CLI API
 - Multi-peer sessions
 - Session list
+
+## Down at the machine
+
+![the memory, registers and stack panes](docs/images/panes.png)
+
+Stack, heap, code, const and data each get a colour, in the dump and on the
+registers that point into them. The line under a word says what the bytes are: a
+named local, a saved frame pointer, a return address, the string a pointer lands
+on.
 
 ## Install
 

@@ -1,0 +1,14 @@
+[
+ {
+  "out": "docs/images/panes.png",
+  "cols": 1,
+  "tile_width": 1100,
+  "label_size": 24,
+  "crop": [0, 268, 1372, 600],
+  "tiles": [
+   { "src": "docs/shots/pane-memory.jpg", "label": "MEMORY" },
+   { "src": "docs/shots/pane-registers.jpg", "label": "REGISTERS" },
+   { "src": "docs/shots/pane-stack.jpg", "label": "STACK" }
+  ]
+ }
+]
