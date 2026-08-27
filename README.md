@@ -35,6 +35,11 @@ transport. The five above are the ones dapweb can find without being told where.
 ./dapweb web --dapPath /path/to/some-dap-adapter --program ./a.out
 ```
 
+Same UI, same session, same `dapweb api` on all of them; only the source and the
+adapter tag in the corner change:
+
+![the same dapweb stop in C, Python, Go, JavaScript and Java](docs/images/languages.png)
+
 ## An agent is a first-class user
 
 The browser tab is a client of the session, not the session. Every action in the

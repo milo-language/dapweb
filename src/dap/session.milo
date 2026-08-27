@@ -666,6 +666,10 @@ pub fn initArgsFor(kind: &string): string {
     return Json.obj().str("adapterID", adapterIdForKind(kind))
         .bool("linesStartAt1", true)
         .bool("columnsStartAt1", true)
+    // Optional in the spec and not optional to lldb-dap 21, which rejects the
+    // whole initialize with "missing value at arguments.pathFormat". "path" is
+    // what every adapter here means anyway: paths, not source references.
+        .str("pathFormat", "path")
         .bool("supportsRunInTerminalRequest", true)
     // js-debug hands the debuggee to a child session via the startDebugging
     // reverse request and gates that on this flag; other adapters ignore it.

@@ -254,6 +254,47 @@ def pair(spec):
     out.save(spec["out"])
     print(f"wrote {spec['out']}  ({out.width}x{out.height})")
 
+def grid(spec):
+    """One picture of the same UI on several debuggers.
+
+    Five separate screenshots make a reader compare five images; one grid makes
+    the point in a glance, which is that only the source and the adapter tag
+    differ. Tiles are cropped to the panes that carry the difference, since a
+    full frame shrunk to a third of its width is unreadable.
+    """
+    crop = spec.get("crop")
+    cols = int(spec.get("cols", 2))
+    tw = int(spec.get("tile_width", 660))
+    gap = int(spec.get("gap", 18))
+    font = _font(int(spec.get("label_size", 20)))
+    bg = tuple(spec.get("bg", (13, 17, 23)))
+
+    tiles = []
+    for t in spec["tiles"]:
+        im = Image.open(t["src"]).convert("RGB")
+        if crop:
+            im = im.crop((crop[0], crop[1], crop[0] + crop[2], crop[1] + crop[3]))
+        th = int(tw * im.height / im.width)
+        tiles.append((im.resize((tw, th), Image.LANCZOS), t["label"]))
+
+    th = tiles[0][0].height
+    rows = (len(tiles) + cols - 1) // cols
+    cap = font.size + 2 * PAD + 8
+    W = cols * tw + (cols - 1) * gap
+    H = rows * (th + cap) + (rows - 1) * gap
+    out = Image.new("RGB", (W, H), bg)
+    d = ImageDraw.Draw(out)
+    for i, (im, label) in enumerate(tiles):
+        x = (i % cols) * (tw + gap)
+        y = (i // cols) * (th + cap + gap)
+        lw = d.textlength(label, font=font)
+        d.rounded_rectangle([x, y, x + lw + 2 * PAD, y + font.size + 2 * PAD],
+                            radius=6, fill=ACCENT)
+        d.text((x + PAD, y + PAD - 1), label, font=font, fill=(20, 12, 20))
+        out.paste(im, (x, y + cap))
+    out.save(spec["out"])
+    print(f"wrote {spec['out']}  ({out.width}x{out.height}, {len(tiles)} tiles)")
+
 def story(spec):
     """One GIF walking a real session: each step is a screenshot with the control
     you press called out, held long enough to read, cross-fading to the next.
@@ -295,7 +336,9 @@ if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit(__doc__)
     for spec in json.load(open(sys.argv[1])):
-        if "shot" in spec:
+        if "tiles" in spec:
+            grid(spec)
+        elif "shot" in spec:
             pair(spec)
         elif "steps" in spec:
             story(spec)

@@ -1,0 +1,16 @@
+[
+ {
+  "out": "docs/images/languages.png",
+  "cols": 2,
+  "tile_width": 900,
+  "label_size": 26,
+  "crop": [0, 0, 1372, 620],
+  "tiles": [
+   { "src": "docs/shots/lang-c.jpg", "label": "C  ·  lldb-dap" },
+   { "src": "docs/shots/lang-python.jpg", "label": "Python  ·  debugpy" },
+   { "src": "docs/shots/lang-go.jpg", "label": "Go  ·  Delve" },
+   { "src": "docs/shots/lang-node.jpg", "label": "JavaScript  ·  js-debug" },
+   { "src": "docs/shots/lang-java.jpg", "label": "Java  ·  java-dap" }
+  ]
+ }
+]
