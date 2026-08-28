@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="src/web/ui/og.png" alt="dapweb: any DAP debugger, in a browser tab" width="900">
+  <img src="src/web/ui/og.png" alt="dapweb: debug with AI. A web UI for humans, a CLI for agents, one shared session." width="900">
 </p>
 
 <p align="center">
