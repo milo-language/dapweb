@@ -1,8 +1,8 @@
 [
  {
-  "out": "docs/images/languages.png",
-  "cols": 2,
-  "tile_width": 860,
+  "out": "docs/images/lang-c.png",
+  "cols": 1,
+  "tile_width": 1372,
   "label_size": 24,
   "tiles": [
    {
@@ -14,7 +14,35 @@
      1372,
      800
     ]
-   },
+   }
+  ],
+  "brand": true
+ },
+ {
+  "out": "docs/images/lang-python.png",
+  "cols": 1,
+  "tile_width": 1372,
+  "label_size": 24,
+  "tiles": [
+   {
+    "src": "docs/shots/lang-python.jpg",
+    "label": "Python  \u00b7  debugpy",
+    "crop": [
+     0,
+     0,
+     1372,
+     760
+    ]
+   }
+  ],
+  "brand": true
+ },
+ {
+  "out": "docs/images/lang-go.png",
+  "cols": 1,
+  "tile_width": 1372,
+  "label_size": 24,
+  "tiles": [
    {
     "src": "docs/shots/lang-go.jpg",
     "label": "Go  \u00b7  Delve",
@@ -24,7 +52,16 @@
      1372,
      862
     ]
-   },
+   }
+  ],
+  "brand": true
+ },
+ {
+  "out": "docs/images/lang-node.png",
+  "cols": 1,
+  "tile_width": 1372,
+  "label_size": 24,
+  "tiles": [
    {
     "src": "docs/shots/lang-node.jpg",
     "label": "JavaScript  \u00b7  js-debug",
@@ -34,7 +71,16 @@
      1372,
      830
     ]
-   },
+   }
+  ],
+  "brand": true
+ },
+ {
+  "out": "docs/images/lang-java.png",
+  "cols": 1,
+  "tile_width": 1372,
+  "label_size": 24,
+  "tiles": [
    {
     "src": "docs/shots/lang-java.jpg",
     "label": "Java  \u00b7  java-dap",
@@ -43,16 +89,6 @@
      0,
      1372,
      820
-    ]
-   },
-   {
-    "src": "docs/shots/lang-python.jpg",
-    "label": "Python  \u00b7  debugpy",
-    "crop": [
-     0,
-     0,
-     1372,
-     760
     ]
    }
   ],

@@ -8,18 +8,31 @@
   built in <a href="https://github.com/milo-language/milo">Milo</a>
 </p>
 
-A browser front end for any DAP debugger, built so that you and an AI agent can
-drive the same debuggee at the same time.
+Debug with AI: a web UI for humans, a CLI for agents, one shared session.
 
 <p align="center">
   <img src="docs/images/debugging.png" alt="dapweb stopped at a breakpoint: source view, call stack, nested locals, and a terminal showing both the program's output and the agent's last command" width="900">
 </p>
 
-## The debuggers
+## The languages
 
-dapweb drives a debugger through its Debug Adapter Protocol front end, which by
-now is nearly all of them. Five are known by name; the rest are the same thing
-with the path spelled out:
+<p align="center">
+  <img src="https://img.shields.io/badge/C-00599C?logo=c&logoColor=white" alt="C">
+  <img src="https://img.shields.io/badge/C%2B%2B-00599C?logo=cplusplus&logoColor=white" alt="C++">
+  <img src="https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white" alt="Rust">
+  <img src="https://img.shields.io/badge/Swift-F05138?logo=swift&logoColor=white" alt="Swift">
+  <img src="https://img.shields.io/badge/Zig-F7A41D?logo=zig&logoColor=black" alt="Zig">
+  <img src="https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/Go-00ADD7?logo=go&logoColor=white" alt="Go">
+  <img src="https://img.shields.io/badge/JavaScript-F7DF1E?logo=javascript&logoColor=black" alt="JavaScript">
+  <img src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white" alt="TypeScript">
+  <img src="https://img.shields.io/badge/Java-437291?logo=openjdk&logoColor=white" alt="Java">
+  <img src="https://img.shields.io/badge/any%20DAP%20adapter-555555" alt="any DAP adapter">
+</p>
+
+dapweb debugs anything with a Debug Adapter Protocol front end, which by now is
+nearly every debugger. Five adapters are known by name; the rest are the same
+thing with the path spelled out:
 
 | adapter | languages | how dapweb finds it |
 | --- | --- | --- |
@@ -37,7 +50,27 @@ for PHP, earlybird for OCaml, probe-rs and cortex-debug for embedded targets:
 ./dapweb web --dapPath /path/to/some-dap-adapter --program ./a.out
 ```
 
-![the same dapweb stop in C, Python, Go, JavaScript and Java](docs/images/languages.png)
+The same stop, five languages, find yours:
+
+### C · lldb-dap
+
+![dapweb stopped in C under lldb-dap](docs/images/lang-c.png)
+
+### Python · debugpy
+
+![dapweb stopped in Python under debugpy](docs/images/lang-python.png)
+
+### Go · Delve
+
+![dapweb stopped in Go under Delve](docs/images/lang-go.png)
+
+### JavaScript · js-debug
+
+![dapweb stopped in JavaScript under js-debug](docs/images/lang-node.png)
+
+### Java · java-dap
+
+![dapweb stopped in Java under java-dap](docs/images/lang-java.png)
 
 ## An agent is a first-class user
 
