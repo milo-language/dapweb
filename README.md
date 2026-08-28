@@ -3,36 +3,54 @@
 </p>
 
 <p align="center">
-  <b><a href="https://github.com/milo-language/dapweb/releases/tag/latest">Download</a></b> ·
-  <b><a href="https://milo-language.github.io/milo/">Docs</a></b> ·
+  <b><a href="#install">Install</a></b> ·
   built in <a href="https://github.com/milo-language/milo">Milo</a>
 </p>
 
-Debug with AI: a web UI for humans, a CLI for agents, one shared session.
+dapweb lets you control a debugger from a web ui, as well as programmatically control a debugger from a cli. All clients interacting with the debugger view the same output.
+
+```mermaid
+flowchart LR
+  browser["browser tab(s)"] <-- "commands / streamed events" --> server["dapweb server"]
+  cli["dapweb api&nbsp;&nbsp;(agent, script)"] <-- "commands / JSON replies" --> server
+  server <-- DAP --> adapter["debug adapter (lldb-dap, debugpy, ...)"]
+  adapter --- debuggee["your program"]
+```
+
+One session, many peers: commands from any peer funnel into the same debugger,
+and every event is broadcast back to all of them.
+
+To start the web ui, run
+```
+dapweb web
+```
+
+To interact with debug sessions, run
+```console
+$ dapweb api break --line 12
+{"ok":true}
+$ dapweb api run
+{"type":"stopped","line":12,"path":".../examples/demo.c","frames":[{"id":1572864,"name":"main","line":12,...}],"locals":[{"name":"x","value":"7","type":"int",...},...]}
+$ dapweb api eval 'x + y'
+{"type":"evalResult","id":0,"value":"(int) $0 = 42","ref":0}
+$ dapweb api list
+ID                      PORT   PID     PROGRAM
+solar-maple-moves       8081   54983   /tmp/demo
+```
+
+With more than one session live, add `--session <id>` (or `--port <n>`) to any
+of these.
 
 <p align="center">
   <img src="docs/images/debugging.png" alt="dapweb stopped at a breakpoint: source view, call stack, nested locals, and a terminal showing both the program's output and the agent's last command" width="900">
 </p>
 
-## The languages
+## Language Support
 
-<p align="center">
-  <img src="https://img.shields.io/badge/C-00599C?logo=c&logoColor=white" alt="C">
-  <img src="https://img.shields.io/badge/C%2B%2B-00599C?logo=cplusplus&logoColor=white" alt="C++">
-  <img src="https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white" alt="Rust">
-  <img src="https://img.shields.io/badge/Swift-F05138?logo=swift&logoColor=white" alt="Swift">
-  <img src="https://img.shields.io/badge/Zig-F7A41D?logo=zig&logoColor=black" alt="Zig">
-  <img src="https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/Go-00ADD7?logo=go&logoColor=white" alt="Go">
-  <img src="https://img.shields.io/badge/JavaScript-F7DF1E?logo=javascript&logoColor=black" alt="JavaScript">
-  <img src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white" alt="TypeScript">
-  <img src="https://img.shields.io/badge/Java-437291?logo=openjdk&logoColor=white" alt="Java">
-  <img src="https://img.shields.io/badge/any%20DAP%20adapter-555555" alt="any DAP adapter">
-</p>
-
-dapweb debugs anything with a Debug Adapter Protocol front end, which by now is
-nearly every debugger. Five adapters are known by name; the rest are the same
-thing with the path spelled out:
+dapweb supports *any* debugger for *any* language as long as it conforms to the
+[Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) (DAP).
+In practice, [basically all debuggers](https://microsoft.github.io/debug-adapter-protocol/implementors/adapters/)
+support this now.
 
 | adapter | languages | how dapweb finds it |
 | --- | --- | --- |
@@ -43,8 +61,15 @@ thing with the path spelled out:
 | **java-dap** | Java, and anything else on JDWP | `java-dap` on `PATH` |
 | **any other DAP adapter** | everything else | `--dapPath "gdb -i dap"`, `--dapPath /path/to/adapter` |
 
-CodeLLDB, `gdb -i dap` (gdb 14+), netcoredbg for C#/.NET, rdbg for Ruby, Xdebug
-for PHP, earlybird for OCaml, probe-rs and cortex-debug for embedded targets:
+Adapters known to work with the `--dapPath` route include:
+
+- CodeLLDB
+- `gdb -i dap` (gdb 14+)
+- netcoredbg for C#/.NET
+- rdbg for Ruby
+- Xdebug for PHP
+- earlybird for OCaml
+- probe-rs and cortex-debug for embedded targets
 
 ```sh
 ./dapweb web --dapPath /path/to/some-dap-adapter --program ./a.out
@@ -74,7 +99,7 @@ The same stop, five languages, find yours:
 
 ## An agent is a first-class user
 
-The session can be driven from the CLI while you watch it in the browser:
+The debugger can be interacted with from the CLI while you watch it in the browser, and vice versa:
 
 ```console
 $ dapweb api step --pretty
@@ -94,7 +119,7 @@ $ dapweb api step --pretty
 }
 ```
 
-The open tab moves to line 24 as that runs, and says who moved it:
+The open tab reflects the new state, and prints a message in the console showing that an external client made a request.
 
 ![dapweb api stepping the session, and the browser tab showing the same stop](docs/images/api-and-browser.png)
 
@@ -102,51 +127,32 @@ The open tab moves to line 24 as that runs, and says who moved it:
 
 ## Features
 
-- Breakpoints
-- Conditional breakpoints
-- Hit counts
-- Log points
-- Persistent breakpoints
-- Step over/in/out
-- Instruction stepping
-- Restart
-- Attach by name
-- Stop at main
-- Call stack
-- Threads
-- Nested locals
-- Editable values
-- Watch expressions
-- Exception filters
-- Expression eval
-- Tab completion
-- Disassembly
-- Register table
-- Hex / dec / oct / bin
-- Memory viewer
-- Region colors
-- Memory annotations
-- Pointer following
-- Stack slots
-- Program terminal
-- Syntax highlighting
-- VS Code launch configs
-- Form ⇄ JSON config editor
-- Target history
-- Agent-started sessions
-- Binary info
-- CLI API
-- Multi-peer sessions
-- Session list
+- **Multi-peer sessions**: you, your agent, and anyone else's terminal attached
+  to the same live debuggee, every peer seeing every stop.
+- **CLI API**: every debugger action as `dapweb api <cmd>` with a JSON reply an
+  agent can parse; the command vocabulary is served at `/api/commands` and
+  printed by `dapweb api spec`.
+- **Agent-started sessions**: the agent launches the debuggee in the
+  background, and the session appears in your open tab.
+- **The full breakpoint kit**: conditional, hit counts, log points, persistent
+  across restarts.
+- **Expression eval with tab completion** in the program terminal.
+- **Nested locals, editable values, watch expressions.**
+- **Memory viewer**: color coded by region (stack, heap, code, ...), slots
+  annotated with the locals and frame anatomy that live there, pointers
+  followable by click.
+- **Register table**: role, module, and points-at per register,
+  changed-since-last-stop marks, hex/dec/oct/bin.
+- **Disassembly and instruction stepping.**
+- **VS Code launch configs**: reuse an existing `.vscode/launch.json`, edited
+  as a form or as JSON, both views of the same text.
 
-## Down at the machine
+## System Details
+
+Additional features include a memory inspector, register inspector, and stack visualization. Each of these is color coded to reflect which memory region the address is in (stack, heap, global, etc).
 
 ![the memory, registers and stack panes](docs/images/panes.png)
 
-Stack, heap, code, const and data each get a colour, in the dump and on the
-registers that point into them. The line under a word says what the bytes are: a
-named local, a saved frame pointer, a return address, the string a pointer lands
-on.
 
 ## Install
 
@@ -159,15 +165,11 @@ cd dapweb-$P && ./dapweb /path/to/your-binary
 Use `curl`, not a browser download: macOS quarantines the archive and kills the
 unsigned binary on first run. Re-run the command to update.
 
-## Using it
-
-Point it at a program, click a line to break on it, press Run. That is the whole
-loop:
+## Usage
 
 ![a dapweb session, start to finish](docs/images/session.gif)
 
-Click **LAUNCH** to flip the bar to **ATTACH** and pick a running process by name
-instead of hunting for its pid:
+You can choose between Launch and Attach. For launch, you can provide the executable and arguments to launch with. For attach you can choose from a list of running processes.
 
 ![the target bar in attach mode](docs/images/attach.gif)
 
@@ -197,30 +199,15 @@ to the first free port from 8080.
 browser sends, so an agent or a shell script needs no separate protocol:
 
 ```sh
-./dapweb api list                 # live sessions
+./dapweb api list  # live sessions
 ./dapweb api break --line 12
-./dapweb api run                  # blocks until the first stop
-./dapweb api step --pretty        # step, and indent the reply for a human
+./dapweb api run  # blocks until the first stop
+./dapweb api step --pretty  # step, and indent the reply for a human
 ./dapweb api eval 'x + 1'
 ./dapweb api request --await stopped '{"cmd":"continue"}'
 ```
 
-With one live session `api` finds it; otherwise pass `--session <id>` or
-`--port <n>`. `dapweb <command> --help` lists the rest.
-
-`dapweb api spec` prints the whole `{"cmd":...}` vocabulary — what each command
-takes, which reply `--await` should block for, and which DAP request it becomes.
-The same table is served at `/api/commands`. Where a command forwards to the
-adapter, its arguments and reply are that DAP request's, specified at
-<https://microsoft.github.io/debug-adapter-protocol/specification>; the rest are
-dapweb's own. An unrecognised command is refused and names the vocabulary back
-at you, and `api request` exits non-zero so a script can branch on it.
-
-`dapweb log` reads the journal: every command a peer sent and every event a
-session answered with, recorded to one sqlite file per machine
-(`$XDG_STATE_HOME/dapweb/journal.db`, 50MB, oldest events evicted first). It
-reads the file, not a server, which is the point — the session that wedged is
-the one you cannot ask any more:
+Each event is recorded to `$XDG_STATE_HOME/dapweb/journal.db`, which can be queried by the AI if desired:
 
 ```sh
 ./dapweb log --limit 40                 # what just happened, any session
@@ -230,12 +217,7 @@ the one you cannot ask any more:
 ./dapweb log --breakpoints              # per line: sessions set vs sessions hit
 ```
 
-`--since <seq>` returns only what is new, so an agent can poll it. The same rows
-are served at `/api/log` (`?view=sessions`, `?view=breakpoints`). Recording is
-off with `--no-journal` or `DAPWEB_NO_JOURNAL=1`.
-
-> Unauthenticated, and `eval` reaches the debugger — an exposed port is remote
-> code execution. Keep it on localhost.
+Note: Unauthenticated, and `eval` reaches the debugger — an exposed port is remote code execution. Keep it on localhost.
 
 ## Develop
 
