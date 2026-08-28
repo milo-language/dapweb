@@ -119,9 +119,11 @@ $ dapweb api step --pretty
 }
 ```
 
-The open tab reflects the new state, and prints a message in the console showing that an external client made a request.
+The open tab reflects the new state, announces what the agent is doing in the
+toolbar as it happens, and prints every agent command in the console alongside
+the program's own output:
 
-![dapweb api stepping the session, and the browser tab showing the same stop](docs/images/api-and-browser.png)
+![an agent driving the session: the toolbar announcing the live command, and the console listing every command the agent ran](docs/images/agent-console.png)
 
 ![an agent driving the session](docs/images/agent-activity.gif)
 

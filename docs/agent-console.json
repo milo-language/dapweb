@@ -1,0 +1,10 @@
+[
+ {
+  "src": "docs/shots/agent-console.jpg",
+  "out": "docs/images/agent-console.png",
+  "regions": [
+   {"box": [865, 4, 316, 28], "label": "the tab announces what the agent is doing, live", "side": "below"},
+   {"box": [4, 727, 434, 70], "label": "every agent command lands in the console", "side": "below"}
+  ]
+ }
+]
