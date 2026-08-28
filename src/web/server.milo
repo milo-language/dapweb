@@ -329,13 +329,7 @@ struct Pending {
 
 fn firstThreadId(raw: &string): i64 {
     if let Result.Ok(doc) = Json.parse(raw.clone()) {
-        if let Option.Some(b) = doc.get("body") {
-            if let Option.Some(ts) = b.get("threads") {
-                if let Option.Some(t) = ts.at(0) {
-                    return t.i64("id") ?? (-1 as i64)
-                }
-            }
-        }
+        return doc.curInt(doc.curPath("body.threads[0].id")) ?? (-1 as i64)
     }
     return -1 as i64
 }
@@ -345,21 +339,14 @@ fn firstThreadId(raw: &string): i64 {
 fn framesJson(raw: &string): string {
     var arr = Json.arr()
     if let Result.Ok(doc) = Json.parse(raw.clone()) {
-        if let Option.Some(body) = doc.get("body") {
-            if let Option.Some(framesArr) = body.get("stackFrames") {
-                let n = framesArr.len()
-                var i: i64 = 0
-                while i < n {
-                    if let Option.Some(f) = framesArr.at(i) {
-                        var path: string = ""
-                        if let Option.Some(src) = f.get("source") {
-                            path = src.str("path") ?? ""
-                        }
-                        arr = arr.obj(Json.obj().int("id", f.i64("id") ?? (0 as i64)).str("name", f.str("name") ?? "?").int("line", f.i64("line") ?? (0 as i64)).str("path", path).str("ipRef", f.str("instructionPointerReference") ?? ""))
-                    }
-                    i = i + 1
-                }
-            }
+        let frames = doc.curField(doc.curField(doc.curRoot(), "body"), "stackFrames")
+        let n = doc.curLen(frames)
+        var i: i64 = 0
+        while i < n {
+            let f = doc.curChild(frames, i)
+            let path = doc.curStr(doc.curField(doc.curField(f, "source"), "path")) ?? ""
+            arr = arr.obj(Json.obj().int("id", doc.curInt(doc.curField(f, "id")) ?? (0 as i64)).str("name", doc.curStr(doc.curField(f, "name")) ?? "?").int("line", doc.curInt(doc.curField(f, "line")) ?? (0 as i64)).str("path", path).str("ipRef", doc.curStr(doc.curField(f, "instructionPointerReference")) ?? ""))
+            i = i + 1
         }
     }
     return arr.build()
@@ -505,18 +492,14 @@ fn registersScopeRef(raw: &string): i64 {
 // while its 21 series (and js-debug) leave that empty and put the real text in
 // body.error.format. Reading only one of them turns a refusal into a blank.
 fn respErrText(raw: &string): string {
-    let m = jStr(raw, "message")
-    if m.len > 0 {
-        return m
-    }
     if let Result.Ok(doc) = Json.parse(raw.clone()) {
-        if let Option.Some(body) = doc.get("body") {
-            if let Option.Some(err) = body.get("error") {
-                let f = err.str("format") ?? ""
-                if f.len > 0 {
-                    return f
-                }
-            }
+        let m = doc.curStr(doc.curField(doc.curRoot(), "message")) ?? ""
+        if m.len > 0 {
+            return m
+        }
+        let f = doc.curStr(doc.curPath("body.error.format")) ?? ""
+        if f.len > 0 {
+            return f
         }
     }
     return "the adapter refused the request and said nothing about why"
@@ -553,6 +536,22 @@ fn jObjRaw(raw: &string, key: &string): string {
         }
     }
     return ""
+}
+
+// Root-field readers over an ALREADY-parsed doc. The jStr family above re-parses
+// the whole message per field, which is fine for a single read but not for the
+// command path, which reads up to seven fields of one payload; dispatchClientCmd
+// parses once and these make each read an index hop (std/json cursor API).
+fn dStr(doc: &Json, key: &string): string {
+    return doc.curStr(doc.curField(doc.curRoot(), key)) ?? ""
+}
+
+fn dBool(doc: &Json, key: &string, fallback: bool): bool {
+    return doc.curBool(doc.curField(doc.curRoot(), key)) ?? fallback
+}
+
+fn dI64(doc: &Json, key: &string, fallback: i64): i64 {
+    return doc.curInt(doc.curField(doc.curRoot(), key)) ?? fallback
 }
 
 // ── Lifecycle log ──
@@ -2124,21 +2123,21 @@ fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): b
 // one vocabulary, so `dapweb api` cannot drift from what the UI does.
 // One human-readable line for what a command is about to do. Only the verbs an
 // onlooker would care about get spelled out; anything else falls back to its name.
-fn activityText(c: &string, payload: &string): string {
+fn activityText(c: &string, doc: &Json): string {
     // Only the cases that can say something the table cannot — which line, which
     // expression. Everything else takes the table's verb, so there is no second
     // list of commands here to fall behind the first.
     if c == "evaluate" {
-        return $"evaluate `{jStr(payload, "expr")}`"
+        return $"evaluate `{dStr(doc, "expr")}`"
     }
     if c == "setBreakpoint" {
-        return $"set a breakpoint at line {jI64(payload, "line", 0 as i64)}"
+        return $"set a breakpoint at line {dI64(doc, "line", 0 as i64)}"
     }
     if c == "clearBreakpoint" {
-        return $"clear the breakpoint at line {jI64(payload, "line", 0 as i64)}"
+        return $"clear the breakpoint at line {dI64(doc, "line", 0 as i64)}"
     }
     if c == "setVar" {
-        return $"set {jStr(payload, "name")} = {jStr(payload, "value")}"
+        return $"set {dStr(doc, "name")} = {dStr(doc, "value")}"
     }
     return cmdVerb(c)
 }
@@ -2148,8 +2147,8 @@ fn activityText(c: &string, payload: &string): string {
 // that rule lives: the journal keys its breakpoint counts on the same answer the
 // breakpoint itself is stored under, and two spellings of one path is exactly
 // what would make those counts wrong.
-fn cmdPath(c: &string, payload: &string): string {
-    var path = absSourcePath(jStr(payload, "path"))
+fn cmdPath(c: &string, doc: &Json): string {
+    var path = absSourcePath(dStr(doc, "path"))
     if path.len == 0 && (c == "setBreakpoint" || c == "clearBreakpoint") {
         path = absSourcePath(srcPath)
     }
@@ -2163,26 +2162,32 @@ fn cmdPath(c: &string, payload: &string): string {
 // the human "the agent is attempting to frobnicate" about a command that will
 // not run is worse than saying nothing.
 fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): bool {
-    let c = jStr(payload, "cmd")
+    // Parse the payload ONCE; every field read below is a cursor hop on this
+    // doc. The old per-field jStr/jI64 helpers re-parsed the message each call.
+    let Result.Ok(doc) = Json.parse(payload.clone()) else {
+        journalCmd("", peerKind, peerLabel, false, "not a dapweb command", payload, "")
+        return false
+    }
+    let c = dStr(doc, "cmd")
     if !isKnownCmd(c) {
         journalCmd(c, peerKind, peerLabel, false, "not a dapweb command", payload, "")
         return false
     }
-    journalCmd(c, peerKind, peerLabel, true, "", payload, cmdPath(c, payload))
+    journalCmd(c, peerKind, peerLabel, true, "", payload, cmdPath(c, doc))
     // A browser peer's actions are self-evident to whoever performed them; an
     // agent's are not. Announce before acting, so the human watching the UI is
     // never surprised by a program that moves on its own.
     if peerKind != "browser" {
         let who = peerLabel
-        let what = activityText(c, payload)
+        let what = activityText(c, doc)
         logEvent("agent", $"{who} is attempting to {what}")
         wsPush(bus, busWakeWr, Json.obj().str("type", "activity")
             .str("peer", peerKind.clone()).str("who", who.clone()).str("cmd", c.clone())
             .str("text", $"{who} is attempting to {what}").build())
     }
     if c == "setBreakpoint" || c == "clearBreakpoint" {
-        let line = jI64(payload, "line", 0 as i64)
-        let path = cmdPath(c, payload)
+        let line = dI64(doc, "line", 0 as i64)
+        let path = cmdPath(c, doc)
         // Upsert: drop any existing bp at (path, line), then re-add for
         // "set" (a condition edit is a set on an existing line).
         var keep: Vec<Bp> = []
@@ -2196,10 +2201,10 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             gBps.push(Bp {
                 path: path.clone(),
                 line: line,
-                condition: jStr(payload, "condition"),
-                hitCondition: jStr(payload, "hitCondition"),
-                logMessage: jStr(payload, "logMessage"),
-                enabled: jBool(payload, "enabled", true),
+                condition: dStr(doc, "condition"),
+                hitCondition: dStr(doc, "hitCondition"),
+                logMessage: dStr(doc, "logMessage"),
+                enabled: dBool(doc, "enabled", true),
             }
             )
         }
@@ -2208,10 +2213,10 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         // a clear a bare (path, line) is all a peer needs to drop its own copy.
         let ack = Bp {
             path: path.clone(), line: line,
-            condition: jStr(payload, "condition"),
-            hitCondition: jStr(payload, "hitCondition"),
-            logMessage: jStr(payload, "logMessage"),
-            enabled: jBool(payload, "enabled", true),
+            condition: dStr(doc, "condition"),
+            hitCondition: dStr(doc, "hitCondition"),
+            logMessage: dStr(doc, "logMessage"),
+            enabled: dBool(doc, "enabled", true),
         }
         wsPush(bus, busWakeWr, bpAckMsg(ack, c == "setBreakpoint"))
         if gStarted && gDapIn >= 0 {
@@ -2230,12 +2235,17 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         // the run and is applied just before launch — no staging. A live
         // session requires force:true (the client confirms with the user),
         // which kills it and reruns with the new config after teardown.
-        let cfgRaw = jObjRaw(payload, "config")
+        var cfgRaw: string = ""
+        if let Option.Some(v) = doc.get("config") {
+            if v.isObject() {
+                cfgRaw = v.rawStr()
+            }
+        }
         if gStarted {
-            if jBool(payload, "force", false) && gDapIn >= 0 {
+            if dBool(doc, "force", false) && gDapIn >= 0 {
                 gPendingRun = true
                 gPendingConfig = cfgRaw
-                gPendingStopAtMain = jBool(payload, "stopAtMain", gConfigStopAtMain)
+                gPendingStopAtMain = dBool(doc, "stopAtMain", gConfigStopAtMain)
                 logEvent("run killed", $"forced by {peerKind} peer — relaunching")
                 gOddSeq = gOddSeq + 2
                 let _p = pendCh.trySend(Pending {
@@ -2263,7 +2273,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
                 // of spawning the adapter with an empty program path.
                 wsPush(bus, busWakeWr, configErrMsg("no program configured — set a debug target (⚙) before running"))
             } else {
-                stopAtMain = jBool(payload, "stopAtMain", gConfigStopAtMain)
+                stopAtMain = dBool(doc, "stopAtMain", gConfigStopAtMain)
                 let _ok = startRun(bus, busWakeWr, pendCh)
             }
         }
@@ -2287,7 +2297,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             else if c == "pause" {
                 dapCmd = "pause"
             }
-            let t = jI64(payload, "tid", 1 as i64)
+            let t = dI64(doc, "tid", 1 as i64)
             if c == "pause" && t < 0 {
                 // Attach flow: Pause can arrive before any stop, so
                 // there's no tid yet — ask for threads and pause the first.
@@ -2300,7 +2310,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             } else {
                 var b = Json.obj().int("threadId", t)
                 // instruction-granularity stepping from the asm pane.
-                let gran = jStr(payload, "granularity")
+                let gran = dStr(doc, "granularity")
                 if gran.len > 0 {
                     b = b.str("granularity", gran)
                 }
@@ -2344,10 +2354,10 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         }
     } else if c == "evaluate" {
         if gDapIn >= 0 {
-            let id = jI64(payload, "id", 0 as i64)
-            let frameId = jI64(payload, "frameId", -1 as i64)
-            var b = Json.obj().str("expression", jStr(payload, "expr"))
-                .str("context", jStr(payload, "context"))
+            let id = dI64(doc, "id", 0 as i64)
+            let frameId = dI64(doc, "frameId", -1 as i64)
+            var b = Json.obj().str("expression", dStr(doc, "expr"))
+                .str("context", dStr(doc, "context"))
             if frameId >= 0 {
                 b = b.int("frameId", frameId)
             }
@@ -2360,20 +2370,20 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         }
     } else if c == "expand" {
         if gDapIn >= 0 {
-            let id = jI64(payload, "id", 0 as i64)
+            let id = dI64(doc, "id", 0 as i64)
             gOddSeq = gOddSeq + 2
             let _p = pendCh.trySend(Pending {
                 seq: gOddSeq, kind: "expand", id: id, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "variables", Json.obj().int("variablesReference", jI64(payload, "ref", 0 as i64)).build())
+            sendReqFd(gDapIn, gOddSeq, "variables", Json.obj().int("variablesReference", dI64(doc, "ref", 0 as i64)).build())
         }
     } else if c == "threadStack" {
         // stack for a clicked thread; the UI then drives frameScopes
         // for its locals like any other frame selection.
         if gDapIn >= 0 {
-            let id = jI64(payload, "id", 0 as i64)
-            let t = jI64(payload, "tid", 1 as i64)
+            let id = dI64(doc, "id", 0 as i64)
+            let t = dI64(doc, "tid", 1 as i64)
             gOddSeq = gOddSeq + 2
             let _p = pendCh.trySend(Pending {
                 seq: gOddSeq, kind: "tst", id: id, extra: t.toString()
@@ -2384,41 +2394,24 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
     } else if c == "frameScopes" {
         // locals for a user-selected stack frame.
         if gDapIn >= 0 {
-            let id = jI64(payload, "id", 0 as i64)
+            let id = dI64(doc, "id", 0 as i64)
             gOddSeq = gOddSeq + 2
             let _p = pendCh.trySend(Pending {
                 seq: gOddSeq, kind: "fsc", id: id, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "scopes", Json.obj().int("frameId", jI64(payload, "frameId", 0 as i64)).build())
+            sendReqFd(gDapIn, gOddSeq, "scopes", Json.obj().int("frameId", dI64(doc, "frameId", 0 as i64)).build())
         }
     } else if c == "setExceptions" {
         // selected exception filter ids. Stored globally so session
         // init applies them; live-applied when a session is running.
         var arr = Json.arr()
-        match Json.parse(payload.clone()) {
-            Result.Ok(doc) => {
-                match doc.get("filters") {
-                    Option.Some(f) => {
-                        let n = f.len()
-                        var i: i64 = 0
-                        while i < n {
-                            match f.at(i) {
-                                Option.Some(el) => {
-                                    arr = arr.str(el.asStr() ?? "")
-                                }
-                                Option.None => {
-                                }
-                            }
-                            i = i + 1
-                        }
-                    }
-                    Option.None => {
-                    }
-                }
-            }
-            Result.Err(_e) => {
-            }
+        let f = doc.curField(doc.curRoot(), "filters")
+        let n = doc.curLen(f)
+        var i: i64 = 0
+        while i < n {
+            arr = arr.str(doc.curStr(doc.curChild(f, i)) ?? "")
+            i = i + 1
         }
         excFiltersJson = arr.build()
         if gStarted && gDapIn >= 0 {
@@ -2432,10 +2425,10 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
     } else if c == "complete" {
         // debug-console completions.
         if gDapIn >= 0 {
-            let id = jI64(payload, "id", 0 as i64)
-            let frameId = jI64(payload, "frameId", -1 as i64)
-            var b = Json.obj().str("text", jStr(payload, "text"))
-                .int("column", jI64(payload, "column", 1 as i64))
+            let id = dI64(doc, "id", 0 as i64)
+            let frameId = dI64(doc, "frameId", -1 as i64)
+            var b = Json.obj().str("text", dStr(doc, "text"))
+                .int("column", dI64(doc, "column", 1 as i64))
             if frameId >= 0 {
                 b = b.int("frameId", frameId)
             }
@@ -2450,47 +2443,47 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         // raw memory window. memoryReference is whatever the UI got
         // from a value/ipRef; lldb-dap accepts plain hex addresses.
         if gDapIn >= 0 {
-            let id = jI64(payload, "id", 0 as i64)
+            let id = dI64(doc, "id", 0 as i64)
             gOddSeq = gOddSeq + 2
             let _p = pendCh.trySend(Pending {
                 seq: gOddSeq, kind: "readmem", id: id, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "readMemory", Json.obj().str("memoryReference", jStr(payload, "memoryReference")).int("offset", jI64(payload, "offset", 0 as i64)).int("count", jI64(payload, "count", 256 as i64)).build())
+            sendReqFd(gDapIn, gOddSeq, "readMemory", Json.obj().str("memoryReference", dStr(doc, "memoryReference")).int("offset", dI64(doc, "offset", 0 as i64)).int("count", dI64(doc, "count", 256 as i64)).build())
         }
     } else if c == "setVar" {
         // edit a variable. ref = parent container (scope ref for
         // top-level locals, the variable's own ref for expanded children).
         if gDapIn >= 0 {
-            let id = jI64(payload, "id", 0 as i64)
+            let id = dI64(doc, "id", 0 as i64)
             gOddSeq = gOddSeq + 2
             let _p = pendCh.trySend(Pending {
                 seq: gOddSeq, kind: "setv", id: id, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "setVariable", Json.obj().int("variablesReference", jI64(payload, "ref", 0 as i64)).str("name", jStr(payload, "name")).str("value", jStr(payload, "value")).build())
+            sendReqFd(gDapIn, gOddSeq, "setVariable", Json.obj().int("variablesReference", dI64(doc, "ref", 0 as i64)).str("name", dStr(doc, "name")).str("value", dStr(doc, "value")).build())
         }
     } else if c == "disassemble" {
         // window of instructions around a frame's pc (memoryReference =
         // the frame's instructionPointerReference from stackTrace).
         if gDapIn >= 0 {
-            let id = jI64(payload, "id", 0 as i64)
+            let id = dI64(doc, "id", 0 as i64)
             gOddSeq = gOddSeq + 2
             let _p = pendCh.trySend(Pending {
                 seq: gOddSeq, kind: "disasm", id: id, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "disassemble", Json.obj().str("memoryReference", jStr(payload, "memoryReference")).int("instructionOffset", -16).int("instructionCount", 64).bool("resolveSymbols", true).build())
+            sendReqFd(gDapIn, gOddSeq, "disassemble", Json.obj().str("memoryReference", dStr(doc, "memoryReference")).int("instructionOffset", -16).int("instructionCount", 64).bool("resolveSymbols", true).build())
         }
     } else if c == "openSource" {
         // show the file a clicked frame lives in. sourceMsg itself
         // handles unreadable pseudo-paths (dyld etc.) with a placeholder.
-        let p = jStr(payload, "path")
+        let p = dStr(doc, "path")
         if p.len > 0 {
             wsPush(bus, busWakeWr, sourceMsg(p))
         }
     } else if c == "stdin" {
-        let data = jStr(payload, "data")
+        let data = dStr(doc, "data")
         if gPtyFd >= 0 {
             unsafe {
                 let _n = write(gPtyFd, data, data.len)
@@ -2520,21 +2513,11 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         // One-shot localStorage migration: fold the client's legacy entries
         // into the server store, then the client stops sending (server is the
         // sole writer thereafter). Idempotent — dedup collapses re-imports.
-        match Json.parse(payload.clone()) {
-            Result.Ok(d) => {
-                match d.get("entries") {
-                    Option.Some(e) => {
-                        if e.isArray() {
-                            gHistory = histMergeMany(gHistory, e.rawStr(), 10 as i64)
-                            persistHistory()
-                            wsPush(bus, busWakeWr, historyChangedMsg())
-                        }
-                    }
-                    Option.None => {
-                    }
-                }
-            }
-            Result.Err(_e) => {
+        if let Option.Some(e) = doc.get("entries") {
+            if e.isArray() {
+                gHistory = histMergeMany(gHistory, e.rawStr(), 10 as i64)
+                persistHistory()
+                wsPush(bus, busWakeWr, historyChangedMsg())
             }
         }
     } else if c == "newSession" {
