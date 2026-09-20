@@ -255,7 +255,7 @@ fn inspectElf(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64): v
     // count in section 0's sh_size, and an out-of-range string-table index in
     // its sh_link. Section 0 is otherwise all zeroes.
     if shnum == 0 || shstrndx == 65535 {
-        let sh0 = readAt(f, shoff, shentsize)
+        let sh0 = readAt(&mut f, shoff, shentsize)
         if sh0.len < shentsize {
             info.note("truncated section table")
             return
@@ -284,7 +284,7 @@ fn inspectElf(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64): v
         info.note("section table extends past end of file")
         return
     }
-    let table = readAt(f, shoff, tableBytes)
+    let table = readAt(&mut f, shoff, tableBytes)
     if table.len < tableBytes {
         info.note("truncated section table")
         return
@@ -305,7 +305,7 @@ fn inspectElf(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64): v
         info.note("unreadable section-header string table")
         return
     }
-    let strtab = readAt(f, strOff, strSize)
+    let strtab = readAt(&mut f, strOff, strSize)
 
     var hasSymtab = false
     var hasDynsym = false
@@ -460,8 +460,8 @@ fn machoHasNamedCode(f: &mut File, fileSize: i64, is64: bool, little: bool,
     if stroff + strWant > fileSize {
         return false
     }
-    let syms = readAt(f, symoff, count * entrySize)
-    let strs = readAt(f, stroff, strWant)
+    let syms = readAt(&mut f, symoff, count * entrySize)
+    let strs = readAt(&mut f, stroff, strWant)
 
     var i: i64 = 0
     while (i + 1) * entrySize <= syms.len {
@@ -525,7 +525,7 @@ fn inspectMachO(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64, 
         || hdrSize + sizeofcmds > fileSize {
         info.note("unreadable load commands")
     } else {
-        let cmds = readAt(f, hdrSize, sizeofcmds)
+        let cmds = readAt(&mut f, hdrSize, sizeofcmds)
         if cmds.len < sizeofcmds {
             info.note("truncated load commands")
         }
@@ -562,7 +562,7 @@ fn inspectMachO(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64, 
     if inBinaryDwarf {
         info.hasDebugInfo = true
     }
-    findDsym(info, path)
+    findDsym(&mut info, path)
 
     if inBinaryDwarf && info.dsym.len > 0 {
         info.debugInfo = "DWARF (in binary + .dSYM)"
@@ -576,7 +576,7 @@ fn inspectMachO(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64, 
         info.stripped = true
         info.note("no symbol table")
     } else {
-        info.stripped = !machoHasNamedCode(f, fileSize, is64, little, symoff, nsyms, stroff, strsize)
+        info.stripped = !machoHasNamedCode(&mut f, fileSize, is64, little, symoff, nsyms, stroff, strsize)
         if info.stripped {
             info.note("no function symbols; addresses will not resolve to names")
         }
@@ -617,7 +617,7 @@ fn inspectPe(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64): vo
         return
     }
     // COFF header (20 bytes) plus the optional header's magic word.
-    let coff = readAt(f, peOff, 26)
+    let coff = readAt(&mut f, peOff, 26)
     if coff.len < 26 || coff[0] != 'P' || coff[1] != 'E' || coff[2] != 0 || coff[3] != 0 {
         info.note("missing PE signature")
         return
@@ -662,7 +662,7 @@ fn inspectPe(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64): vo
         dirBase = 96
     }
     if dirBase >= 0 && optSize >= dirBase + 56 {
-        let dir = readAt(f, peOff + 24 + dirBase + 48, 8)
+        let dir = readAt(&mut f, peOff + 24 + dirBase + 48, 8)
         if dir.len == 8 && u32At(dir, 4, true) > 0 {
             info.hasDebugInfo = true
             info.debugInfo = "PDB (debug directory)"
@@ -674,7 +674,7 @@ fn inspectPe(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64): vo
     // into the string table that follows the symbol table.
     if nsections > 0 && nsections < 4096 && optSize >= 0 {
         let secOff = peOff + 24 + optSize
-        let secs = readAt(f, secOff, nsections * 40)
+        let secs = readAt(&mut f, secOff, nsections * 40)
         var strtabOff: i64 = -1
         if symtabPtr > 0 && nsymbols > 0 {
             strtabOff = symtabPtr + nsymbols * 18
@@ -688,7 +688,7 @@ fn inspectPe(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64): vo
             if name.len > 1 && name[0] == '/' && strtabOff > 0 && lookups < 256 {
                 if let Option.Some(rel) = name.substr(1, name.len).parseInt() {
                     lookups = lookups + 1
-                    name = cstrAt(readAt(f, strtabOff + rel, 128), 0, 128)
+                    name = cstrAt(readAt(&mut f, strtabOff + rel, 128), 0, 128)
                 }
             }
             if name == ".debug_info" {
@@ -727,28 +727,28 @@ pub fn binInfoJson(path: &string): string {
                 // 64 bytes covers every header this module reads fields from:
                 // the ELF64 header is exactly 64, the Mach-O header 32, and the
                 // PE stub only needs its e_lfanew word at 0x3C.
-                let head = readAt(f, 0, 64)
+                let head = readAt(&mut f, 0, 64)
                 if head.len < 4 {
                     info.note("file too small to identify")
                 } else if head[0] == 127 && head[1] == 'E' && head[2] == 'L' && head[3] == 'F' {
-                    inspectElf(info, f, head, size)
+                    inspectElf(&mut info, &mut f, head, size)
                 } else if head[0] == 207 && head[1] == 250 && head[2] == 237 && head[3] == 254 {
                     // CF FA ED FE reads little-endian as MH_MAGIC_64 (0xFEEDFACF).
-                    inspectMachO(info, f, head, size, path, true, true)
+                    inspectMachO(&mut info, &mut f, head, size, path, true, true)
                 } else if head[0] == 206 && head[1] == 250 && head[2] == 237 && head[3] == 254 {
                     // CE FA ED FE is the 32-bit MH_MAGIC.
-                    inspectMachO(info, f, head, size, path, false, true)
+                    inspectMachO(&mut info, &mut f, head, size, path, false, true)
                 } else if head[0] == 254 && head[1] == 237 && head[2] == 250
                     && (head[3] == 207 || head[3] == 206) {
                     // Byte-swapped magic: a big-endian Mach-O (PowerPC era).
-                    inspectMachO(info, f, head, size, path, head[3] == 207, false)
+                    inspectMachO(&mut info, &mut f, head, size, path, head[3] == 207, false)
                 } else if head[0] == 202 && head[1] == 254 && head[2] == 186 && head[3] == 190 {
                     // CA FE BA BE: fat header, big-endian by definition.
-                    fatInfo(info, head, true)
+                    fatInfo(&mut info, head, true)
                 } else if head[0] == 190 && head[1] == 186 && head[2] == 254 && head[3] == 202 {
-                    fatInfo(info, head, false)
+                    fatInfo(&mut info, head, false)
                 } else if head[0] == 'M' && head[1] == 'Z' {
-                    inspectPe(info, f, head, size)
+                    inspectPe(&mut info, &mut f, head, size)
                 } else {
                     info.note("unrecognised file format")
                 }

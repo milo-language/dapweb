@@ -1334,7 +1334,7 @@ fn parentDrainLoop(client: DapClient, ch: Channel<string>, wakeWr: i32): void {
                     if rc == "runInTerminal" {
                         // js-debug asks whichever session it launches from; an
                         // empty ack here would leave the program never started.
-                        let _m = handleRunInTerminal(cl, m.raw, m.seq, ch, wakeWr)
+                        let _m = handleRunInTerminal(&mut cl, m.raw, m.seq, ch, wakeWr)
                     } else {
                         cl.respond(m.seq, rc, "{}")
                     }
@@ -1744,7 +1744,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 // A restart replaces the pty; the old master needs no close
                 // here — its own pump owns it and closes it when the dead child
                 // EOFs the master.
-                let _m = handleRunInTerminal(cl, msg.raw, msg.seq, ch, wakeWr)
+                let _m = handleRunInTerminal(&mut cl, msg.raw, msg.seq, ch, wakeWr)
             } else if msg.command == "startDebugging" {
                 // js-debug: the debuggee lives in a CHILD session the adapter
                 // asks us to open — a second connection to the same server,
@@ -1960,7 +1960,7 @@ fn killAdapterSrv(): void {
         // Let it exit on its own first: the disconnect we just sent is what makes
         // it kill the debuggee, and SIGTERMing it mid-teardown skips that.
         var waited: i64 = 0
-        while waited < 1000 && pidAlive(c) {
+        while waited < 1000 && pidAlive(&mut c) {
             unsafe {
                 let _u = usleep(50000 as u32)
             }
@@ -1985,13 +1985,13 @@ fn reapDebuggee(): void {
             pid: gDebuggeePid as i32, stdinFd: -1 as i32, stdoutFd: -1 as i32, stderrFd: -1 as i32
         }
         var waited: i64 = 0
-        while waited < 500 && pidAlive(c) {
+        while waited < 500 && pidAlive(&mut c) {
             unsafe {
                 let _u = usleep(50000 as u32)
             }
             waited = waited + 50
         }
-        if pidAlive(c) {
+        if pidAlive(&mut c) {
             let _k = c.signal(15)
             logEvent("debuggee reaped", $"pid {gDebuggeePid} outlived the adapter (SIGTERM)")
         }
