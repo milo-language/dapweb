@@ -591,11 +591,8 @@ fn wsPush(ch: &Channel<string>, wakeWr: i32, msg: string): void {
 
 // W: sole socket writer. Parks on the wake pipe, drains the channel.
 fn wsWriterLoop(fd: i32, ch: Channel<string>, wakeRd: i32): void {
-    // Borrowed copy of the conn: _closed=true so Drop skips teardown (R owns
-    // the real one). sendText itself doesn't consult _closed.
-    var conn = WsConn {
-        fd: fd, ssl: 0, _ctx: 0, _closed: true, _isClient: false
-    }
+    // Borrowed view of the conn: its Drop skips teardown (R owns the real one).
+    var conn = WsConn.view(fd, 0, false)
     var buf: [u8; 64] = [0; 64]
     while true {
         var n: i64 = 0
