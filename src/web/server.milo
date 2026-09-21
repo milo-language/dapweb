@@ -81,6 +81,7 @@ from "std/env" import {
     Env
 }
 from "std/process" import {
+    Child,
     Command, Stdio
 }
 from "std/fs" import {
@@ -109,6 +110,7 @@ from "json-rpc/frame" import {
     writeFrame as writeFrameFd
 }
 from "../dap/session" import {
+    histLastRunAt,
     LaunchSpec, AdapterSel, resolveConfig, resolveAdapterCmd,
     adapterIdForKind, initArgsFor, launchRequestOf, adapterArgvOf, launchArgsFor,
     tcpListenArgs,
