@@ -100,13 +100,13 @@ pub fn commandsJson(): string {
     var arr = Json.arr()
     for s in commandSpecs() {
         arr = arr.obj(Json.obj()
-            .str("cmd", s.name.clone())
-            .str("args", s.args.clone())
-            .str("summary", s.summary.clone())
-            .str("awaits", s.awaits.clone())
-            .str("dap", s.dap.clone()))
+            .str("cmd", s.name)
+            .str("args", s.args)
+            .str("summary", s.summary)
+            .str("awaits", s.awaits)
+            .str("dap", s.dap))
     }
-    return Json.obj().raw("commands", arr.build()).str("dapSpec", DAP_SPEC_URL.clone()).build()
+    return Json.obj().raw("commands", arr.build()).str("dapSpec", DAP_SPEC_URL).build()
 }
 
 // The same table as something to read in a terminal.

@@ -76,11 +76,11 @@ fn ensureDir(path: &string): void {
 pub fn writeSession(id: &string, pid: i64, port: i64, program: &string, adapter: &string, startedAt: i64): void {
     ensureDir(sessionsDir())
     let doc = Json.obj()
-        .str("id", id.clone())
+        .str("id", id)
         .int("pid", pid)
         .int("port", port)
-        .str("program", program.clone())
-        .str("adapter", adapter.clone())
+        .str("program", program)
+        .str("adapter", adapter)
         .int("startedAt", startedAt)
         .build()
     match writeFile(sessionFilePath(id), doc) {
@@ -159,11 +159,11 @@ pub fn sessionsJson(selfId: &string): string {
     var n: i64 = 0
     for r in loadSessions(true) {
         arr = arr.raw(Json.obj()
-            .str("id", r.id.clone())
+            .str("id", r.id)
             .int("pid", r.pid)
             .int("port", r.port)
-            .str("program", r.program.clone())
-            .str("adapter", r.adapter.clone())
+            .str("program", r.program)
+            .str("adapter", r.adapter)
             .int("startedAt", r.startedAt)
             .bool("self", r.id == selfId)
             .build())

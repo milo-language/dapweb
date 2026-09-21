@@ -330,7 +330,7 @@ struct Pending {
 // ── JSON helpers ──
 
 fn firstThreadId(raw: &string): i64 {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         return doc.curInt(doc.curPath("body.threads[0].id")) ?? (-1 as i64)
     }
     return -1 as i64
@@ -340,7 +340,7 @@ fn firstThreadId(raw: &string): i64 {
 // path may be "" (no debug info / synthetic frame) — the UI skips navigation.
 fn framesJson(raw: &string): string {
     var arr = Json.arr()
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         let frames = doc.curField(doc.curField(doc.curRoot(), "body"), "stackFrames")
         let n = doc.curLen(frames)
         var i: i64 = 0
@@ -390,14 +390,14 @@ fn regionsJson(txt: &string): string {
         if toks.len > 1 {
             name = toks[1].clone()
         }
-        arr = arr.obj(Json.obj().str("s", start).str("e", end).str("p", toks[0].clone()).str("n", name))
+        arr = arr.obj(Json.obj().str("s", start).str("e", end).str("p", toks[0]).str("n", name))
     }
     return arr.build()
 }
 
 fn localsJson(raw: &string): string {
     var arr = Json.arr()
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         let vars = doc.curField(doc.curField(doc.curRoot(), "body"), "variables")
         let n = doc.curLen(vars)
         var i: i64 = 0
@@ -416,7 +416,7 @@ fn localsJson(raw: &string): string {
 // disassemble body → [{"addr":..,"text":..,"sym":..}] for the asm pane.
 fn disasmJson(raw: &string): string {
     var arr = Json.arr()
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         let insns = doc.curField(doc.curField(doc.curRoot(), "body"), "instructions")
         let n = doc.curLen(insns)
         var i: i64 = 0
@@ -432,7 +432,7 @@ fn disasmJson(raw: &string): string {
 // completions body → [{"label":..,"text":..}] (text falls back to label).
 fn completionsJson(raw: &string): string {
     var arr = Json.arr()
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         let targets = doc.curField(doc.curField(doc.curRoot(), "body"), "targets")
         let n = doc.curLen(targets)
         var i: i64 = 0
@@ -453,7 +453,7 @@ fn completionsJson(raw: &string): string {
 // threads body → [{"id":..,"name":..}] for the threads panel.
 fn threadsJson(raw: &string): string {
     var arr = Json.arr()
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         let threads = doc.curField(doc.curField(doc.curRoot(), "body"), "threads")
         let n = doc.curLen(threads)
         var i: i64 = 0
@@ -470,7 +470,7 @@ fn threadsJson(raw: &string): string {
 // lldb-dap tags it presentationHint "registers"; debugpy has no such scope, so
 // a 0 here is what gates the UI's Registers panel (no register-cap flag in DAP).
 fn registersScopeRef(raw: &string): i64 {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         let scopes = doc.curField(doc.curField(doc.curRoot(), "body"), "scopes")
         let n = doc.curLen(scopes)
         var i: i64 = 0
@@ -494,7 +494,7 @@ fn registersScopeRef(raw: &string): i64 {
 // while its 21 series (and js-debug) leave that empty and put the real text in
 // body.error.format. Reading only one of them turns a refusal into a blank.
 fn respErrText(raw: &string): string {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         let m = doc.curStr(doc.curField(doc.curRoot(), "message")) ?? ""
         if m.len > 0 {
             return m
@@ -508,21 +508,21 @@ fn respErrText(raw: &string): string {
 }
 
 fn jStr(raw: &string, key: &string): string {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         return doc.str(key) ?? ""
     }
     return ""
 }
 
 fn jBool(raw: &string, key: &string, fallback: bool): bool {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         return doc.bool(key) ?? fallback
     }
     return fallback
 }
 
 fn jI64(raw: &string, key: &string, fallback: i64): i64 {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         return doc.i64(key) ?? fallback
     }
     return fallback
@@ -530,7 +530,7 @@ fn jI64(raw: &string, key: &string, fallback: i64): i64 {
 
 // `key`'s value as raw JSON if it's an object, else "" (run's inline config).
 fn jObjRaw(raw: &string, key: &string): string {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         if let Option.Some(v) = doc.get(key) {
             if v.isObject() {
                 return v.rawStr()
@@ -740,18 +740,18 @@ fn helloMsg(): string {
     // resolveConfig accepts back verbatim); program/adapterCmd ride alongside as
     // display conveniences (toolbar span, ⓘ adapter line).
     var b = Json.obj().str("type", "hello")
-        .str("program", binPath.clone())
-        .str("sourcePath", srcPath.clone())
-        .str("adapterCmd", adapterCmd.clone())
+        .str("program", binPath)
+        .str("sourcePath", srcPath)
+        .str("adapterCmd", adapterCmd)
         .str("adapterId", adapterId())
-        .str("sessionId", gSessionId.clone())
+        .str("sessionId", gSessionId)
         .raw("config", specConfigJson(curSpec(), true, 0 as i64))
     // late joiners need to know a session is live (kill-confirm on Run etc.);
     // a replayed stopped snapshot then refines running → stopped.
     if gStarted {
         b = b.str("phase", "running")
     }
-    b = b.raw("history", gHistory.clone())
+    b = b.raw("history", gHistory)
     if gRestored {
         b = b.bool("restored", true)
     }
@@ -761,10 +761,10 @@ fn helloMsg(): string {
 // full bp state for a late-joining peer (acks are optimistic client-side).
 fn bpSyncMsg(b: &Bp): string {
     return Json.obj().str("type", "bpSync")
-        .str("path", b.path.clone()).int("line", b.line)
-        .str("condition", b.condition.clone())
-        .str("hitCondition", b.hitCondition.clone())
-        .str("logMessage", b.logMessage.clone())
+        .str("path", b.path).int("line", b.line)
+        .str("condition", b.condition)
+        .str("hitCondition", b.hitCondition)
+        .str("logMessage", b.logMessage)
         .bool("enabled", b.enabled)
         .build()
 }
@@ -785,7 +785,7 @@ fn pushHelloState(bus: &Channel<string>, wakeWr: i32): void {
 }
 
 fn configErrMsg(err: &string): string {
-    return Json.obj().str("type", "configError").str("error", err.clone()).build()
+    return Json.obj().str("type", "configError").str("error", err).build()
 }
 
 fn sourceMsg(path: &string): string {
@@ -803,7 +803,7 @@ fn sourceMsg(path: &string): string {
         }
     }
     return Json.obj().str("type", "source")
-        .str("path", path.clone())
+        .str("path", path)
         .str("content", content)
         .build()
 }
@@ -819,10 +819,10 @@ fn terminatedMsg(): string {
 // was reloaded and picked the set up from the bpSync replay.
 fn bpAckMsg(b: &Bp, set: bool): string {
     return Json.obj().str("type", "breakpoint")
-        .str("path", b.path.clone()).int("line", b.line)
-        .str("condition", b.condition.clone())
-        .str("hitCondition", b.hitCondition.clone())
-        .str("logMessage", b.logMessage.clone())
+        .str("path", b.path).int("line", b.line)
+        .str("condition", b.condition)
+        .str("hitCondition", b.hitCondition)
+        .str("logMessage", b.logMessage)
         .bool("enabled", b.enabled)
         .bool("set", set).build()
 }
@@ -840,7 +840,7 @@ fn outputMsg(raw: &string): string {
 
 fn sendReqFd(fd: i32, seq: i64, command: &string, argsJson: &string): void {
     let payload = Json.obj().int("seq", seq).str("type", "request")
-        .str("command", command.clone()).raw("arguments", argsJson.clone()).build()
+        .str("command", command).raw("arguments", argsJson).build()
     // Deliberately unchecked, as before: R has no path to report a short write
     // to, and a failed write here surfaces as the adapter going quiet, which D
     // already handles.
@@ -854,19 +854,19 @@ fn buildBpArgsForPath(bps: &Vec<Bp>, path: &string): string {
         if bp.path == path && bp.enabled {
             var o = Json.obj().int("line", bp.line)
             if bp.condition.len > 0 {
-                o = o.str("condition", bp.condition.clone())
+                o = o.str("condition", bp.condition)
             }
             if bp.hitCondition.len > 0 {
-                o = o.str("hitCondition", bp.hitCondition.clone())
+                o = o.str("hitCondition", bp.hitCondition)
             }
             if bp.logMessage.len > 0 {
-                o = o.str("logMessage", bp.logMessage.clone())
+                o = o.str("logMessage", bp.logMessage)
             }
             arr = arr.obj(o)
         }
     }
     return Json.obj()
-        .obj("source", Json.obj().str("path", path.clone()))
+        .obj("source", Json.obj().str("path", path))
         .arr("breakpoints", arr)
         .build()
 }
@@ -952,7 +952,7 @@ fn applyConfig(raw: string, selectName: string): string {
 // composes. A {version, configurations:[...]} wrapper is a self-contained
 // launch.json file and passes through untouched.
 fn mergeCliDefaults(text: string, prog: &string, src: &string): string {
-    match Json.parseJsonc(text.clone()) {
+    match Json.parseJsonc(text) {
         Result.Ok(d) => {
             if !d.isObject() {
                 return text
@@ -973,17 +973,17 @@ fn mergeCliDefaults(text: string, prog: &string, src: &string): string {
                 }
                 match d.get(k) {
                     Option.Some(v) => {
-                        b = b.raw(k.clone(), v.rawStr())
+                        b = b.raw(k, v.rawStr())
                     }
                     Option.None => {
                     }
                 }
             }
             if !hasProg && prog.len > 0 {
-                b = b.str("program", prog.clone())
+                b = b.str("program", prog)
             }
             if !hasSrc && src.len > 0 {
-                b = b.str("source", src.clone())
+                b = b.str("source", src)
             }
             return b.build()
         }
@@ -1035,7 +1035,7 @@ fn loadHistory(): void {
     }
     gHistory = "[]"
     if let Result.Ok(s) = readFile(p) {
-        if let Result.Ok(d) = Json.parse(s.clone()) {
+        if let Result.Ok(d) = Json.parse(s) {
             if d.isArray() {
                 gHistory = s
             }
@@ -1054,10 +1054,10 @@ fn bpsJson(bps: &Vec<Bp>): string {
     var arr = Json.arr()
     for b in bps {
         arr = arr.raw(Json.obj()
-            .str("path", b.path.clone()).int("line", b.line)
-            .str("condition", b.condition.clone())
-            .str("hitCondition", b.hitCondition.clone())
-            .str("logMessage", b.logMessage.clone())
+            .str("path", b.path).int("line", b.line)
+            .str("condition", b.condition)
+            .str("hitCondition", b.hitCondition)
+            .str("logMessage", b.logMessage)
             .bool("enabled", b.enabled).build())
     }
     return arr.build()
@@ -1075,14 +1075,14 @@ fn persistBps(): void {
                 for k in doc.keys() {
                     if k != binPath {
                         if let Option.Some(v) = doc.get(k) {
-                            out = out.raw(k.clone(), v.rawStr())
+                            out = out.raw(k, v.rawStr())
                         }
                     }
                 }
             }
         }
     }
-    out = out.raw(binPath.clone(), bpsJson(gBps))
+    out = out.raw(binPath, bpsJson(gBps))
     ensureDir(histDir())
     let _r = writeFile(bpsFilePath(), out.build())
 }
@@ -1155,12 +1155,12 @@ fn recordConfig(): string {
 }
 
 fn historyChangedMsg(): string {
-    return Json.obj().str("type", "historyChanged").raw("history", gHistory.clone()).build()
+    return Json.obj().str("type", "historyChanged").raw("history", gHistory).build()
 }
 
 // history[0] as a re-appliable config object, or None if history is empty.
 fn firstHistoryConfig(): Option<string> {
-    if let Result.Ok(d) = Json.parse(gHistory.clone()) {
+    if let Result.Ok(d) = Json.parse(gHistory) {
         if d.isArray() && d.len() > 0 {
             if let Option.Some(el) = d.at(0 as i64) {
                 return Option.Some(el.rawStr())
@@ -1204,7 +1204,7 @@ fn removePending(pend: &Vec<Pending>, idx: i64): Vec<Pending> {
 fn handleRunInTerminal(cl: &mut DapClient, raw: &string, reqSeq: i64, ch: &Channel<string>, wakeWr: i32): i32 {
     var argv: Vec<string> = []
     var envs: Vec<string> = []
-    match Json.parse(raw.clone()) {
+    match Json.parse(raw) {
         Result.Ok(doc) => {
             match doc.get("arguments") {
                 Option.Some(a) => {
@@ -1469,7 +1469,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 initOk = true
                 // Forward the adapter's capabilities verbatim; the UI digs out
                 // .body and gates features on it.
-                gCapsMsg = Json.obj().str("type", "capabilities").str("raw", msg.raw.clone()).build()
+                gCapsMsg = Json.obj().str("type", "capabilities").str("raw", msg.raw).build()
                 wsPush(ch, wakeWr, gCapsMsg.clone())
                 // a js-debug child session launches with the configuration the
                 // startDebugging request handed us, not our built launch args;
@@ -1558,10 +1558,10 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                     scopeRef = pextra.clone()
                 }
                 gStopMsg = Json.obj().str("type", "stopped")
-                    .int("line", stopLine).str("path", lastSrc.clone()).int("tid", tid)
+                    .int("line", stopLine).str("path", lastSrc).int("tid", tid)
                     .raw("scopeRef", scopeRef)
                     .int("registersRef", regRef)
-                    .raw("frames", framesJs.clone())
+                    .raw("frames", framesJs)
                     .raw("locals", localsJson(msg.raw)).build()
                 wsPush(ch, wakeWr, gStopMsg.clone())
             } else if kind == "regions" {
@@ -1660,7 +1660,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 // One setBreakpoints per file with bps; configurationDone
                 // is deferred until the last sbInit + ebInit round-trips.
                 sbLeft = 0
-                match Json.parse(bpArgs.clone()) {
+                match Json.parse(bpArgs) {
                     Result.Ok(doc) => {
                         let n = doc.len()
                         var i: i64 = 0
@@ -1757,7 +1757,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 cl.respond(msg.seq, "startDebugging", "{}")
                 var childCfg: string = ""
                 var childReq: string = "launch"
-                if let Result.Ok(doc) = Json.parse(msg.raw.clone()) {
+                if let Result.Ok(doc) = Json.parse(msg.raw) {
                     match doc.get("arguments") {
                         Option.Some(args) => {
                             childReq = args.str("request") ?? "launch"
@@ -2163,7 +2163,7 @@ fn cmdPath(c: &string, doc: &Json): string {
 fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): bool {
     // Parse the payload ONCE; every field read below is a cursor hop on this
     // doc. The old per-field jStr/jI64 helpers re-parsed the message each call.
-    let Result.Ok(doc) = Json.parse(payload.clone()) else {
+    let Result.Ok(doc) = Json.parse(payload) else {
         journalCmd("", peerKind, peerLabel, false, "not a dapweb command", payload, "")
         return false
     }
@@ -2181,7 +2181,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         let what = activityText(c, doc)
         logEvent("agent", $"{who} is attempting to {what}")
         wsPush(bus, busWakeWr, Json.obj().str("type", "activity")
-            .str("peer", peerKind.clone()).str("who", who.clone()).str("cmd", c.clone())
+            .str("peer", peerKind).str("who", who).str("cmd", c)
             .str("text", $"{who} is attempting to {what}").build())
     }
     if c == "setBreakpoint" || c == "clearBreakpoint" {
@@ -2703,22 +2703,22 @@ fn apiStateJson(): string {
     }
     var bps = Json.arr()
     for bp in gBps {
-        bps = bps.raw(Json.obj().str("path", bp.path.clone()).int("line", bp.line)
-            .str("condition", bp.condition.clone()).bool("enabled", bp.enabled).build())
+        bps = bps.raw(Json.obj().str("path", bp.path).int("line", bp.line)
+            .str("condition", bp.condition).bool("enabled", bp.enabled).build())
     }
     var b = Json.obj().str("type", "state")
-        .str("sessionId", gSessionId.clone())
+        .str("sessionId", gSessionId)
         .str("phase", phase)
-        .str("program", binPath.clone())
-        .str("sourcePath", srcPath.clone())
+        .str("program", binPath)
+        .str("sourcePath", srcPath)
         .str("adapter", adapterId())
         .int("peers", gPeers)
         .arr("breakpoints", bps)
     if gStopMsg.len > 0 {
-        b = b.raw("stopped", gStopMsg.clone())
+        b = b.raw("stopped", gStopMsg)
     }
     if gThreadsMsg.len > 0 {
-        b = b.raw("threads", gThreadsMsg.clone())
+        b = b.raw("threads", gThreadsMsg)
     }
     return b.build()
 }
@@ -2904,7 +2904,7 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, busWakeWr:
     // replay buffered terminal history. Flagged so a same-session reconnect
     // (which kept its scrollback) can drop it; a fresh/new-session tab renders it.
     for outLine in gOutputLog {
-        wsPush(ch, wakeWr, Json.obj().str("type", "output").str("text", outLine.text.clone()).str("category", outLine.category.clone()).bool("replay", true).build())
+        wsPush(ch, wakeWr, Json.obj().str("type", "output").str("text", outLine.text).str("category", outLine.category).bool("replay", true).build())
     }
 
     while true {
@@ -3530,7 +3530,7 @@ pub fn webMain(argv: Vec<string>): i32 {
                 }
             }
         }
-        match Json.parseJsonc(launchText.clone()) {
+        match Json.parseJsonc(launchText) {
             Result.Ok(doc) => {
                 if !doc.isObject() {
                     eprint("error: --launch must be a JSON object\n")
@@ -3595,9 +3595,9 @@ pub fn webMain(argv: Vec<string>): i32 {
         // program names its own dialect — route through the config path so the
         // right adapter is probed. Best-effort like the history restore: a probe
         // miss leaves the session idle and the run command reports it.
-        var b = Json.obj().str("program", binPath.clone())
+        var b = Json.obj().str("program", binPath)
         if srcPath.len > 0 {
-            b = b.str("source", srcPath.clone())
+            b = b.str("source", srcPath)
         }
         let err = applyConfig(b.build(), "")
         if err.len > 0 {

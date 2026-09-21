@@ -122,7 +122,7 @@ fn postCmd(port: i64, body: string, awaitType: string, timeoutMs: i64, pretty: b
             // and so is a refusal: a rejected command that exits 0 is the same
             // trap as the {"ok":true} this reply replaced — the caller reads
             // success and carries on as though the session moved.
-            if let Result.Ok(doc) = Json.parse(reply.clone()) {
+            if let Result.Ok(doc) = Json.parse(reply) {
                 if (doc.str("error") ?? "") == "timeout" {
                     return 2
                 }
@@ -340,7 +340,7 @@ pub fn apiMain(argv: Vec<string>): i32 {
             return 1
         }
         let fid = currentFrameId(port)
-        var b = Json.obj().str("cmd", "evaluate").str("expr", pos[1].clone()).str("context", "repl")
+        var b = Json.obj().str("cmd", "evaluate").str("expr", pos[1]).str("context", "repl")
         if fid >= 0 {
             b = b.int("frameId", fid)
         }
