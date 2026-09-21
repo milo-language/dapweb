@@ -1362,6 +1362,11 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
     var bpArgs: string = "[]" // per-file bundle from buildAllBpArgs
     var sbLeft: i64 = 0 // sbInit responses still outstanding
     var initOk = false // adapter answered `initialize` (handshake reached)
+    // Session end is announced AFTER the globals below are re-armed, never from
+    // inside the loop: a peer treats `terminated` as "you may run again", and
+    // reapDebuggee alone can hold gStarted true for 500ms after the push, so an
+    // immediate `run` was refused as "already active" (every e2e kill-then-run).
+    var announceEnd = false
 
     while true {
         var msg = DapMsg {
@@ -1383,7 +1388,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                     }
                     wsPush(ch, wakeWr, configErrMsg(em))
                 }
-                wsPush(ch, wakeWr, terminatedMsg())
+                announceEnd = true
                 break
             }
         }
@@ -1462,7 +1467,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                     wsPush(ch, wakeWr, Json.obj().str("type", "restartFailed").build())
                 } else if kind == "initialize" || kind == "launch" || kind == "childLaunch" || kind == "sbInit" {
                     eprint($"[srv] {msg.command} failed: {msg.raw}\n")
-                    wsPush(ch, wakeWr, terminatedMsg())
+                    announceEnd = true
                     break
                 }
             } else if kind == "initialize" {
@@ -1735,7 +1740,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 }
                 )
             } else if msg.event == "terminated" {
-                wsPush(ch, wakeWr, terminatedMsg())
+                announceEnd = true
                 break
             }
             // "exited" alone is NOT session end: a native restart kills
@@ -1804,7 +1809,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                         }
                         Result.Err(e) => {
                             eprint($"[srv] child session connect failed: {e}\n")
-                            wsPush(ch, wakeWr, terminatedMsg())
+                            announceEnd = true
                             break
                         }
                     }
@@ -1851,6 +1856,9 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 break
             }
         }
+    }
+    if announceEnd {
+        wsPush(ch, wakeWr, terminatedMsg())
     }
     // A forced run killed the old debuggee; auto-rerun here with its config
     // (a new config can't ride a live adapter — it caches launch args).
