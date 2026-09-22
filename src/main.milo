@@ -115,7 +115,7 @@ fn main(): i32 {
             var arr = Json.arr()
             var j: i64 = 1
             while j < pos.len {
-                arr = arr.str(pos[j].clone())
+                arr = arr.str(pos[j])
                 j = j + 1
             }
             webArgv.push("--launch")

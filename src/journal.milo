@@ -624,7 +624,7 @@ pub fn journalBreakpoints(program: &string, limit: i64): Vec<string> {
 // names: milo merges same-named functions across modules into one symbol.
 
 fn jrnStr(raw: &string, key: &string): string {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         return doc.str(key) ?? ""
     }
     return ""
@@ -632,7 +632,7 @@ fn jrnStr(raw: &string, key: &string): string {
 
 // -1 for absent, so a real 0 (line 0, thread 0) is not mistaken for missing.
 fn jrnI64(raw: &string, key: &string): i64 {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         return doc.i64(key) ?? (0 - 1)
     }
     return 0 - 1

@@ -707,7 +707,7 @@ fn inspectPe(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64): vo
 // or unrecognised reports format "unknown" plus a note.
 pub fn binInfoJson(path: &string): string {
     if path.len == 0 || !pathExists(path) {
-        return Json.obj().str("path", path.clone()).bool("exists", false).build()
+        return Json.obj().str("path", path).bool("exists", false).build()
     }
 
     var info = newBinInfo()
@@ -761,21 +761,21 @@ pub fn binInfoJson(path: &string): string {
 
     var notes = Json.arr()
     for n in info.notes {
-        notes = notes.str(n.clone())
+        notes = notes.str(n)
     }
     return Json.obj()
-        .str("path", path.clone())
+        .str("path", path)
         .bool("exists", true)
         .int("size", size)
-        .str("format", info.format.clone())
-        .str("class", info.cls.clone())
-        .str("endian", info.endian.clone())
-        .str("arch", info.arch.clone())
-        .str("fileType", info.fileType.clone())
-        .str("debugInfo", info.debugInfo.clone())
+        .str("format", info.format)
+        .str("class", info.cls)
+        .str("endian", info.endian)
+        .str("arch", info.arch)
+        .str("fileType", info.fileType)
+        .str("debugInfo", info.debugInfo)
         .bool("hasDebugInfo", info.hasDebugInfo)
         .bool("stripped", info.stripped)
-        .str("dsym", info.dsym.clone())
+        .str("dsym", info.dsym)
         .arr("notes", notes)
         .build()
 }

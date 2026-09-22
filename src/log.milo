@@ -47,21 +47,21 @@ fn logParser(): ArgParser {
 }
 
 fn jstr(raw: &string, key: &string): string {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         return doc.str(key) ?? ""
     }
     return ""
 }
 
 fn jint(raw: &string, key: &string, fallback: i64): i64 {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         return doc.i64(key) ?? fallback
     }
     return fallback
 }
 
 fn jhas(raw: &string, key: &string): bool {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         if let Option.Some(_v) = doc.get(key) {
             return true
         }

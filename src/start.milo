@@ -97,7 +97,7 @@ fn forwardedArgs(argv: &Vec<string>): Vec<string> {
 }
 
 fn fail(msg: &string): i32 {
-    print(Json.obj().bool("ok", false).str("error", msg.clone()).build())
+    print(Json.obj().bool("ok", false).str("error", msg).build())
     return 1
 }
 
@@ -146,11 +146,11 @@ pub fn startMain(argv: Vec<string>): i32 {
         Option.Some(row) => {
             print(Json.obj()
                 .bool("ok", true)
-                .str("sessionId", row.id.clone())
+                .str("sessionId", row.id)
                 .int("port", row.port)
                 .str("url", $"http://localhost:{row.port}")
                 .int("pid", row.pid)
-                .str("program", row.program.clone())
+                .str("program", row.program)
                 .build())
             return 0
         }

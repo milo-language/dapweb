@@ -36,21 +36,21 @@ fn jsonEsc(s: &string): string {
 }
 
 pub fn bodyI64(raw: &string, key: &string, fallback: i64): i64 {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         return doc.curInt(doc.curField(doc.curField(doc.curRoot(), "body"), key)) ?? fallback
     }
     return fallback
 }
 
 pub fn bodyStr(raw: &string, key: &string): string {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         return doc.curStr(doc.curField(doc.curField(doc.curRoot(), "body"), key)) ?? ""
     }
     return ""
 }
 
 pub fn frame0Field(raw: &string, key: &string): i64 {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         let f0 = doc.curChild(doc.curField(doc.curField(doc.curRoot(), "body"), "stackFrames"), 0 as i64)
         return doc.curInt(doc.curField(f0, key)) ?? (0 as i64)
     }
@@ -59,14 +59,14 @@ pub fn frame0Field(raw: &string, key: &string): i64 {
 
 // stackTrace body → frame 0's source.path.
 pub fn frame0Path(raw: &string): string {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         return doc.curStr(doc.curPath("body.stackFrames[0].source.path")) ?? ""
     }
     return ""
 }
 
 pub fn scopes0Ref(raw: &string): i64 {
-    if let Result.Ok(doc) = Json.parse(raw.clone()) {
+    if let Result.Ok(doc) = Json.parse(raw) {
         let s0 = doc.curChild(doc.curField(doc.curField(doc.curRoot(), "body"), "scopes"), 0 as i64)
         return doc.curInt(doc.curField(s0, "variablesReference")) ?? (0 as i64)
     }

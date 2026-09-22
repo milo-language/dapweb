@@ -497,7 +497,7 @@ fn cfgHas(cfg: &Json, k: &string): bool {
 pub fn resolveConfig(raw: string, selectName: string): Result<LaunchSpec> {
     // JSONC, not strict JSON: launch.json files are commented in the wild (VS
     // Code's own dialect), and the drawer templates ship commented-out options.
-    match Json.parseJsonc(raw.clone()) {
+    match Json.parseJsonc(raw) {
         Result.Ok(doc) => {
             return resolveConfigDoc(doc, selectName)
         }
@@ -618,7 +618,7 @@ fn resolveConfigDoc(doc: Json, selectName: string): Result<LaunchSpec> {
         if !isMetaKey(k) {
             match cfg.get(k) {
                 Option.Some(v) => {
-                    b = b.raw(k.clone(), v.rawStr())
+                    b = b.raw(k, v.rawStr())
                 }
                 Option.None => {
                 }
@@ -702,7 +702,7 @@ fn launchExtraDoc(raw: &string): Option<Json> {
     if raw.len == 0 {
         return Option.None
     }
-    let Result.Ok(doc) = Json.parse(raw.clone()) else {
+    let Result.Ok(doc) = Json.parse(raw) else {
         return Option.None
     }
     if doc.isObject() {
@@ -742,7 +742,7 @@ pub fn launchArgsFor(spec: &LaunchSpec, stopMain: bool): string {
     // attach targets a pid, not a program — never inject binPath into an attach
     // body (it's usually "" for attach anyway, and confuses strict adapters).
     if spec.request != "attach" && !extraHas(extra, "program") {
-        b = b.str("program", spec.binPath.clone())
+        b = b.str("program", spec.binPath)
     }
     if spec.adapterKind == "python" {
         if !extraHas(extra, "console") {
@@ -802,10 +802,10 @@ pub fn launchArgsFor(spec: &LaunchSpec, stopMain: bool): string {
                 wd = spec.binPath.clone() // a package path IS its own directory
             }
             if !extraHas(extra, "cwd") {
-                b = b.str("cwd", wd.clone())
+                b = b.str("cwd", wd)
             }
             if !extraHas(extra, "dlvCwd") {
-                b = b.str("dlvCwd", wd.clone())
+                b = b.str("dlvCwd", wd)
             }
         }
         if stopMain && !extraHas(extra, "stopOnEntry") {
@@ -833,7 +833,7 @@ pub fn launchArgsFor(spec: &LaunchSpec, stopMain: bool): string {
                 if k != "request" {
                     match d.get(k) {
                         Option.Some(v) => {
-                            b = b.raw(k.clone(), v.rawStr())
+                            b = b.raw(k, v.rawStr())
                         }
                         Option.None => {
                         }
@@ -859,18 +859,18 @@ pub fn launchArgsFor(spec: &LaunchSpec, stopMain: bool): string {
 // history run stamp. request/host/port are always kept so an attach or TCP
 // session round-trips as the same thing (else it becomes a broken stdio launch).
 pub fn specConfigJson(spec: &LaunchSpec, includeDapPath: bool, lastRunAt: i64): string {
-    var b = Json.obj().str("type", spec.adapterKind.clone())
+    var b = Json.obj().str("type", spec.adapterKind)
     if spec.name.len > 0 {
-        b = b.str("name", spec.name.clone())
+        b = b.str("name", spec.name)
     }
     if spec.binPath.len > 0 {
-        b = b.str("program", spec.binPath.clone())
+        b = b.str("program", spec.binPath)
     }
     if spec.srcPath.len > 0 {
-        b = b.str("source", spec.srcPath.clone())
+        b = b.str("source", spec.srcPath)
     }
     if includeDapPath && spec.dapPath.len > 0 {
-        b = b.str("dapPath", spec.dapPath.clone())
+        b = b.str("dapPath", spec.dapPath)
     }
     if spec.request == "attach" {
         b = b.str("request", "attach")
@@ -878,7 +878,7 @@ pub fn specConfigJson(spec: &LaunchSpec, includeDapPath: bool, lastRunAt: i64): 
     if spec.port > 0 {
         b = b.int("port", spec.port)
         if spec.host.len > 0 {
-            b = b.str("host", spec.host.clone())
+            b = b.str("host", spec.host)
         }
     }
     if spec.stopAtMain {
@@ -890,7 +890,7 @@ pub fn specConfigJson(spec: &LaunchSpec, includeDapPath: bool, lastRunAt: i64): 
             for k in ks {
                 match d.get(k) {
                     Option.Some(v) => {
-                        b = b.raw(k.clone(), v.rawStr())
+                        b = b.raw(k, v.rawStr())
                     }
                     Option.None => {
                     }
@@ -916,7 +916,7 @@ pub fn histEntryFor(spec: &LaunchSpec, lastRunAt: i64): string {
 // re-insert would erase the real "last run" of something that HAS run.
 pub fn histLastRunAt(histJson: &string, item: &string): i64 {
     let key = histIdentity(item)
-    match Json.parse(histJson.clone()) {
+    match Json.parse(histJson) {
         Result.Ok(d) => {
             if d.isArray() {
                 let n = d.len()
@@ -951,7 +951,7 @@ pub fn histLastRunAt(histJson: &string, item: &string): i64 {
 // (type, "", []) every attach ever configured is the same entry, so history could
 // hold exactly one of them and each new pid silently erased the last.
 fn histIdentity(item: &string): string {
-    match Json.parse(item.clone()) {
+    match Json.parse(item) {
         Result.Ok(d) => {
             let typ = d.str("type") ?? ""
             let prog = d.str("program") ?? ""
@@ -991,9 +991,9 @@ fn histIdentity(item: &string): string {
 // same identity, capped at `cap` (newest first). Returns the new array JSON.
 pub fn histInsert(histJson: &string, item: &string, cap: i64): string {
     let key = histIdentity(item)
-    var arr = Json.arr().raw(item.clone())
+    var arr = Json.arr().raw(item)
     var count: i64 = 1
-    match Json.parse(histJson.clone()) {
+    match Json.parse(histJson) {
         Result.Ok(d) => {
             if d.isArray() {
                 let n = d.len()
@@ -1025,7 +1025,7 @@ pub fn histInsert(histJson: &string, item: &string, cap: i64): string {
 // front, then the whole thing is de-duped/capped by histInsert.
 pub fn histMergeMany(histJson: &string, entriesJson: &string, cap: i64): string {
     var out = histJson.clone()
-    match Json.parse(entriesJson.clone()) {
+    match Json.parse(entriesJson) {
         Result.Ok(d) => {
             if d.isArray() {
                 let n = d.len()
