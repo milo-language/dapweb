@@ -219,7 +219,7 @@ Each event is recorded to `$XDG_STATE_HOME/dapweb/journal.db`, which can be quer
 ./dapweb log --breakpoints              # per line: sessions set vs sessions hit
 ```
 
-Note: Unauthenticated, and `eval` reaches the debugger — an exposed port is remote code execution. Keep it on localhost.
+Note: there is no authentication, and `eval` reaches the debugger. dapweb listens on loopback only and refuses requests whose Host is not loopback or whose Origin is another site, so neither the network nor a web page can drive it. Anyone with a shell on this machine still can.
 
 ## Develop
 

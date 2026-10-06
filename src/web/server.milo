@@ -59,7 +59,7 @@ from "../commands" import {
 }
 from "../sessions" import {
     stateDir, writeSession, removeSession, sessionsJson, newSessionName,
-    freePortFrom, spawnSessionOn
+    freePortFrom, spawnSessionOn, listenLocal
 }
 from "./binfo" import {
     binInfoJson
@@ -591,7 +591,10 @@ fn wsPush(ch: &Channel<string>, wakeWr: i32, msg: string): void {
     }
 }
 
-// W: sole socket writer. Parks on the wake pipe, drains the channel.
+// W: sole socket writer. Parks on the wake pipe, drains the channel. R joins
+// this task before releasing the socket fd: otherwise a frame still queued
+// here lands on a closed fd (milo exits on EBADF) or on whatever connection
+// reused that fd number.
 fn wsWriterLoop(fd: i32, ch: Channel<string>, wakeRd: i32): void {
     // Borrowed view of the conn: its Drop skips teardown (R owns the real one).
     var conn = WsConn.view(fd, 0, false)
@@ -2872,7 +2875,7 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, busWakeWr:
     // Channel handles are refcounted and @send: the writer task outlives this
     // frame, so it gets its own retained handle (as does the registry's Sink).
     let writerCh = ch.clone()
-    Task.spawn(move(): void => {
+    let writer = Task.spawn(move(): void => {
         wsWriterLoop(wfd, writerCh, wakeRd)
     }
     )
@@ -2931,8 +2934,10 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, busWakeWr:
         }
     }
 
-    // Leave the shared session; sinkUnregister closes our wake fd.
+    // Leave the shared session; sinkUnregister closes our wake fd, which EOFs
+    // the writer. Wait for it to exit before `conn` drops and closes the socket.
     sinkUnregister(clientId)
+    writer.join()
     unsafe {
         let _w2 = write(busWakeWr, one as *u8, 1)
     }
@@ -2992,8 +2997,12 @@ fn reaperLoop(tickRd: i32, pendCh: Channel<Pending>): void {
 
 fn sendHttp(fd: i32, status: i32, contentType: &string, body: &string): void {
     var statusText: string = "200 OK"
-    if status == 404 {
+    if status == 403 {
+        statusText = "403 Forbidden"
+    } else if status == 404 {
         statusText = "404 Not Found"
+    } else if status == 405 {
+        statusText = "405 Method Not Allowed"
     }
     var resp: string = "HTTP/1.1 " + statusText + "\r\n"
     resp = resp + "Content-Type: " + contentType + "\r\n"
@@ -3237,6 +3246,43 @@ fn parseRequestLine(raw: &string): RequestLine {
     }
 }
 
+// Whether a Host header names this machine's loopback, port ignored. A
+// DNS-rebinding page reaches us under ITS hostname with a matching Origin, so
+// the Origin check alone does not keep it out; this does.
+fn hostIsLoopback(host: &string): bool {
+    var name = host.clone()
+    if name.startsWith("[") {
+        let close = name.indexOf("]") ?? (-1 as i64)
+        if close < 0 {
+            return false
+        }
+        name = name.substr(0, close + 1)
+    } else {
+        let colon = name.indexOf(":") ?? (-1 as i64)
+        if colon >= 0 {
+            name = name.substr(0, colon)
+        }
+    }
+    return name == "localhost" || name == "127.0.0.1" || name == "[::1]"
+}
+
+// The gate in front of every route. `evaluate` reaches the debugger, so a
+// request any web page could make is a shell for that page:
+//   * Host must be loopback (DNS rebinding, see hostIsLoopback).
+//   * Origin, when present, must be this server's own. Browsers send it on
+//     every cross-site POST and WebSocket upgrade, including the `text/plain`
+//     POSTs that skip CORS preflight. Absent means a non-browser client
+//     (`dapweb api`, curl), which the loopback bind already confines to this
+//     machine.
+fn requestAllowed(raw: &string): bool {
+    let host = headerVal(raw, "host")
+    if !hostIsLoopback(host) {
+        return false
+    }
+    let origin = headerVal(raw, "origin")
+    return origin.len == 0 || origin == "http://" + host
+}
+
 fn handleConnection(fd: i32, bus: Channel<string>, busWakeWr: i32, pendCh: Channel<Pending>): void {
     var buf: [u8; 8192] = [0; 8192]
     unsafe {
@@ -3252,6 +3298,11 @@ fn handleConnection(fd: i32, bus: Channel<string>, busWakeWr: i32, pendCh: Chann
         }
 
         let rl = parseRequestLine(raw)
+        if !requestAllowed(raw) {
+            sendHttp(fd, 403, "text/plain", "forbidden: dapweb only answers localhost, same-origin")
+            close(fd)
+            return
+        }
         if isWsUpgrade(raw) {
             // Peer kind rides the upgrade path's query string: browsers
             // hit /ws bare, other clients pass ?client=<kind> — known
@@ -3421,16 +3472,8 @@ fn handleConnection(fd: i32, bus: Channel<string>, busWakeWr: i32, pendCh: Chann
         }
 
         if rl.method == "GET" {
-            var host = headerVal(raw, "host")
-            if host.len == 0 {
-                host = "localhost"
-            }
-            // Tunnels (cloudflared/ngrok) terminate TLS and set this.
-            var proto = headerVal(raw, "x-forwarded-proto")
-            if proto.len == 0 {
-                proto = "http"
-            }
-            serveStatic(fd, rl.path, proto + "://" + host)
+            // requestAllowed has already pinned Host to a loopback name.
+            serveStatic(fd, rl.path, "http://" + headerVal(raw, "host"))
         } else {
             sendHttp(fd, 404, "text/plain", "not found")
         }
@@ -3682,7 +3725,7 @@ pub fn webMain(argv: Vec<string>): i32 {
         )
     }
 
-    match TcpListener.bind(port as u16) {
+    match listenLocal(port) {
         Result.Ok(listener) => {
             var l = listener
             print($"dapweb web UI → http://localhost:{port}")

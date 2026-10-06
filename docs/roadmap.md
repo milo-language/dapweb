@@ -42,7 +42,18 @@ Remove:
 - R2 `.claude/skills/speckit-*` + `.specify/` + `specs/` if unused.
 - R3 duplicate committed images (`docs/shots` jpg + `docs/images` png).
 
-## Phase 0: security (S1)
+## Phase 0: security (S1), done
+
+Shipped: loopback-only listener (`listenLocal`, milo `TcpListener.bindAddr`), Host must be
+loopback, Origin when present must be own origin, `tests/e2e-security.ts`, each check
+mutation-tested. Also fixed a WS fd use-after-close found by the suite: a peer that drops
+while its writer still has frames queued killed the server or wrote into a reused fd; R now
+joins W before releasing the socket.
+
+Deferred: per-session token. With tunnels dropped it only guards against other local users
+on a shared machine; revisit if that matters.
+
+Original plan:
 
 - Reject `/api` + WS upgrade unless `Origin` absent (CLI) or equals own origin.
 - Reject `Host` not `localhost` / `127.0.0.1` / `[::1]` (blocks DNS rebinding).
@@ -52,6 +63,22 @@ Remove:
 - Test: new `tests/e2e-security.ts`: cross-origin POST, bad Host, missing/wrong token
   all rejected; CLI + browser paths still work. Confirm each check fails when its code is
   removed.
+
+## Phase 1.5: zero `unsafe` in dapweb (new)
+
+25 `unsafe` blocks in `src/` (24 in server.milo), nearly all one pattern: self-pipes to wake
+green tasks, plus a `usleep` ticker thread. Root cause was Channel not parking green tasks;
+std `Channel.recv` parks now.
+- Replace wake pipes with `Channel.recv`; replace ticker with a green timer (add to std if
+  missing); anything else raw (pty, fd IO) gets a safe std wrapper.
+- Gate: `scripts/test.sh` fails if `unsafe` appears under `src/`.
+
+Milo upstream items found on the way:
+- `readFd`/`sendFd`/`recvFd` `exit(1)` when fcntl fails, including EBADF on POSIX. Should
+  return -1; exiting turns a caller's fd bug into a crash with a misleading message.
+- Scoped tasks (structured concurrency): a task spawned in a scope joins before scope exit,
+  so it can borrow (`&conn`) instead of laundering an fd through `i32`. Makes the WS
+  use-after-close unrepresentable rather than fixed.
 
 ## Phase 1: UI quick wins (U1-U10, S8)
 
@@ -71,6 +98,14 @@ Independent, small, one commit each. Order: U3, U1, U2, U7, U4, U6, U5, U10, U9,
   tab gets == state a tab that watched live holds (stopped, threads, regions, caps, bps).
 - Number: `server.milo` lines (3730 → target < 800, rest in modules).
 
+Canonical-Milo cleanup folded into this phase:
+- Remove pre-builder JSON helpers (`jStr`/`dStr`/`jObjRaw`, `var Q = "\""`), string-concat
+  arrays (`/api/log`).
+- One query-string parser (handleConnection has two copy-pasted loops).
+- Index `while` loops → `for` / `join` where idiomatic.
+- Survey milo std for no-copy idioms (span/freeze/seal, arena) before designing `Session`.
+- Replace hand-rolled HTTP with std/http once it supports WS upgrade.
+
 ## Phase 3: UI state + split (S6)
 
 - One reducer over the server event stream; its state shape mirrors `snapshot()`.
@@ -87,6 +122,13 @@ Independent, small, one commit each. Order: U3, U1, U2, U7, U4, U6, U5, U10, U9,
 
 Order: F1 inline values → F2 goto → F4 follow agent → F3 timeline → F5 data bps.
 Each one gets an e2e test driven through `dapweb api` plus a browser assertion.
+
+## Phase 5.5: landing page (new)
+
+Inspiration: messenger.com. Huge bold headline in the accent colour, lots of whitespace,
+copy + install one-liner on the left, overlapping tilted screenshots on the right (browser
+UI over a terminal running `dapweb api`: the "one session, two peers" story), animated mark
+in place of the mascot.
 
 ## Phase 6: cleanup (S5, R1-R3)
 

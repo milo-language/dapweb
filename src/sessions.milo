@@ -16,7 +16,7 @@ from "std/os" import {
     kill, usleep
 }
 from "std/net" import {
-    TcpListener
+    TcpListener, NetError, ip4
 }
 from "std/process" import {
     Command, exePath
@@ -296,7 +296,7 @@ pub fn newSessionName(uuids: Vec<string>): string {
 pub fn freePortFrom(base: i64): i64 {
     var p = base
     while p < base + 200 {
-        match TcpListener.bind(p as u16) {
+        match listenLocal(p) {
             Result.Ok(_l) => {
                 return p
             }
@@ -306,6 +306,14 @@ pub fn freePortFrom(base: i64): i64 {
         p = p + 1
     }
     return 0
+}
+
+// The one way dapweb listens: loopback only. A dapweb port forwards `evaluate`
+// to the debugger, so binding every interface would hand the LAN a shell.
+// freePortFrom probes with this too, so the probe and the real bind agree on
+// which address a port is free on.
+pub fn listenLocal(port: i64): Result<TcpListener, NetError> {
+    return TcpListener.bindAddr(ip4(127, 0, 0, 1), port as u16)
 }
 
 // Spawn a detached `dapweb web` on `port` with `extra` appended verbatim.
