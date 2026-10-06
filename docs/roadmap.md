@@ -153,7 +153,11 @@ Canonical-Milo cleanup folded into this phase:
 - Survey milo std for no-copy idioms (span/freeze/seal, arena) before designing `Session`.
 - Replace hand-rolled HTTP with std/http once it supports WS upgrade.
 
-## Phase 3: UI state + split (S6)
+## Phase 3: UI state + split (S6), done
+
+Shipped: `sessionReducer` (pure, unit-tested) mirrors `snapshot()`; App.tsx 2690 → 742
+lines across 20 component files; Registers reset on exit; "paused at main" via a server
+`atMain` flag; terminal theme reads tokens.
 
 - One reducer over the server event stream; its state shape mirrors `snapshot()`.
   Reset per-stop state on terminate: Registers still shows the last stop after exit.
@@ -162,7 +166,11 @@ Canonical-Milo cleanup folded into this phase:
 - Extract `MemView`, `RegistersPanel`, `StackView`, `DebugConsole`, `VarList` into files.
 - Test: all suites green; `App.tsx` lines (2557 → target < 800).
 
-## Phase 4: multi-client groundwork (S7)
+## Phase 4: multi-client groundwork (S7), deferred
+
+Single-child js-debug already works (parent drained, child is the debug client). A
+`Vec<DapClient>` only matters for several concurrent child sessions (workers,
+subprocesses); build it when an adapter needs it.
 
 - `Session` holds `Vec<DapClient>`; events tagged with child session id.
 - Unblocks M10 (js-debug `startDebugging`). Do the design before Phase 2 step 4 locks file
