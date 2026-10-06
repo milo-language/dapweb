@@ -30,6 +30,11 @@ run() {
     echo "  (took $(($(date +%s) - start))s)"
 }
 
+# Held to the extern-call rule as an error: application code reaches C only through
+# std's safe wrappers and owning types (OwnedFd, TcpStream, Child), never a raw extern.
+# A raw close() is how a task wrote to a socket its owner had already closed.
+DENY="--deny=extern-call"
+
 what="${1:-all}"
 # UI FIRST. The binary embeds src/web/ui/dist via @embedFile, which is resolved at
 # compile time, so building the binary against a missing (or stale) bundle either
@@ -38,6 +43,6 @@ case "$what" in
     all|release|ui)  run src/web/ui/build.sh ;;
 esac
 case "$what" in
-    all|bin)  run $MILO_RUN build src/main.milo --debug -o dapweb ;;
-    release)  run $MILO_RUN build src/main.milo -o dapweb ;;
+    all|bin)  run $MILO_RUN build src/main.milo $DENY --debug -o dapweb ;;
+    release)  run $MILO_RUN build src/main.milo $DENY -o dapweb ;;
 esac
