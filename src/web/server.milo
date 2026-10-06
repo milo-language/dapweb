@@ -175,8 +175,7 @@ var gPendingRun: bool = false
 // All assigned in main() before any request is served (module init NYI).
 var gStarted: bool = false
 var gDapIn: i32 = -1
-var gPtyFd: i32 = -1
-// The live debuggee pty, for resize. The browser sizes its terminal on mount,
+// The live debuggee pty, for stdin and resize. The browser sizes its terminal on mount,
 // before any pty exists, so the last size asked for is kept and applied at spawn.
 var gPty: Option<Pty> = Option.None
 var gTermRows: i64 = 0
@@ -668,9 +667,14 @@ fn ptyPumpLoop(master: i32, ch: Channel<string>): void {
     for chunk in fdChannel(master) {
         wsPush(ch, Json.obj().str("type", "ptyData").str("data", chunk).build())
     }
-    unsafe {
-        close(master)
+    // The stdin command writes through gPty. Forget it before the close, or a
+    // keystroke after the debuggee exits lands on whatever reuses this number.
+    if let Option.Some(p) = replace(gPty, Option.None) {
+        if p.fd() != master {
+            gPty = Option.Some(p)
+        }
     }
+    close(master)
 }
 
 // Drain the adapter's stderr so the pipe never fills (mergeStderr=false) and
@@ -1250,14 +1254,11 @@ fn handleRunInTerminal(cl: &mut DapClient, raw: &string, reqSeq: i64, ch: &Chann
                     let master = pty.masterFd
                     // direct global set (same scheduler thread) — and flush
                     // any keystrokes typed while the adapter was launching.
-                    gPtyFd = master
-                    gPty = Option.Some(pty)
                     if gStdinBuf.len > 0 {
-                        unsafe {
-                            let _n = write(master, gStdinBuf, gStdinBuf.len)
-                        }
+                        let _n = pty.writeOnce(gStdinBuf)
                         gStdinBuf = ""
                     }
+                    gPty = Option.Some(pty)
                     // Channel handles are refcounted: the pump task outlives this
                     // call, so it gets its own retained handle rather than ours.
                     let ptyCh = ch.clone()
@@ -1816,7 +1817,6 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
     gChildReq = ""
     gStarted = false
     gDapIn = -1
-    gPtyFd = -1
     gPty = Option.None
     gStdinBuf = ""
     gOddSeq = -1 as i64
@@ -2467,10 +2467,13 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         }
     } else if c == "stdin" {
         let data = dStr(doc, "data")
-        if gPtyFd >= 0 {
-            unsafe {
-                let _n = write(gPtyFd, data, data.len)
-            }
+        // writeOnce, not write: this runs on a peer's reader task, and parking
+        // it until a debuggee that never reads stdin drains the pty would stall
+        // every command that peer sends after it. A full pty drops input, as the
+        // raw write here always did.
+        if let Option.Some(p) = replace(gPty, Option.None) {
+            let _n = p.writeOnce(data)
+            gPty = Option.Some(p)
         } else {
             gStdinBuf = gStdinBuf + data
         }
@@ -3556,7 +3559,6 @@ pub fn webMain(argv: Vec<string>): i32 {
     gHistory = "[]"
     gRestored = false
     gDapIn = -1
-    gPtyFd = -1
     gPty = Option.None
     gOddSeq = -1 as i64
     gStdinBuf = ""
