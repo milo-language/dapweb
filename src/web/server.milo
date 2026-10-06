@@ -43,7 +43,7 @@ from "std/sync" import {
     Channel
 }
 from "std/seal" import {
-    Sealed, Shared, seal, sharedWith, sealedWith
+    Sealed, Shared, sharedWith, sealedWith
 }
 from "./http" import {
     Request, readRequest, readBody, requestAllowed, sendHttp, serveStatic
@@ -64,7 +64,7 @@ from "./binfo" import {
     binInfoJson
 }
 from "../journal" import {
-    journalDisable, journalSession, journalCmd, journalOut, journalEnd, journalRows, journalSessions, journalBreakpoints, logFilter
+    journalDisable, journalSession, journalCmd, journalEnd, journalRows, journalSessions, journalBreakpoints, logFilter
 }
 from "std/signal" import {
     ignoreSignal, SIGPIPE
@@ -93,9 +93,6 @@ from "std/uuid" import {
 from "std/time" import {
     epochMillis, sleepMs, sleepBlockingMs
 }
-from "std/datetime" import {
-    DateTime
-}
 from "std/path" import {
     Path
 }
@@ -103,13 +100,16 @@ from "../dap/client" import {
     DapClient
 }
 from "./state" import {
-    gSession, Bp, OutLine, cloneBp, ChildLaunch, PendingRun, Sink, StopInfo, ThreadList, helloMsg, sourceMsg, bpSyncMsg, capsMsg, stoppedMsg, threadsMsg, regionsMsg
+    gSession, Bp, OutLine, cloneBp, ChildLaunch, PendingRun, StopInfo, ThreadList, sourceMsg, capsMsg, stoppedMsg, threadsMsg, regionsMsg
 }
 from "json-rpc/frame" import {
     writeFrame as writeFrameFd
 }
 from "../dap/session" import {
     histLastRunAt, resolveConfig, resolveAdapterCmd, adapterIdForKind, initArgsFor, launchRequestOf, adapterArgvOf, launchArgsFor, tcpListenArgs, mainSymbolFor, histEntryFor, histInsert, histMergeMany
+}
+from "./peers" import {
+    logEvent, peerCountStr, wsPush, peerPush, wsWriterLoop, sinkRegister, sinkUnregister, broadcastLoop, pushHelloState, configErrMsg, terminatedMsg, bpAckMsg
 }
 
 let OUTLOG_MAX: i64 = 400
@@ -361,97 +361,6 @@ fn respErrText(doc: &Json): string {
     return "the adapter refused the request and said nothing about why"
 }
 
-// ── Lifecycle log ──
-
-// One line per session event: `HH:MM:SS <event> <details>`. Event column
-// padded so details align.
-fn logEvent(event: &string, details: &string): void {
-    if gSession.server.logLevel < 1 {
-        return
-    }
-    let dt = DateTime.localNow()
-    print($"{dt.formatTime()} {event.padEnd(18, " ")}{details}")
-    flush()
-}
-
-fn peerCountStr(): string {
-    if gSession.peers.count == 1 {
-        return "(1 peer)"
-    }
-    return $"({gSession.peers.count} peers)"
-}
-
-// ── Outbound WS funnel ──
-
-// Enqueue; a receiver parked on the channel wakes on the send. trySend so a
-// stuffed channel can never block (and stall) the scheduler; drops are loud.
-fn wsPush(ch: &Channel<string>, msg: string): void {
-    if !ch.trySend(msg) {
-        eprint("[srv] ws out channel full, dropping frame\n")
-    }
-}
-
-// The per-peer twin of wsPush: peers are fed sealed messages, see broadcastLoop.
-fn peerPush(ch: &Channel<Shared>, msg: Shared): void {
-    if !ch.trySend(msg) {
-        eprint("[srv] ws out channel full, dropping frame\n")
-    }
-}
-
-// W: sole socket writer. Parks on its channel until sinkUnregister closes it,
-// then drains what is left. R joins this task before releasing the socket fd:
-// otherwise a frame still queued here lands on a closed fd or on whatever
-// connection reused that fd number.
-fn wsWriterLoop(fd: i32, ch: Channel<Shared>): void {
-    // Borrowed view of the conn: its Drop skips teardown (R owns the real one).
-    var conn = WsConn.view(fd, 0, false)
-    var rx = ch
-    for m in rx {
-        let _r = conn.sendShared(m)
-    }
-}
-
-fn sinkRegister(id: i64, ch: &Channel<Shared>): void {
-    gSession.peers.sinks.push(Sink {
-        id: id, ch: ch.clone(),
-    }
-    )
-}
-
-// Drop the peer and close its channel, which ends its writer task once the
-// queued frames are out. Removed from gSinks first, so the broadcaster can no
-// longer push to the closed channel.
-fn sinkUnregister(id: i64): void {
-    var keep: Vec<Sink> = []
-    for s in gSession.peers.sinks {
-        if s.id == id {
-            s.ch.close()
-        } else {
-            keep.push(Sink {
-                id: s.id, ch: s.ch.clone(),
-            }
-            )
-        }
-    }
-    gSession.peers.sinks = keep
-}
-
-fn broadcastLoop(bus: Channel<string>): void {
-    var rx = bus
-    for m in rx {
-        // The one funnel every broadcast passes through. Per-peer late-join
-        // replays go straight to their own channel and are deliberately not
-        // recorded twice.
-        journalOut(m)
-        // Sealed once, then each peer gets a refcount clone: N peers share one
-        // buffer instead of holding N copies of every frame.
-        let sh = seal(m).share()
-        for sink in gSession.peers.sinks {
-            peerPush(sink.ch, sh.clone())
-        }
-    }
-}
-
 // P: pty master → browser terminal. fdChannel owns the read/EAGAIN pump; we just
 // wrap each chunk and forward.
 //
@@ -488,52 +397,6 @@ fn adapterStderrPump(errFd: i32): void {
     }
     // Owns the fd — see ptyPumpLoop for why nobody else may close it.
     close(errFd)
-}
-
-// ── Simple outbound messages ──
-
-// A hello is a full resync — the browser drops its whole breakpoint map on
-// receipt — so every hello has to be followed by the set it replaced. Only the
-// connect path did that, which is why changing the target (Run with a config,
-// setConfig, newSession) emptied the BREAKPOINTS panel and the gutter until a
-// reload, while the server still held the bps.
-fn pushHelloState(bus: &Channel<string>): void {
-    wsPush(bus, helloMsg(gSession))
-    if gSession.target.spec.srcPath.len > 0 {
-        wsPush(bus, sourceMsg(gSession.target.spec.srcPath))
-    }
-    for bp in gSession.persisted.bps {
-        wsPush(bus, bpSyncMsg(bp))
-    }
-}
-
-fn configErrMsg(err: &string): string {
-    return Json.obj().str("type", "configError").str("error", err).build()
-}
-
-// exitCode rides along only when the adapter reported one (-1 = unknown: killed,
-// detached, or the adapter never started), so a client never shows a made-up code.
-fn terminatedMsg(exitCode: Option<i64>): string {
-    var b = Json.obj().str("type", "terminated")
-    if let Option.Some(code) = exitCode {
-        b = b.int("exitCode", code)
-    }
-    return b.build()
-}
-
-// Carries the canonical path and the full metadata, not just the line: every
-// peer applies this, including ones that did not send the command. Without the
-// path a receiving browser cannot key it (breakpoints are keyed by path+line),
-// so an agent's breakpoint used to be invisible in an already-open tab until it
-// was reloaded and picked the set up from the bpSync replay.
-fn bpAckMsg(b: &Bp, set: bool): string {
-    return Json.obj().str("type", "breakpoint")
-        .str("path", b.path).int("line", b.line)
-        .str("condition", b.condition)
-        .str("hitCondition", b.hitCondition)
-        .str("logMessage", b.logMessage)
-        .bool("enabled", b.enabled)
-        .bool("set", set).build()
 }
 
 fn outputMsg(doc: &Json): string {
