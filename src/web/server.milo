@@ -3275,7 +3275,12 @@ pub fn webMain(argv: Vec<string>): i32 {
     // --source would have the browser keying its gutter on a spelling the
     // breakpoint acks never use.
     gSession.target.spec.srcPath = absSourcePath(args.getString("source") ?? "")
-    gSession.server.webroot = args.getString("webroot")
+    // An explicit empty --webroot means the embedded bundle, as no flag does.
+    if let Option.Some(w) = args.getString("webroot") {
+        if w.len > 0 {
+            gSession.server.webroot = Option.Some(w.clone())
+        }
+    }
     gSession.server.noBrowser = args.getBool("no-browser")
     if args.getBool("no-journal") {
         journalDisable()
