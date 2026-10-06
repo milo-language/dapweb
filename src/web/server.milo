@@ -28,7 +28,7 @@ from "std/net" import {
     TcpListener
 }
 from "std/os" import {
-    close, getpid
+    close
 }
 from "std/io" import {
     readFile, fdChannel
@@ -58,13 +58,13 @@ from "../commands" import {
     isKnownCmd, cmdVerb, cmdNames, commandsJson
 }
 from "../sessions" import {
-    stateDir, writeSession, removeSession, sessionsJson, newSessionName, freePortFrom, spawnSessionOn, listenLocal
+    sessionsJson, newSessionName, freePortFrom, spawnSessionOn, listenLocal
 }
 from "./binfo" import {
     binInfoJson
 }
 from "../journal" import {
-    journalDisable, journalSession, journalCmd, journalEnd, journalRows, journalSessions, journalBreakpoints, logFilter
+    journalDisable, journalCmd, journalRows, journalSessions, journalBreakpoints, logFilter
 }
 from "std/signal" import {
     ignoreSignal, SIGPIPE
@@ -85,10 +85,7 @@ from "std/process" import {
     Child, Command, Stdio
 }
 from "std/fs" import {
-    pathExists, makeDir, writeFile, currentDir, splitLines
-}
-from "std/uuid" import {
-    Uuid
+    pathExists, splitLines
 }
 from "std/time" import {
     epochMillis, sleepMs, sleepBlockingMs
@@ -106,68 +103,16 @@ from "json-rpc/frame" import {
     writeFrame as writeFrameFd
 }
 from "../dap/session" import {
-    histLastRunAt, resolveConfig, resolveAdapterCmd, adapterIdForKind, initArgsFor, launchRequestOf, adapterArgvOf, launchArgsFor, tcpListenArgs, mainSymbolFor, histEntryFor, histInsert, histMergeMany
+    resolveAdapterCmd, initArgsFor, launchRequestOf, adapterArgvOf, launchArgsFor, tcpListenArgs, mainSymbolFor, histMergeMany
 }
 from "./peers" import {
     logEvent, peerCountStr, wsPush, peerPush, wsWriterLoop, sinkRegister, sinkUnregister, broadcastLoop, pushHelloState, configErrMsg, terminatedMsg, bpAckMsg
 }
+from "./persist" import {
+    absSourcePath, adapterId, applyConfig, mergeCliDefaults, loadHistory, persistBps, loadBps, persistHistory, appendHistory, recordConfig, historyChangedMsg, firstHistoryConfig, sessionNameSeeds, registerSession, journalHere, unregisterSession
+}
 
 let OUTLOG_MAX: i64 = 400
-
-// Breakpoints are keyed on (path, line) and lldb binds on the FULL path, so the
-// one spelling that works is the absolute one the compiler recorded. A client can
-// send either: the UI keys on `--source`/hello before the first stop and on the
-// frame's DWARF path after it, which used to make one line two breakpoints, one of
-// which never bound. Resolve against cwd rather than realpath(): clang records
-// comp_dir + the argument it was given, so joining cwd reproduces it, while
-// realpath() would rewrite /tmp to /private/tmp and stop matching.
-// Collapse "." and ".." lexically. Two absolute paths can denote one file and
-// still differ as strings (".../tests/../examples/x.c"), which would key a second
-// breakpoint on a line that already has one. Lexical, not realpath(): realpath
-// resolves symlinks too, which would rewrite /tmp to /private/tmp and stop
-// matching what the compiler recorded in DWARF.
-fn normalizePath(p: &string): string {
-    var parts: Vec<string> = []
-    for seg in p.split("/") {
-        if seg.len == 0 || seg == "." {
-            continue
-        }
-        if seg == ".." {
-            if parts.len > 0 {
-                let _d = parts.pop()
-            }
-            continue
-        }
-        parts.push(seg.clone())
-    }
-    var out: string = ""
-    for seg in parts {
-        out = out + "/" + seg
-    }
-    if out.len == 0 {
-        return "/"
-    }
-    return out
-}
-
-fn absSourcePath(p: &string): string {
-    if p.len == 0 {
-        return p.clone()
-    }
-    if p[0] == '/' {
-        return normalizePath(p)
-    }
-    var rel = p.clone()
-    if rel.len > 2 && rel[0] == '.' && rel[1] == '/' {
-        rel = rel.substr(2, rel.len)
-    }
-    // currentDir() can fail (cwd unlinked); an unresolvable relative path is
-    // still better sent as-is than turned into garbage.
-    if let Result.Ok(cwd) = currentDir() {
-        return normalizePath(Path.join(cwd, rel))
-    }
-    return rel
-}
 
 fn bpPaths(bps: &Vec<Bp>, fallback: &string): Vec<string> {
     var out: Vec<string> = []
@@ -463,265 +408,12 @@ fn excArgs(): string {
     return Json.obj().raw("filters", filters).build()
 }
 
-// Session config + adapter dialect + launch/init bodies live in ../dap/session
-// (shared with the HTTP API path). These wrappers bind the shared, value-based fns
-// to this driver's session globals.
-fn adapterId(): string {
-    return adapterIdForKind(gSession.target.spec.adapterKind)
-}
-
 fn initArgs(): string {
     return initArgsFor(gSession.target.spec.adapterKind)
 }
 
 fn launchRequest(): string {
     return launchRequestOf(gSession.target.spec)
-}
-
-// Apply a config (VS Code launch-configuration object) into this session while
-// idle: resolve to a LaunchSpec via the shared module, commit into the session
-// globals, and reset per-session state. Returns "" on success or a user-facing
-// error. Caller broadcasts hello/source. Running sessions stage instead (see
-// setConfig handler); this must only run single-threaded on the green runtime.
-fn applyConfig(raw: string, selectName: string): string {
-    match resolveConfig(raw, selectName) {
-        Result.Ok(spec) => {
-            let src = absSourcePath(spec.srcPath)
-            var s = spec
-            s.srcPath = src
-            gSession.target.spec = s
-            gSession.persisted.bps = []
-            gSession.output = []
-            refreshSession()
-            return ""
-        }
-        Result.Err(e) => {
-            return e
-        }
-    }
-}
-
-// Gap-fill CLI flags into a --launch config object: --program/--source fill in
-// when the config lacks them, so `--launch '{"args":[...]}' --program /x` still
-// composes. A {version, configurations:[...]} wrapper is a self-contained
-// launch.json file and passes through untouched.
-fn mergeCliDefaults(text: string, prog: &string, src: &string): string {
-    match Json.parseJsonc(text) {
-        Result.Ok(d) => {
-            if !d.isObject() {
-                return text
-            }
-            if let Option.Some(_c) = d.get("configurations") {
-                return text
-            }
-            var hasProg = false
-            var hasSrc = false
-            var b = Json.obj()
-            let ks = d.keys()
-            for k in ks {
-                if k == "program" {
-                    hasProg = true
-                }
-                if k == "source" {
-                    hasSrc = true
-                }
-                match d.get(k) {
-                    Option.Some(v) => {
-                        b = b.raw(k, v.rawStr())
-                    }
-                    Option.None => {
-                    }
-                }
-            }
-            if !hasProg && prog.len > 0 {
-                b = b.str("program", prog)
-            }
-            if !hasSrc && src.len > 0 {
-                b = b.str("source", src)
-            }
-            return b.build()
-        }
-        Result.Err(_e) => {
-            return text
-        }
-    }
-}
-
-// ── Config history (server-side, single-writer; §4) ──
-//
-// The server is the ONE writer: it appends on a successful run launch, persists
-// to XDG state, and broadcasts historyChanged. Clients only read (via hello +
-// the broadcast), which kills the old client-local dupe (drawer + hello both
-// saved). $XDG_STATE_HOME/dapweb/history.json, default ~/.local/state/dapweb.
-
-fn histDir(): string {
-    return stateDir()
-}
-
-fn histFilePath(): string {
-    return histDir() + "/history.json"
-}
-
-// mkdir -p: create each ancestor in turn, ignoring already-exists errors (0755).
-fn ensureDir(path: &string): void {
-    var cur: string = ""
-    for ch in path {
-        if ch == '/' {
-            if cur.len > 0 {
-                let _r = makeDir(cur.clone(), 493 as i32)
-            }
-            cur.push(ch)
-        } else {
-            cur.push(ch)
-        }
-    }
-    if cur.len > 0 {
-        let _r = makeDir(cur.clone(), 493 as i32)
-    }
-}
-
-// Read history at boot. Missing/corrupt file → empty (never fatal).
-fn loadHistory(): void {
-    let p = histFilePath()
-    if !pathExists(p) {
-        gSession.persisted.history = "[]"
-        return
-    }
-    gSession.persisted.history = "[]"
-    if let Result.Ok(s) = readFile(p) {
-        if let Result.Ok(d) = Json.parse(s) {
-            if d.isArray() {
-                gSession.persisted.history = s
-            }
-        }
-    }
-}
-
-// Breakpoints outlive the server process. Keyed by PROGRAM path, not the full
-// history identity tuple: changing args or env does not change which lines you
-// care about, so those edits must not throw your breakpoints away.
-fn bpsFilePath(): string {
-    return histDir() + "/breakpoints.json"
-}
-
-fn bpsJson(bps: &Vec<Bp>): string {
-    var arr = Json.arr()
-    for b in bps {
-        arr = arr.raw(Json.obj()
-            .str("path", b.path).int("line", b.line)
-            .str("condition", b.condition)
-            .str("hitCondition", b.hitCondition)
-            .str("logMessage", b.logMessage)
-            .bool("enabled", b.enabled).build())
-    }
-    return arr.build()
-}
-
-// Rewrite this program's entry, leaving every other program's set intact.
-fn persistBps(): void {
-    if gSession.target.spec.binPath.len == 0 {
-        return
-    }
-    var out = Json.obj()
-    if let Result.Ok(s2) = readFile(bpsFilePath()) {
-        if let Result.Ok(doc) = Json.parse(s2) {
-            if doc.isObject() {
-                for k in doc.keys() {
-                    if k != gSession.target.spec.binPath {
-                        if let Option.Some(v) = doc.get(k) {
-                            out = out.raw(k, v.rawStr())
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out = out.raw(gSession.target.spec.binPath, bpsJson(gSession.persisted.bps))
-    ensureDir(histDir())
-    let _r = writeFile(bpsFilePath(), out.build())
-}
-
-// Load this program's saved set. Missing/corrupt file leaves gBps untouched.
-fn loadBps(): void {
-    if gSession.target.spec.binPath.len == 0 {
-        return
-    }
-    let f = bpsFilePath()
-    if !pathExists(f) {
-        return
-    }
-    var restored: Vec<Bp> = []
-    if let Result.Ok(s2) = readFile(f) {
-        if let Result.Ok(doc) = Json.parse(s2) {
-            if let Option.Some(arr) = doc.get(gSession.target.spec.binPath) {
-                if arr.isArray() {
-                    let n = arr.len()
-                    var i: i64 = 0
-                    while i < n {
-                        if let Option.Some(e) = arr.at(i) {
-                            let pth = e.str("path") ?? ""
-                            let ln = e.i64("line") ?? (0 as i64)
-                            if pth.len > 0 && ln > 0 {
-                                restored.push(Bp {
-                                    path: absSourcePath(pth), line: ln,
-                                    condition: e.str("condition") ?? "",
-                                    hitCondition: e.str("hitCondition") ?? "",
-                                    logMessage: e.str("logMessage") ?? "",
-                                    enabled: e.bool("enabled") ?? true,
-                                })
-                            }
-                        }
-                        i = i + 1
-                    }
-                }
-            }
-        }
-    }
-    if restored.len > 0 {
-        gSession.persisted.bps = restored
-        logEvent("breakpoints", $"restored {gSession.persisted.bps.len} for {gSession.target.spec.binPath}")
-    }
-}
-
-fn persistHistory(): void {
-    ensureDir(histDir())
-    let _r = writeFile(histFilePath(), gSession.persisted.history)
-}
-
-// Append the current session config to history on a launch (dedup + cap 10),
-// persist, and return the broadcast so the caller can push it to all peers.
-fn appendHistory(): string {
-    gSession.persisted.history = histInsert(gSession.persisted.history, histEntryFor(gSession.target.spec, epochMillis()), 10 as i64)
-    persistHistory()
-    return historyChangedMsg()
-}
-
-// A target that was configured but never launched still belongs in history:
-// otherwise `dapweb web --program X` is forgotten the moment the process exits,
-// and the next boot with no flags restores whatever came before it. Carries the
-// existing run stamp forward so recording a config cannot un-run an entry.
-fn recordConfig(): string {
-    let probe = histEntryFor(gSession.target.spec, 0 as i64)
-    let stamp = histLastRunAt(gSession.persisted.history, probe)
-    gSession.persisted.history = histInsert(gSession.persisted.history, histEntryFor(gSession.target.spec, stamp), 10 as i64)
-    persistHistory()
-    return historyChangedMsg()
-}
-
-fn historyChangedMsg(): string {
-    return Json.obj().str("type", "historyChanged").raw("history", gSession.persisted.history).build()
-}
-
-// history[0] as a re-appliable config object, or None if history is empty.
-fn firstHistoryConfig(): Option<string> {
-    if let Result.Ok(d) = Json.parse(gSession.persisted.history) {
-        if d.isArray() && d.len() > 0 {
-            if let Option.Some(el) = d.at(0 as i64) {
-                return Option.Some(el.rawStr())
-            }
-        }
-    }
-    return Option.None
 }
 
 // launch/init bodies + adapter argv come from the shared session module; these
@@ -2072,58 +1764,6 @@ fn cmdNewSession(cmd: &Cmd): void {
     journalHere()
     logEvent("session reset", $"new session {gSession.server.sessionId}")
     pushHelloState(cmd.bus)
-}
-
-// ── session registry ──
-//
-// This server IS its session's identity (one process, one session), so the
-// descriptor it drops in the registry is what `dapweb api list` and the
-// /sessions dashboard read. Directory layout and pruning live in ../sessions.
-// Five candidates, so a name already taken by a live session can be re-rolled
-// without another trip out to the uuid generator mid-loop.
-fn sessionNameSeeds(): Vec<string> {
-    var out: Vec<string> = []
-    var i: i64 = 0
-    while i < 5 {
-        out.push(Uuid.v4().toString())
-        i = i + 1
-    }
-    return out
-}
-
-fn registerSession(port: i64): void {
-    gSession.server.listenPort = Option.Some(port)
-    gSession.server.startedAt = epochMillis()
-    writeSession(gSession.server.sessionId, getpid() as i64, port, gSession.target.spec.binPath, adapterId(), gSession.server.startedAt)
-    journalHere()
-}
-
-// The journal's copy of this session's identity. Called wherever the registry
-// descriptor is written, and on a session reset — the journal keys every event
-// on the session id, so a reset that did not tell it would file the new
-// session's events under the old id.
-fn journalHere(): void {
-    var cwd: string = ""
-    if let Result.Ok(d) = currentDir() {
-        cwd = d
-    }
-    journalSession(gSession.server.sessionId, getpid() as i64, gSession.server.listenPort ?? (0 as i64), gSession.target.spec.binPath, adapterId(), cwd)
-}
-
-// The descriptor names the program this server is debugging, and that changes
-// whenever someone retargets from the browser. Written once at startup it would
-// go stale on the first retarget, and the dashboard's whole job is to say what
-// each session is on — so rewrite it, keeping the original start time.
-fn refreshSession(): void {
-    if let Option.Some(port) = gSession.server.listenPort {
-        writeSession(gSession.server.sessionId, getpid() as i64, port, gSession.target.spec.binPath, adapterId(), gSession.server.startedAt)
-        journalHere()
-    }
-}
-
-fn unregisterSession(): void {
-    removeSession(gSession.server.sessionId)
-    journalEnd()
 }
 
 // The dashboard's "new session" button. A session IS a server process, so making
