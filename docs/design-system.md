@@ -41,6 +41,7 @@ identifiers, addresses, registers, program output. Everything else is `--ui`.
 | 12 | reading: a paragraph a person is meant to read, not scan |
 | 14 | control: a real button with a real label |
 | 15 | icon glyphs. Not text |
+| 22 (`--page-title`) | the heading of a standalone page (/sessions). The app screen has no page heading |
 
 ## Shape
 

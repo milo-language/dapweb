@@ -42,10 +42,14 @@ export function Transport({ primary, phase, asm, inlineAsm, canInstrStep, canDis
         <button disabled={!stopped} data-tip="Step over (F10)" onClick={() => resume("stepOver")}><Ico g={CI.stepOver} /></button>
         <button disabled={!stopped} data-tip="Step into (F11)" onClick={() => resume("stepIn")}><Ico g={CI.stepInto} /></button>
         <button disabled={!stopped} data-tip="Step out (Shift+F11)" onClick={() => resume("stepOut")}><Ico g={CI.stepOut} /></button>
-        {asm && <button disabled={!canInstrStep} data-tip="Step one instruction, over calls"
-                        onClick={() => resume("stepOver", "instruction")}><Ico g={CI.stepOver} sub="i" /></button>}
-        {asm && <button disabled={!canInstrStep} data-tip="Step one instruction, into calls"
-                        onClick={() => resume("stepIn", "instruction")}><Ico g={CI.stepInto} sub="i" /></button>}
+        {/* Always present, disabled without disassembly: appearing on the toggle
+            moved every button to their right. */}
+        <button disabled={!asm || !canInstrStep}
+                data-tip={asm ? "Step one instruction, over calls" : "Step one instruction (turn on disassembly first)"}
+                onClick={() => resume("stepOver", "instruction")}><Ico g={CI.stepOver} sub="i" /></button>
+        <button disabled={!asm || !canInstrStep}
+                data-tip={asm ? "Step one instruction, into calls" : "Step one instruction (turn on disassembly first)"}
+                onClick={() => resume("stepIn", "instruction")}><Ico g={CI.stepInto} sub="i" /></button>
       </span>
       <span className="toolbar">
         <button disabled={phase !== "running" && phase !== "stopped"}

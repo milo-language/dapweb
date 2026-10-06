@@ -682,8 +682,8 @@ export default function App() {
         <span className={"termchip follow-chip" + (follow ? " on" : "")} role="switch" aria-checked={follow}
               data-tip="Follow agent: when an agent stops the program, sets a breakpoint or opens a file, show that line here and flash it"
               onClick={() => { setFollow(!follow); saveFollow(!follow); }}>follow agent</span>
-        {agentNote && <span className="agent-note" data-tip={agentNote.text}>◆ {agentNote.text}</span>}
-        <span className={"status " + status.cls} data-tip={status.text}>{status.short}</span>
+        <span className="agent-note" data-tip={agentNote?.text}>{agentNote ? "◆ " + agentNote.text : ""}</span>
+        <span className={"status " + status.cls} data-tip={status.text}><span className="status-text">{status.short}</span></span>
         {/* Three unlabelled glyphs (ⓘ, +, ⚙) asked the reader to remember which
             was which. One labelled menu says what it opens, and has room for the
             things that had nowhere to live — like the list of other sessions. */}

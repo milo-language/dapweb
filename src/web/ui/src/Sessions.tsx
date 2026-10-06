@@ -14,7 +14,18 @@ type Row = {
 };
 
 const clock = (ms: number) =>
-  ms > 0 ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
+  ms > 0 ? new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+
+const ago = (ms: number) => {
+  if (ms <= 0) return "";
+  const m = Math.floor((Date.now() - ms) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  return h < 24 ? `${h} h ago` : `${Math.floor(h / 24)} d ago`;
+};
+
+const baseName = (p: string) => p.split("/").filter(Boolean).pop() || p;
 
 // Same host, different port: a session reached over a tunnel or from another
 // machine must stay on that hostname, so only the port is swapped.
@@ -59,46 +70,62 @@ export default function Sessions() {
       .finally(() => setStarting(false));
   };
 
+  const n = rows?.length ?? 0;
   return (
     <div className="sessions-page">
       <header>
         <div className="sessions-head">
           <a className="logo" href="/" title="Back to this session"><Mark /><span>dapweb</span></a>
-          <span className="sessions-title">sessions</span>
-          <button className="ghost-btn" onClick={load}>refresh</button>
         </div>
       </header>
       <div className="sessions-body">
         <div className="sessions-inner">
-          <button className="sessions-new" onClick={newSession} disabled={starting}>
-            {starting ? "starting…" : <><span className="plus">+</span>new session</>}
-          </button>
+          <div className="sessions-top">
+            <div>
+              <h1 className="sessions-h1">Debug sessions</h1>
+              <p className="sessions-sub">
+                {rows === null
+                  ? "Looking for running sessions…"
+                  : n === 0
+                    ? "Nothing is running on this machine."
+                    : `${n} running on this machine. Each is its own debugger, on its own port.`}
+              </p>
+            </div>
+            <button className="sessions-new" onClick={newSession} disabled={starting}>
+              {starting ? "starting…" : <><span className="plus">+</span>New session</>}
+            </button>
+          </div>
           {err && <div className="sessions-empty">{err}</div>}
-          {!rows && !err && <div className="sessions-empty">reading the session registry…</div>}
-          {rows && rows.length === 0 && !err && (
+          {rows && n === 0 && !err && (
             <div className="sessions-empty">
-              No live sessions.
-              <div className="sessions-hint">Start one above, or with <code>dapweb /path/to/binary</code>.</div>
+              Start one with the button above, or from a terminal with <code>dapweb /path/to/binary</code>.
             </div>
           )}
-          {(rows || []).map((r) => (
-            <a key={r.id} className={"session-row" + (r.self ? " self" : "")}
-               href={r.self ? "/" : urlFor(r.port)}
-               target={r.self ? undefined : "_blank"} rel="noreferrer">
-              <span className="session-dot" />
-              <span className="session-prog">{r.program || <em>no target configured</em>}</span>
-              {r.self && <span className="session-here">this one</span>}
-              <span className="session-meta">
-                {r.adapter && <span className={"hist-type dt-" + r.adapter}>{r.adapter}</span>}
-                <span className="session-port">:{r.port}</span>
-                <span className="session-dim">pid {r.pid}</span>
-                <span className="session-dim">{clock(r.startedAt)}</span>
-              </span>
-            </a>
-          ))}
+          <div className="session-list">
+            {(rows || []).map((r) => (
+              <a key={r.id} className={"session-card" + (r.self ? " self" : "")}
+                 href={r.self ? "/" : urlFor(r.port)}
+                 target={r.self ? undefined : "_blank"} rel="noreferrer"
+                 title={`pid ${r.pid}`}>
+                <div className="session-line1">
+                  <span className="session-dot" />
+                  <span className="session-prog">{r.program ? baseName(r.program) : <em>no target yet</em>}</span>
+                  {r.self
+                    ? <span className="session-here">You're here</span>
+                    : <span className="session-open">Open ↗</span>}
+                </div>
+                <div className="session-name">{r.id}</div>
+                {r.program && <div className="session-path">{r.program}</div>}
+                <div className="session-meta">
+                  {r.adapter && <span className={"hist-type dt-" + r.adapter}>{r.adapter}</span>}
+                  <span>port <span className="session-port">{r.port}</span></span>
+                  {r.startedAt > 0 && <span>started {clock(r.startedAt)} ({ago(r.startedAt)})</span>}
+                </div>
+              </a>
+            ))}
+          </div>
           <div className="sessions-foot">
-            Servers that have died are pruned as this list loads. The same list is{" "}
-            <code>dapweb api list</code>.
+            The list updates on its own. From a terminal, <code>dapweb api list</code> shows the same sessions.
             {" · "}
             <a href="https://github.com/milo-language/dapweb" target="_blank" rel="noreferrer">
               github.com/milo-language/dapweb
