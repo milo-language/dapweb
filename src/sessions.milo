@@ -125,7 +125,7 @@ pub fn loadSessions(prune: bool): Vec<SessionRow> {
                 continue
             }
         }
-        let pid = doc.i64("pid") ?? (0 as i64)
+        let pid = doc.i64("pid") ?? 0
         let alive = pid > 0 && processAlive(pid as i32)
         if !alive && prune {
             let _r = removeFile(path)
@@ -134,10 +134,10 @@ pub fn loadSessions(prune: bool): Vec<SessionRow> {
         rows.push(SessionRow {
             id: doc.str("id") ?? "",
             pid: pid,
-            port: doc.i64("port") ?? (0 as i64),
+            port: doc.i64("port") ?? 0,
             program: doc.str("program") ?? "",
             adapter: doc.str("adapter") ?? "",
-            startedAt: doc.i64("startedAt") ?? (0 as i64),
+            startedAt: doc.i64("startedAt") ?? 0,
             alive: alive,
         }
         )

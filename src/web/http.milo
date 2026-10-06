@@ -236,7 +236,7 @@ pub fn readRequest(fd: i32): Option<Request> {
 // body is what already arrived.
 pub fn readBody(fd: i32, req: &Request): string {
     var body = req.buf.text(req.buf.spanOf(req.bodyStart, req.buf.len() - req.bodyStart))
-    let want = req.header("content-length").parseInt() ?? (0 as i64)
+    let want = req.header("content-length").parseInt() ?? 0
     while body.len < want {
         var more: [u8; 8192] = [0; 8192]
         let n = recvFd(fd, more, 8192)
@@ -256,13 +256,13 @@ pub fn readBody(fd: i32, req: &Request): string {
 fn hostIsLoopback(host: &string): bool {
     var name = host.clone()
     if name.startsWith("[") {
-        let close = name.indexOf("]") ?? (-1 as i64)
+        let close = name.indexOf("]") ?? -1
         if close < 0 {
             return false
         }
         name = name.substr(0, close + 1)
     } else {
-        let colon = name.indexOf(":") ?? (-1 as i64)
+        let colon = name.indexOf(":") ?? -1
         if colon >= 0 {
             name = name.substr(0, colon)
         }

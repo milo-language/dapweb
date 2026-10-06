@@ -100,9 +100,9 @@ fn renderEvent(row: &string): string {
     } else if jhas(row, "line") {
         let path = jstr(row, "path")
         if path.len > 0 {
-            detail = $"{baseName(path)}:{jint(row, "line", 0 as i64)}"
+            detail = $"{baseName(path)}:{jint(row, "line", 0)}"
         } else {
-            detail = $"line {jint(row, "line", 0 as i64)}"
+            detail = $"line {jint(row, "line", 0)}"
         }
     }
     let who = jstr(row, "who")
@@ -112,27 +112,27 @@ fn renderEvent(row: &string): string {
     } else if peer.len > 0 && peer != "browser" {
         detail = detail + $"  ({peer})"
     }
-    let seq = jint(row, "seq", 0 as i64)
-    let t = hhmmss(jint(row, "at", 0 as i64))
+    let seq = jint(row, "seq", 0)
+    let t = hhmmss(jint(row, "at", 0))
     let kind = jstr(row, "kind").padEnd(16, " ")
     return $"{seq.toString().padStart(6, " ")}  {t}  {arrow} {kind}{detail}"
 }
 
 fn renderSession(row: &string): string {
     let id = jstr(row, "session").padEnd(24, " ")
-    let t = hhmmss(jint(row, "startedAt", 0 as i64))
+    let t = hhmmss(jint(row, "startedAt", 0))
     var live: string = "  "
     if !jhas(row, "endedAt") {
         live = " •" // still running, or a server that never got to say goodbye
     }
-    let n = jint(row, "events", 0 as i64).toString().padStart(6, " ")
+    let n = jint(row, "events", 0).toString().padStart(6, " ")
     return $"{id}{t}{live}{n} events  {jstr(row, "program")}"
 }
 
 fn renderBreakpoint(row: &string): string {
-    let set = jint(row, "sessionsSet", 0 as i64)
-    let hit = jint(row, "sessionsHit", 0 as i64)
-    let where = $"{baseName(jstr(row, "path"))}:{jint(row, "line", 0 as i64)}".padEnd(28, " ")
+    let set = jint(row, "sessionsSet", 0)
+    let hit = jint(row, "sessionsHit", 0)
+    let where = $"{baseName(jstr(row, "path"))}:{jint(row, "line", 0)}".padEnd(28, " ")
     var note: string = ""
     if hit == 0 && set > 1 {
         note = "   ← never stopped there"

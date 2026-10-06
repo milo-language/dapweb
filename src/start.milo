@@ -47,7 +47,7 @@ fn startParser(): ArgParser {
         + "  dapweb start --program /tmp/a.out --source main.c\n"
         + "then drive it, while a human watches the same session in a browser:\n"
         + "  dapweb api --session <id> request --await stopped '{\"cmd\":\"run\"}'")
-    p.addI64("port", "", "listen port (0 = first free from 8080)", 0 as i64)
+    p.addI64("port", "", "listen port (0 = first free from 8080)", 0)
     return p
 }
 
@@ -58,14 +58,14 @@ fn portFrom(argv: &Vec<string>): i64 {
     while i < argv.len {
         let a = argv[i].clone()
         if a == "--port" && i + 1 < argv.len {
-            return argv[i + 1].parseInt() ?? (0 as i64)
+            return argv[i + 1].parseInt() ?? 0
         }
         if a.startsWith("--port=") {
-            return a.substr(7, a.len).parseInt() ?? (0 as i64)
+            return a.substr(7, a.len).parseInt() ?? 0
         }
         i = i + 1
     }
-    return 0 as i64
+    return 0
 }
 
 fn wantsHelp(argv: &Vec<string>): bool {
@@ -119,7 +119,7 @@ pub fn startMain(argv: Vec<string>): i32 {
     // human would have looked for it, and only walks upward when it is taken.
     var port = want
     if port <= 0 {
-        port = freePortFrom(8080 as i64)
+        port = freePortFrom(8080)
         if port == 0 {
             return fail("no free port in 8080-8279")
         }

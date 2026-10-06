@@ -96,10 +96,10 @@ fn activityText(cmd: &Cmd): string {
         return $"evaluate `{cmd.str("expr")}`"
     }
     if cmd.name == "setBreakpoint" {
-        return $"set a breakpoint at line {cmd.int("line", 0 as i64)}"
+        return $"set a breakpoint at line {cmd.int("line", 0)}"
     }
     if cmd.name == "clearBreakpoint" {
-        return $"clear the breakpoint at line {cmd.int("line", 0 as i64)}"
+        return $"clear the breakpoint at line {cmd.int("line", 0)}"
     }
     if cmd.name == "setDataBreakpoint" {
         var what = cmd.str("name")
@@ -116,10 +116,10 @@ fn activityText(cmd: &Cmd): string {
         return $"set {cmd.str("name")} = {cmd.str("value")}"
     }
     if cmd.name == "runToCursor" {
-        return $"run to line {cmd.int("line", 0 as i64)}"
+        return $"run to line {cmd.int("line", 0)}"
     }
     if cmd.name == "setNextStatement" {
-        return $"move the next statement to line {cmd.int("line", 0 as i64)}"
+        return $"move the next statement to line {cmd.int("line", 0)}"
     }
     return cmdVerb(cmd.name)
 }
@@ -228,7 +228,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
 
 fn cmdBreakpoint(cmd: &Cmd): void {
     let set = cmd.name == "setBreakpoint"
-    let line = cmd.int("line", 0 as i64)
+    let line = cmd.int("line", 0)
     let path = cmdPath(cmd.name, cmd.doc)
     // A breakpoint with no file can never bind; it used to be stored anyway and
     // acknowledged as if it had worked.
@@ -283,7 +283,7 @@ fn cmdSetDataBreakpoint(cmd: &Cmd): void {
         wsPush(cmd.bus, cmdErrorMsg(cmd.name, $"accessType must be read, write or readWrite, not {access}"))
         return
     }
-    let ref = cmd.int("ref", 0 as i64)
+    let ref = cmd.int("ref", 0)
     let name = cmd.str("name")
     let address = cmd.str("address")
     var info = Json.obj()
@@ -296,7 +296,7 @@ fn cmdSetDataBreakpoint(cmd: &Cmd): void {
             wsPush(cmd.bus, cmdErrorMsg(cmd.name, "this debug adapter cannot watch a raw address (supportsDataBreakpointBytes)"))
             return
         }
-        let size = cmd.int("size", 0 as i64)
+        let size = cmd.int("size", 0)
         if size <= 0 {
             wsPush(cmd.bus, cmdErrorMsg(cmd.name, "an address watch needs a size in bytes"))
             return
@@ -327,7 +327,7 @@ fn cmdClearDataBreakpoint(cmd: &Cmd): void {
     }
     gSession.dataBps = keep
     if gSession.proc.dapIn.isNone() {
-        wsPush(cmd.bus, dataBpsMsg(gSession.dataBps, Option.Some(Attribution { by: cmd.by.by.clone(), who: cmd.by.who.clone() }), 0 as i64))
+        wsPush(cmd.bus, dataBpsMsg(gSession.dataBps, Option.Some(Attribution { by: cmd.by.by.clone(), who: cmd.by.who.clone() }), 0))
         return
     }
     let extra = Json.obj().str("by", cmd.by.by).str("who", cmd.by.who).build()
@@ -389,7 +389,7 @@ fn cmdStep(cmd: &Cmd): void {
     // No tid means the thread that is stopped now, read before resume() clears the
     // stop. It used to be thread 1, which lldb never uses, so a bare `stepOver` from a
     // browser or script moved nothing.
-    var stoppedTid: i64 = -1 as i64
+    var stoppedTid: i64 = -1
     if let Option.Some(st) = gSession.stop.stop {
         stoppedTid = st.tid
     }
@@ -431,7 +431,7 @@ fn cmdRunToCursor(cmd: &Cmd): void {
         return
     }
     let path = cmdPath(cmd.name, cmd.doc)
-    let line = cmd.int("line", 0 as i64)
+    let line = cmd.int("line", 0)
     if path.len == 0 || line <= 0 {
         wsPush(cmd.bus, cmdErrorMsg(cmd.name, "run to cursor needs a line (and a path when no source is configured)"))
         return
@@ -454,7 +454,7 @@ fn stopTid(): i64 {
     if let Option.Some(st) = gSession.stop.stop {
         return st.tid
     }
-    return 1 as i64
+    return 1
 }
 
 // Whether the adapter's initialize response advertised a capability.
@@ -481,7 +481,7 @@ fn cmdSetNextStatement(cmd: &Cmd): void {
         return
     }
     let path = cmdPath(cmd.name, cmd.doc)
-    let line = cmd.int("line", 0 as i64)
+    let line = cmd.int("line", 0)
     if path.len == 0 || line <= 0 {
         wsPush(cmd.bus, cmdErrorMsg(cmd.name, "set next statement needs a line (and a path when no source is configured)"))
         return
@@ -521,27 +521,27 @@ fn cmdKill(cmd: &Cmd): void {
 
 fn cmdEvaluate(cmd: &Cmd): void {
     var b = Json.obj().str("expression", cmd.str("expr")).str("context", cmd.str("context"))
-    let frameId = cmd.int("frameId", -1 as i64)
+    let frameId = cmd.int("frameId", -1)
     if frameId >= 0 {
         b = b.int("frameId", frameId)
     }
-    sendPending(cmd.pendCh, "eval", cmd.int("id", 0 as i64), "", "evaluate", b.build())
+    sendPending(cmd.pendCh, "eval", cmd.int("id", 0), "", "evaluate", b.build())
 }
 
 fn cmdExpand(cmd: &Cmd): void {
-    sendPending(cmd.pendCh, "expand", cmd.int("id", 0 as i64), "", "variables", Json.obj().int("variablesReference", cmd.int("ref", 0 as i64)).build())
+    sendPending(cmd.pendCh, "expand", cmd.int("id", 0), "", "variables", Json.obj().int("variablesReference", cmd.int("ref", 0)).build())
 }
 
 // Stack for a clicked thread; the UI then drives frameScopes for its locals
 // like any other frame selection.
 fn cmdThreadStack(cmd: &Cmd): void {
-    let t = cmd.int("tid", 1 as i64)
-    sendPending(cmd.pendCh, "tst", cmd.int("id", 0 as i64), t.toString(), "stackTrace", Json.obj().int("threadId", t).int("startFrame", 0).int("levels", 20).build())
+    let t = cmd.int("tid", 1)
+    sendPending(cmd.pendCh, "tst", cmd.int("id", 0), t.toString(), "stackTrace", Json.obj().int("threadId", t).int("startFrame", 0).int("levels", 20).build())
 }
 
 // Locals for a user-selected stack frame.
 fn cmdFrameScopes(cmd: &Cmd): void {
-    sendPending(cmd.pendCh, "fsc", cmd.int("id", 0 as i64), "", "scopes", Json.obj().int("frameId", cmd.int("frameId", 0 as i64)).build())
+    sendPending(cmd.pendCh, "fsc", cmd.int("id", 0), "", "scopes", Json.obj().int("frameId", cmd.int("frameId", 0)).build())
 }
 
 // Selected exception filter ids. Kept on the target so session init applies
@@ -558,30 +558,30 @@ fn cmdSetExceptions(cmd: &Cmd): void {
 
 // Debug-console completions.
 fn cmdComplete(cmd: &Cmd): void {
-    var b = Json.obj().str("text", cmd.str("text")).int("column", cmd.int("column", 1 as i64))
-    let frameId = cmd.int("frameId", -1 as i64)
+    var b = Json.obj().str("text", cmd.str("text")).int("column", cmd.int("column", 1))
+    let frameId = cmd.int("frameId", -1)
     if frameId >= 0 {
         b = b.int("frameId", frameId)
     }
-    sendPending(cmd.pendCh, "cmpl", cmd.int("id", 0 as i64), "", "completions", b.build())
+    sendPending(cmd.pendCh, "cmpl", cmd.int("id", 0), "", "completions", b.build())
 }
 
 // Raw memory window. memoryReference is whatever the UI got from a
 // value/ipRef; lldb-dap accepts plain hex addresses.
 fn cmdReadMem(cmd: &Cmd): void {
-    sendPending(cmd.pendCh, "readmem", cmd.int("id", 0 as i64), "", "readMemory", Json.obj().str("memoryReference", cmd.str("memoryReference")).int("offset", cmd.int("offset", 0 as i64)).int("count", cmd.int("count", 256 as i64)).build())
+    sendPending(cmd.pendCh, "readmem", cmd.int("id", 0), "", "readMemory", Json.obj().str("memoryReference", cmd.str("memoryReference")).int("offset", cmd.int("offset", 0)).int("count", cmd.int("count", 256)).build())
 }
 
 // Edit a variable. ref = parent container (scope ref for top-level locals, the
 // variable's own ref for expanded children).
 fn cmdSetVar(cmd: &Cmd): void {
-    sendPending(cmd.pendCh, "setv", cmd.int("id", 0 as i64), "", "setVariable", Json.obj().int("variablesReference", cmd.int("ref", 0 as i64)).str("name", cmd.str("name")).str("value", cmd.str("value")).build())
+    sendPending(cmd.pendCh, "setv", cmd.int("id", 0), "", "setVariable", Json.obj().int("variablesReference", cmd.int("ref", 0)).str("name", cmd.str("name")).str("value", cmd.str("value")).build())
 }
 
 // Window of instructions around a frame's pc (memoryReference = the frame's
 // instructionPointerReference from stackTrace).
 fn cmdDisassemble(cmd: &Cmd): void {
-    sendPending(cmd.pendCh, "disasm", cmd.int("id", 0 as i64), "", "disassemble", Json.obj().str("memoryReference", cmd.str("memoryReference")).int("instructionOffset", -16).int("instructionCount", 64).bool("resolveSymbols", true).build())
+    sendPending(cmd.pendCh, "disasm", cmd.int("id", 0), "", "disassemble", Json.obj().str("memoryReference", cmd.str("memoryReference")).int("instructionOffset", -16).int("instructionCount", 64).bool("resolveSymbols", true).build())
 }
 
 // Show the file a clicked frame lives in. sourceMsg itself handles unreadable
@@ -608,8 +608,8 @@ fn cmdStdin(cmd: &Cmd): void {
 }
 
 fn cmdResize(cmd: &Cmd): void {
-    let rows = cmd.int("rows", 0 as i64)
-    let cols = cmd.int("cols", 0 as i64)
+    let rows = cmd.int("rows", 0)
+    let cols = cmd.int("cols", 0)
     // winsize fields are u16; anything outside is a bad payload, not a size.
     if rows <= 0 || cols <= 0 || rows >= 65536 || cols >= 65536 {
         return

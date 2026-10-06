@@ -14,7 +14,7 @@ pub fn writeFrame(fd: i32, payload: &string): i64 {
             return n
         }
         Result.Err(_e) => {
-            return -1 as i64
+            return -1
         }
     }
 }

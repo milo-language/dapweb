@@ -16,8 +16,8 @@ pub fn bodyStr(doc: &Json, key: &string): string {
 }
 
 pub fn frame0Field(doc: &Json, key: &string): i64 {
-    let f0 = doc.curChild(doc.curField(doc.curField(doc.curRoot(), "body"), "stackFrames"), 0 as i64)
-    return doc.curInt(doc.curField(f0, key)) ?? (0 as i64)
+    let f0 = doc.curChild(doc.curField(doc.curField(doc.curRoot(), "body"), "stackFrames"), 0)
+    return doc.curInt(doc.curField(f0, key)) ?? 0
 }
 
 // stackTrace body → frame 0's source.path.
@@ -26,6 +26,6 @@ pub fn frame0Path(doc: &Json): string {
 }
 
 pub fn scopes0Ref(doc: &Json): i64 {
-    let s0 = doc.curChild(doc.curField(doc.curField(doc.curRoot(), "body"), "scopes"), 0 as i64)
-    return doc.curInt(doc.curField(s0, "variablesReference")) ?? (0 as i64)
+    let s0 = doc.curChild(doc.curField(doc.curField(doc.curRoot(), "body"), "scopes"), 0)
+    return doc.curInt(doc.curField(s0, "variablesReference")) ?? 0
 }

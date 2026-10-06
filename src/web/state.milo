@@ -352,7 +352,7 @@ impl Session {
             out.push(seal(bpSyncMsg(bp)).share())
         }
         // Even when empty: the list replaces the client's whole set.
-        out.push(seal(dataBpsMsg(self.dataBps, Option.None, 0 as i64)).share())
+        out.push(seal(dataBpsMsg(self.dataBps, Option.None, 0)).share())
         if let Option.Some(st) = self.stop.stop {
             out.push(seal(stoppedMsg(st)).share())
         }
@@ -381,7 +381,7 @@ pub fn helloMsg(s: &Session): string {
         .str("adapterCmd", s.target.spec.adapterCmd)
         .str("adapterId", adapterIdForKind(s.target.spec.adapterKind))
         .str("sessionId", s.server.sessionId)
-        .raw("config", specConfigJson(s.target.spec, true, 0 as i64))
+        .raw("config", specConfigJson(s.target.spec, true, 0))
     // late joiners need to know a session is live (kill-confirm on Run etc.);
     // a replayed stopped snapshot then refines running → stopped.
     if s.proc.started {

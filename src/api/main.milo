@@ -94,7 +94,7 @@ fn agentLabel(): string {
             return "claude"
         }
     }
-    if fdIsTerminal(0 as i32) {
+    if fdIsTerminal(0) {
         return "cli"
     }
     return "agent"
@@ -164,7 +164,7 @@ fn currentFrameId(port: i64): i64 {
                 if let Option.Some(stopped) = doc.get("stopped") {
                     if let Option.Some(frames) = stopped.get("frames") {
                         if let Option.Some(f0) = frames.at(0) {
-                            return f0.i64("id") ?? (-1 as i64)
+                            return f0.i64("id") ?? -1
                         }
                     }
                 }
@@ -183,7 +183,7 @@ fn currentScopeRef(port: i64): i64 {
         Result.Ok(reply) => {
             if let Result.Ok(doc) = Json.parse(reply) {
                 if let Option.Some(stopped) = doc.get("stopped") {
-                    return stopped.i64("scopeRef") ?? (-1 as i64)
+                    return stopped.i64("scopeRef") ?? -1
                 }
             }
         }
@@ -201,7 +201,7 @@ fn currentTid(port: i64): i64 {
         Result.Ok(reply) => {
             if let Result.Ok(doc) = Json.parse(reply) {
                 if let Option.Some(stopped) = doc.get("stopped") {
-                    return stopped.i64("tid") ?? (-1 as i64)
+                    return stopped.i64("tid") ?? -1
                 }
             }
         }
@@ -243,11 +243,11 @@ pub fn apiMain(argv: Vec<string>): i32 {
     p.addString("session", "", "session id (prefix ok)", "")
     p.addString("await", "", "block until a message of this type", "")
     p.addString("path", "", "source path for break", "")
-    p.addI64("port", "", "server port", 0 as i64)
-    p.addI64("timeout", "", "await timeout in ms", 5000 as i64)
-    p.addI64("line", "", "line number for break", 0 as i64)
+    p.addI64("port", "", "server port", 0)
+    p.addI64("timeout", "", "await timeout in ms", 5000)
+    p.addI64("line", "", "line number for break", 0)
     p.addString("address", "", "memory address for watch", "")
-    p.addI64("size", "", "bytes to watch at --address", 0 as i64)
+    p.addI64("size", "", "bytes to watch at --address", 0)
     p.addString("access", "", "watch access type: read | write | readWrite", "")
     p.addBool("pretty", "", "indent the JSON reply")
     p.addBool("over", "", "step over (default)")

@@ -133,7 +133,7 @@ pub fn pushHelloState(bus: &Channel<string>): void {
     for bp in gSession.persisted.bps {
         wsPush(bus, bpSyncMsg(bp))
     }
-    wsPush(bus, dataBpsMsg(gSession.dataBps, Option.None, 0 as i64))
+    wsPush(bus, dataBpsMsg(gSession.dataBps, Option.None, 0))
 }
 
 pub fn configErrMsg(err: &string): string {

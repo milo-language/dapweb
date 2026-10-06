@@ -129,7 +129,7 @@ fn cachedRemote(now: i64): Option<BuildId> {
     let Result.Ok(doc) = Json.parse(text) else {
         return Option.None
     }
-    let at = doc.i64("checkedAt") ?? (0 as i64)
+    let at = doc.i64("checkedAt") ?? 0
     // A clock that went backwards must not pin a stale answer forever.
     if at > now || now - at >= CHECK_INTERVAL_SECS {
         return Option.None

@@ -60,7 +60,7 @@ fn jrnMaxBytes(): i64 {
     if gMaxBytes == 0 {
         gMaxBytes = JOURNAL_MAX_BYTES
         if let Option.Some(x) = Env.get("DAPWEB_JOURNAL_MAX_BYTES") {
-            let n = x.parseInt() ?? (0 as i64)
+            let n = x.parseInt() ?? 0
             if n > 0 {
                 gMaxBytes = n
             }
@@ -481,7 +481,7 @@ pub struct LogFilter {
 
 pub fn logFilter(): LogFilter {
     return LogFilter {
-        session: "", kind: "", dir: "", since: 0 as i64, limit: 0 as i64
+        session: "", kind: "", dir: "", since: 0, limit: 0
     }
 }
 
@@ -495,7 +495,7 @@ pub fn journalRows(f: &LogFilter): Vec<string> {
     }
     var lim = f.limit
     if lim <= 0 {
-        lim = 200 as i64
+        lim = 200
     }
     var sql: string = "SELECT seq, session, at_ms, dir, kind, peer, who, ok, err, path, line, tid, trunc, payload FROM events WHERE seq > ?"
     if f.session.len > 0 {
@@ -582,7 +582,7 @@ pub fn journalSessions(limit: i64): Vec<string> {
     }
     var lim = limit
     if lim <= 0 {
-        lim = 50 as i64
+        lim = 50
     }
     var st = match dbQuery(gDb[0], "SELECT s.id, s.started_ms, s.ended_ms, s.pid, s.port, s.program, s.adapter, s.cwd, (SELECT count(*) FROM events e WHERE e.session = s.id) FROM sessions s ORDER BY s.started_ms DESC LIMIT ?") {
         Result.Ok(s) => s,
@@ -625,7 +625,7 @@ pub fn journalBreakpoints(program: &string, limit: i64): Vec<string> {
     }
     var lim = limit
     if lim <= 0 {
-        lim = 100 as i64
+        lim = 100
     }
     var sql: string = "WITH bp AS (SELECT s.program AS program, e.session AS session, e.path AS path, e.line AS line FROM events e JOIN sessions s ON s.id = e.session WHERE e.dir = 'in' AND e.kind = 'setBreakpoint' AND e.ok = 1 AND e.path IS NOT NULL AND e.line IS NOT NULL"
     if program.len > 0 {

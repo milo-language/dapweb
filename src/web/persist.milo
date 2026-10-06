@@ -264,7 +264,7 @@ pub fn loadBps(): void {
                     while i < n {
                         if let Option.Some(e) = arr.at(i) {
                             let pth = e.str("path") ?? ""
-                            let ln = e.i64("line") ?? (0 as i64)
+                            let ln = e.i64("line") ?? 0
                             if pth.len > 0 && ln > 0 {
                                 restored.push(Bp {
                                     path: absSourcePath(pth), line: ln,
@@ -295,7 +295,7 @@ pub fn persistHistory(): void {
 // Append the current session config to history on a launch (dedup + cap 10),
 // persist, and return the broadcast so the caller can push it to all peers.
 pub fn appendHistory(): string {
-    gSession.persisted.history = histInsert(gSession.persisted.history, histEntryFor(gSession.target.spec, epochMillis()), 10 as i64)
+    gSession.persisted.history = histInsert(gSession.persisted.history, histEntryFor(gSession.target.spec, epochMillis()), 10)
     persistHistory()
     return historyChangedMsg()
 }
@@ -305,9 +305,9 @@ pub fn appendHistory(): string {
 // and the next boot with no flags restores whatever came before it. Carries the
 // existing run stamp forward so recording a config cannot un-run an entry.
 pub fn recordConfig(): string {
-    let probe = histEntryFor(gSession.target.spec, 0 as i64)
+    let probe = histEntryFor(gSession.target.spec, 0)
     let stamp = histLastRunAt(gSession.persisted.history, probe)
-    gSession.persisted.history = histInsert(gSession.persisted.history, histEntryFor(gSession.target.spec, stamp), 10 as i64)
+    gSession.persisted.history = histInsert(gSession.persisted.history, histEntryFor(gSession.target.spec, stamp), 10)
     persistHistory()
     return historyChangedMsg()
 }
@@ -320,7 +320,7 @@ pub fn historyChangedMsg(): string {
 pub fn firstHistoryConfig(): Option<string> {
     if let Result.Ok(d) = Json.parse(gSession.persisted.history) {
         if d.isArray() && d.len() > 0 {
-            if let Option.Some(el) = d.at(0 as i64) {
+            if let Option.Some(el) = d.at(0) {
                 return Option.Some(el.rawStr())
             }
         }
@@ -361,7 +361,7 @@ pub fn journalHere(): void {
     if let Result.Ok(d) = currentDir() {
         cwd = d
     }
-    journalSession(gSession.server.sessionId, selfPid() as i64, gSession.server.listenPort ?? (0 as i64), gSession.target.spec.binPath, adapterId(), cwd)
+    journalSession(gSession.server.sessionId, selfPid() as i64, gSession.server.listenPort ?? 0, gSession.target.spec.binPath, adapterId(), cwd)
 }
 
 // The descriptor names the program this server is debugging, and that changes
