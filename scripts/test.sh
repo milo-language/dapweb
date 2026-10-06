@@ -41,6 +41,27 @@ pass=0
 fail=0
 failed=""
 
+# Run one suite and count it. Exiting 0 is not enough: a suite whose matcher stops
+# matching (a renamed message type, a regex over source that moved) checks nothing and
+# still exits 0. Every suite prints "  ok <label>" per passing check, so zero of those
+# is a failure.
+run_checked() {
+    name="$1"; shift
+    out="/tmp/dapweb_test_out_$$_$name"
+    # Output streams through tee; the exit status rides out in a side file because
+    # POSIX sh has no PIPESTATUS. The `if` keeps set -e from aborting on a failing suite.
+    { if bun "tests/$name.ts" "$@"; then rc=0; else rc=$?; fi; echo "$rc" >"$out.status"; } 2>&1 | tee "$out"
+    st=$(cat "$out.status")
+    oks=$(grep -c '^  ok ' "$out" || true)
+    if [ "$st" -eq 0 ] && [ "$oks" -gt 0 ]; then
+        pass=$((pass + 1))
+    else
+        [ "$st" -eq 0 ] && echo "  FAIL $name: exited 0 but reported no passing checks"
+        fail=$((fail + 1)); failed="$failed $name"
+    fi
+    rm -f "$out" "$out.status"
+}
+
 # A suite that needs a live server: spawn one, wait for the port, run, kill.
 serve_suite() {
     name="$1"; port="$2"; shift 2
@@ -65,7 +86,7 @@ serve_suite() {
         echo "  FAIL $name: its server exited at startup (port $port taken?), see /tmp/dapweb_test_$name.log"
         fail=$((fail + 1)); failed="$failed $name"; return 0
     fi
-    if bun "tests/$name.ts" "$port" ./dapweb; then pass=$((pass + 1)); else fail=$((fail + 1)); failed="$failed $name"; fi
+    run_checked "$name" "$port" ./dapweb
     kill "$srv" 2>/dev/null || true
     wait "$srv" 2>/dev/null || true
 }
@@ -76,7 +97,7 @@ self_suite() {
     case "$name" in *"$filter"*) ;; *) return 0 ;; esac
     echo ""
     echo "── $name (self-spawning)"
-    if bun "tests/$name.ts" ./dapweb; then pass=$((pass + 1)); else fail=$((fail + 1)); failed="$failed $name"; fi
+    run_checked "$name" ./dapweb
 }
 
 # Raw syscalls belong in milo's std behind safe APIs, so application code has

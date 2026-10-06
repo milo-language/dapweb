@@ -176,7 +176,11 @@ subprocesses); build it when an adapter needs it.
 - Unblocks M10 (js-debug `startDebugging`). Do the design before Phase 2 step 4 locks file
   boundaries; implement here.
 
-## Phase 5: features
+## Phase 5: features, done
+
+Shipped: inline values, run to cursor / set next statement (goto hidden on lldb-dap, which
+lacks it), follow the agent, read-only stop timeline, data breakpoints (dropped on relaunch:
+lldb-dap ids are per run). Each with a suite proven to fail when its feature is broken.
 
 Order: F1 inline values → F2 goto → F4 follow agent → F3 timeline → F5 data bps.
 Each one gets an e2e test driven through `dapweb api` plus a browser assertion.
@@ -195,7 +199,11 @@ in place of the mascot.
 Decided: GitHub Pages (`docs/site/index.html`, static), light page with the dark app
 screenshots. README links to it.
 
-## Phase 6: cleanup (S5, R1-R3)
+## Phase 6: cleanup (S5, R1-R3), done
+
+Shipped: design.md rewritten, importHistory removed, speckit removed, raw shots untracked,
+and a gate in test.sh that fails any suite reporting zero passing checks. Most suites were
+also mutation-checked when their feature landed.
 
 - Rewrite `design.md` as open work + hard-won facts only; fold this roadmap in when done.
 - Delete R1.
