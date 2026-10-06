@@ -1413,28 +1413,15 @@ export default function App() {
         </div>
         <AsideDrag onResize={(w) => setAsideW(w)} />
         <div className="aside" style={{ width: asideW }}>
-          {threads.length > 0 && (
-            <Panel title="Threads">
-              {threads.map((t) => {
-                const loc = tlocs.get(t.id);
-                const tl = threadLabel(t.name, t.id);
-                return (
-                  <div key={t.id} className={"frame" + (t.id === curTid ? " top" : "")}
-                       title={tl.tip} onClick={() => selectThread(t)}>
-                    <span className="tname">{tl.label}</span>
-                    {loc && <span className="tloc">
-                      {loc.label}
-                      {loc.pc && memLinks && (
-                        <span className="addr" title="view memory at pc"
-                              onClick={(e) => { e.stopPropagation(); viewMemory(loc.pc); }}> {loc.pc}</span>
-                      )}
-                    </span>}
-                  </div>
-                );
-              })}
-            </Panel>
-          )}
-          <Panel title="Call Stack">
+          {/* Ordered by how often a stop sends you there: the values first, then
+              where you are, then what you asked to see. */}
+          <Panel title="Locals" persist="dapweb.localsCollapsed">
+            <VarList vars={locals} disabled={!stopped} parentRef={scopeRef}
+                     empty={stopped ? "no locals in this frame" : "run to a breakpoint to see local variables"}
+                     onSetVar={caps.supportsSetVariable ? setVar : undefined}
+                     onAddr={memLinks ? viewMemory : undefined} />
+          </Panel>
+          <Panel title="Call Stack" persist="dapweb.stackCollapsed" badge={frames.length || null}>
             {frames.length
               ? frames.map((f, i) => (
                   <div key={i} className={"frame" + (i === selFrame ? " top" : "")}
@@ -1444,23 +1431,7 @@ export default function App() {
                 ))
               : <span className="hint">{stopped ? "no frames" : "run to a breakpoint to see the call stack"}</span>}
           </Panel>
-          <Panel title="Breakpoints" action={bps.size > 0 && (
-            <span className="bpacts">
-              <button className="addbtn" title={anyBpEnabled ? "disable all" : "enable all"}
-                      onClick={toggleAllBps}>⊘</button>
-              <button className="addbtn" title="remove all" onClick={clearAllBps}>✕</button>
-            </span>
-          )}>
-            <BpList bps={bps} files={files} onJump={(p, ln) => openFile(p, ln)} onRemove={removeBp} onToggle={setBpEnabled}
-                    onEdit={(path, line, x, y) => setBpEdit({ path, line, x, y })} />
-          </Panel>
-          <Panel title="Locals">
-            <VarList vars={locals} disabled={!stopped} parentRef={scopeRef}
-                     empty={stopped ? "no locals in this frame" : "run to a breakpoint to see local variables"}
-                     onSetVar={caps.supportsSetVariable ? setVar : undefined}
-                     onAddr={memLinks ? viewMemory : undefined} />
-          </Panel>
-          <Panel title="Watch" action={<button className="addbtn" onClick={() => {
+          <Panel title="Watch" persist="dapweb.watchCollapsed" badge={watches.length || null} action={<button className="addbtn" onClick={() => {
             const expr = prompt("watch expression:");
             if (!expr) return;
             setWatches((w) => [...w, { expr, value: null }]);
@@ -1480,6 +1451,41 @@ export default function App() {
                 ))
               : <span className="hint">no expressions: + adds one, evaluated at every stop</span>}
           </Panel>
+          <Panel title="Breakpoints" persist="dapweb.bpsCollapsed" badge={bps.size || null} action={bps.size > 0 && (
+            <span className="bpacts">
+              <button className="addbtn" title={anyBpEnabled ? "disable all" : "enable all"}
+                      onClick={toggleAllBps}>⊘</button>
+              <button className="addbtn" title="remove all" onClick={clearAllBps}>✕</button>
+            </span>
+          )}>
+            <BpList bps={bps} files={files} onJump={(p, ln) => openFile(p, ln)} onRemove={removeBp} onToggle={setBpEnabled}
+                    onEdit={(path, line, x, y) => setBpEdit({ path, line, x, y })} />
+          </Panel>
+          {threads.length > 0 && (
+            // One thread has nothing to choose between, so it starts folded to its
+            // count; Panel reads the default only on mount, which is each new stop
+            // after a run ends (threads empties on terminate).
+            <Panel title="Threads" persist="dapweb.threadsCollapsed"
+                   defaultCollapsed={threads.length === 1} badge={threads.length}>
+              {threads.map((t) => {
+                const loc = tlocs.get(t.id);
+                const tl = threadLabel(t.name, t.id);
+                return (
+                  <div key={t.id} className={"frame" + (t.id === curTid ? " top" : "")}
+                       title={tl.tip} onClick={() => selectThread(t)}>
+                    <span className="tname">{tl.label}</span>
+                    {loc && <span className="tloc">
+                      {loc.label}
+                      {loc.pc && memLinks && (
+                        <span className="addr" title="view memory at pc"
+                              onClick={(e) => { e.stopPropagation(); viewMemory(loc.pc); }}> {loc.pc}</span>
+                      )}
+                    </span>}
+                  </div>
+                );
+              })}
+            </Panel>
+          )}
           {/* Registers moved to their own bottom-panel tab (next to Memory) —
               they're tall and noisy beside LOCALS, and pair with the memory view. */}
           {/* Rarely touched per-session — lives at the bottom on purpose. */}
