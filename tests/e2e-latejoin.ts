@@ -96,13 +96,13 @@ await live.wait(m => m.type === "breakpoint" && m.line === 20 && !m.set);
 live.send({ cmd: "run", stopAtMain: true });
 await live.wait(m => m.type === "capabilities");
 const s0 = await live.wait(m => m.type === "stopped");
-ok(s0.line === 14, `stopped at main (line ${s0.line})`);
+ok(s0.line === 14 && s0.atMain === true, `stopped at main, flagged atMain (line ${s0.line}, atMain ${s0.atMain})`);
 // A console command puts known text in the output log.
 live.send({ cmd: "evaluate", id: 1, expr: "script print('latejoin-marker')", context: "repl" });
 await live.wait(m => m.type === "evalResult" && m.id === 1);
 live.send({ cmd: "continue", tid: s0.tid });
 const s1 = await live.wait(m => m.type === "stopped");
-ok(s1.line === 23 && s1.reason === "breakpoint", `continued to the breakpoint (line ${s1.line}, ${s1.reason})`);
+ok(s1.line === 23 && s1.reason === "breakpoint" && s1.atMain === false, `continued to a user breakpoint, not atMain (line ${s1.line}, ${s1.reason}, atMain ${s1.atMain})`);
 await live.wait(m => m.type === "threads");
 await live.wait(m => m.type === "regions");
 await live.settle();

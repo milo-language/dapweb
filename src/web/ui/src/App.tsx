@@ -1,17 +1,17 @@
 // Dapweb web UI — React + xterm.js. Talks WS protocol v2 (see docs/design.md).
-import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useReducer, useRef, useState, useCallback } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import SourceView, { langFor, BpMeta, BpPopover, HoverVar } from "./SourceView";
 import ConfigDrawer, { DebugConfig, stripJsonc } from "./ConfigDrawer";
 import { tabLabels } from "./tabLabels";
-import { primaryAction, exitLabel, Phase } from "./primary";
+import { primaryAction, exitLabel } from "./primary";
 import { threadLabel } from "./threadLabel";
+import {
+  Frame, Thread, Var, Region, sessionReducer, initialSession, base, hasSrc, bpKey, stopOf, stopStatus,
+} from "./session";
 
-type Frame = { id: number; name: string; line: number; path: string; ipRef: string };
-type Thread = { id: number; name: string };
 type Insn = { addr: string; text: string; sym: string; line: number };
-type Var = { name: string; value: string; ref: number; mref?: string; type?: string };
 type Watch = { expr: string; value: string | null };
 // Enriched hover payload: the evaluated value plus, for aggregates/pointers,
 // one level of expanded members (name/type/value) rendered in the tooltip.
@@ -56,9 +56,6 @@ let evalSeq = 0;
 // id → routing for evalResult/children/frameLocals/disasm/completions/memory
 const pending = new Map<number, any>();
 
-// A memory-map region from lldb's `memory region --all` (server-parsed).
-// s/e are hex address strings; p = perms "rw-"; n = segment name or "".
-type Region = { s: string; e: string; p: string; n: string };
 type RegionType = "stack" | "heap" | "code" | "const" | "data";
 // A region with numeric bounds + its classified type — the shared substrate for
 // both the addr→type classifier and the birds-eye region map.
@@ -145,22 +142,6 @@ function readMemAt(addr: string, count: number): Promise<Uint8Array | null> {
 
 const EMPTY_BPS = new Map<number, any>();
 const noop = () => {};
-const base = (p: string) => p.split("/").pop() || p;
-// A frame has real source only with a readable file path. lldb hands back
-// "module`symbol" pseudo-paths for no-debug-info frames (dyld/libc) — those get
-// the disassembly view, not a bogus source tab.
-const hasSrc = (p: string) => !!p && !p.includes("`");
-// DAP stopped.reason → the pill's "why". Unknown reasons (adapters add their
-// own) still show, verbatim, rather than collapsing to a bare "paused".
-const STOP_WHY: Record<string, string> = {
-  step: "paused after step", breakpoint: "paused on breakpoint", exception: "paused on exception",
-  entry: "paused on entry", goto: "paused after goto",
-  "function breakpoint": "paused on function breakpoint", "data breakpoint": "paused on data breakpoint",
-  "instruction breakpoint": "paused on instruction breakpoint",
-};
-const stopWhy = (reason: string) => STOP_WHY[reason] ?? (reason ? `paused (${reason})` : "paused");
-// Breakpoints are keyed per file; newline can't appear in a path.
-const bpKey = (path: string, line: number) => `${path}\n${line}`;
 
 // ── Merged terminal (program + debugger output in one xterm) ──
 // VS Code interleaves the debuggee's tty and the debugger's own output in a
@@ -295,30 +276,17 @@ export default function App() {
   // Offline gets more than the status pill: a banner, because every control in
   // the app is a silent no-op until the socket comes back.
   const [offline, setOffline] = useState(false);
-  const [program, setProgram] = useState("");
-  const [srcPath, setSrcPath] = useState("");   // configured main source (hello)
+  // Everything the server pushes, folded by one pure reducer (session.ts).
+  const [S, dispatch] = useReducer(sessionReducer, initialSession);
+  const { program, sourcePath: srcPath, files, bps, stopLine, stopPath, frames, threads, tlocs,
+          curTid, locals, phase, config: cfg, history: cfgHist, caps, selFrame, scopeRef,
+          stopSeq, regions, adapterCmd, adapterId: dbgLabel, configError: configErr } = S;
+  const registersRef = S.stop?.registersRef ?? 0;
   const [viewPath, setViewPath] = useState(""); // file currently displayed
-  const [files, setFiles] = useState<Map<string, string>>(new Map()); // path → content
   const [tabs, setTabs] = useState<string[]>([]);
   const tabLabel = useMemo(() => tabLabels(tabs), [tabs]);
-  const [bps, setBps] = useState<Map<string, BpMeta>>(new Map()); // bpKey → meta
-  const [stopLine, setStopLine] = useState(0);
-  const [stopPath, setStopPath] = useState("");  // file the stop/selected frame is in
-  const [frames, setFrames] = useState<Frame[]>([]);
-  const [threads, setThreads] = useState<Thread[]>([]);
-  const [tlocs, setTlocs] = useState<Map<number, { label: string; pc: string }>>(new Map());
-  const [curTid, setCurTid] = useState(-1);               // thread frames/stepping follow
-  const [locals, setLocals] = useState<Var[]>([]);
   const [watches, setWatches] = useState<Watch[]>([]);
-  // "done" = a run ended in this session; Run then reads "Run again".
-  const [phase, setPhase] = useState<Phase>("idle");
-  // The server's canonical launch-config object (hello.config) — seeds the
-  // drawer editor. The editor is the source of truth once the user types; this
-  // only re-seeds it on load / history restore (see cfgTextRef for the live text).
-  const [cfg, setCfg] = useState<DebugConfig>({});
-  const [cfgHist, setCfgHist] = useState<DebugConfig[]>([]);   // server-owned config history
   const [tab, setTab] = useState<"term" | "mem" | "stack" | "regs" | "bin">("term");
-  const [dbgLabel, setDbgLabel] = useState("debugger");  // legend + line tag
   const [termShown, setTermShown] = useState<Set<TermKind>>(() => new Set<TermKind>(["prog", "repl"]));
   const toggleTerm = (k: TermKind) => {
     if (termHidden.has(k)) termHidden.delete(k); else termHidden.add(k);
@@ -327,7 +295,6 @@ export default function App() {
   };
   const [bottomH, setBottomH] = useState(240);
   const [asideW, setAsideW] = useState(340);
-  const [adapterCmd, setAdapterCmd] = useState("");    // resolved adapter command (ⓘ popover)
   // Opens only when there is nothing to run; a resolvable target goes straight to
   // the debug view. The gear reopens it.
   const [showConfig, setShowConfig] = useState(false);
@@ -342,21 +309,10 @@ export default function App() {
   const [procErr, setProcErr] = useState("");
   const [showInfo, setShowInfo] = useState(false);    // adapter + capabilities popover
   const [showMenu, setShowMenu] = useState(false);     // the header's "session ▾" menu
-  const [configErr, setConfigErr] = useState("");
-  const [caps, setCaps] = useState<Record<string, any>>({});
   const [stopMain, setStopMain] = useState(() => localStorage.getItem("dapweb.stopAtMain") !== "0");
-  const [selFrame, setSelFrame] = useState(0);
   // Monotonic counters so re-clicking the same line still reveals it.
   const [jump, setJump] = useState({ line: 0, n: 0 });
   const [disasm, setDisasm] = useState<{ lines: Insn[]; pc: string } | null>(null);
-  // Parent container ref for top-level locals — what setVariable needs.
-  const [scopeRef, setScopeRef] = useState(0);
-  const [registersRef, setRegistersRef] = useState(0);  // register scope ref (0 = adapter exposes none)
-  // Bumped on every stop. lldb-dap keeps the register scope/group refs stable
-  // across a session, so a ref-keyed refetch never refires — the panel would
-  // freeze at the first stop's values. This forces a re-read each stop.
-  const [stopSeq, setStopSeq] = useState(0);
-  const [regions, setRegions] = useState<Region[]>([]);  // memory map for region-coloring (lldb only)
   // Frame registers reported up from RegistersPanel — sp drives stack detection,
   // fp/lr let the memory view annotate saved-frame / return-address slots.
   const [regFrame, setRegFrame] = useState<{ sp: string; fp: string; lr: string }>({ sp: "", fp: "", lr: "" });
@@ -531,27 +487,25 @@ export default function App() {
     };
     ws.onmessage = (ev) => {
       const m = JSON.parse(String(ev.data));
+      // Session state first; what follows is only what the reducer cannot do:
+      // the terminal, the editor tabs, the URL, and routing RPC replies.
+      dispatch(m);
       if (m.type === "hello") {
-        setProgram(m.program); setSrcPath(m.sourcePath || ""); setViewPath(m.sourcePath || "");
-        setAdapterCmd(m.adapterCmd || ""); setConfigErr(""); setBps(new Map());
-        dbgTag = m.adapterId || "debugger"; setDbgLabel(dbgTag);
-        setFiles(new Map()); setTabs(m.sourcePath ? [m.sourcePath] : []);
-        setStopPath(""); setDisasm(null);
-        // canonical config from the server; seed the live run text too so Run
-        // works even before the drawer editor mounts.
-        setCfg(m.config || {});
+        setViewPath(m.sourcePath || "");
+        dbgTag = m.adapterId || "debugger";
+        setTabs(m.sourcePath ? [m.sourcePath] : []);
+        setDisasm(null);
+        // seed the live run text so Run works even before the drawer editor mounts.
         if (!cfgTextRef.current) cfgTextRef.current = JSON.stringify(m.config || {}, null, 2);
         // A different sessionId is a genuinely new session (newSession command
-        // or server restart) — wipe everything a same-session reconnect would
+        // or server restart): wipe everything a same-session reconnect would
         // have replayed. A rejoin replay repopulates via bpSync/stopped/etc.
         const fresh = !!m.sessionId && m.sessionId !== sidRef.current;
         acceptReplayRef.current = fresh;   // only a cleared terminal renders replay
         if (fresh) {
           sidRef.current = m.sessionId;
-          setFrames([]); setThreads([]); setTlocs(new Map()); setCurTid(-1);
-          setLocals([]); setWatches([]); setStopLine(0);
-          setSelFrame(0); setMem(null); setMemAddr(""); setMemErr("");
-          if (phaseRef.current !== "idle") setPhase("idle");
+          setWatches([]);
+          setMem(null); setMemAddr(""); setMemErr("");
           termClear(termRef.current);
           // The banner below only prints when the state CHANGES, and clearing the
           // terminal just erased whatever it last printed. Without this, a new
@@ -567,10 +521,9 @@ export default function App() {
           history.replaceState(null, "", u);
         }
         // joining a live shared session — a stopped replay may refine this.
-        if (m.phase === "running") { setPhase("running"); setStatus({ text: "joined a live session already in progress", short: "running", cls: "running" }); }
-        // History is server-owned: seed it from hello, then run the one-shot
-        // localStorage → server migration and retire the client-local store.
-        setCfgHist(m.history || []);
+        if (m.phase === "running") setStatus({ text: "joined a live session already in progress", short: "running", cls: "running" });
+        // History is server-owned: run the one-shot localStorage → server
+        // migration and retire the client-local store.
         try {
           const legacy = localStorage.getItem("dapweb.configHistory");
           if (legacy) {
@@ -601,34 +554,6 @@ export default function App() {
           }
         }
       }
-      // Any peer's breakpoint change, including our own echo. Applying it here
-      // rather than only optimistically means a breakpoint an agent sets appears
-      // in the gutter of a tab that is already open, not just after a reload.
-      else if (m.type === "breakpoint" && m.path) {
-        setBps((b) => {
-          const next = new Map(b);
-          const k = bpKey(m.path, m.line);
-          if (m.set) {
-            next.set(k, {
-              ...(m.condition ? { condition: m.condition } : {}),
-              ...(m.hitCondition ? { hitCondition: m.hitCondition } : {}),
-              ...(m.logMessage ? { logMessage: m.logMessage } : {}),
-              ...(m.enabled === false ? { enabled: false } : {}),
-            });
-          } else next.delete(k);
-          return next;
-        });
-      }
-      else if (m.type === "bpSync") {
-        // Late-join replay: server's bp set is truth (acks are optimistic).
-        setBps((b) => new Map(b).set(bpKey(m.path, m.line), {
-          ...(m.condition ? { condition: m.condition } : {}),
-          ...(m.hitCondition ? { hitCondition: m.hitCondition } : {}),
-          ...(m.logMessage ? { logMessage: m.logMessage } : {}),
-          ...(m.enabled === false ? { enabled: false } : {}),
-        }));
-      }
-      else if (m.type === "historyChanged") setCfgHist(m.history || []);
       // Another peer (dapweb api, an agent) announced a command before running
       // it. Surface it in the console and flash it in the toolbar, so a stop the
       // user did not ask for is never unexplained.
@@ -636,11 +561,8 @@ export default function App() {
         consoleAppend(`${m.text}\n`, "agent");
         setAgentNote({ text: m.text, at: Date.now() });
       }
-      else if (m.type === "configError") setConfigErr(m.error);
-      else if (m.type === "capabilities") { try { setCaps(JSON.parse(m.raw).body || {}); } catch {} }
       else if (m.type === "source") {
         if (m.path) {
-          setFiles((f) => new Map(f).set(m.path, m.content));
           setTabs((t) => (t.includes(m.path) ? t : [...t, m.path]));
           setViewPath(m.path);
           const pj = pendJumpRef.current;
@@ -651,17 +573,13 @@ export default function App() {
         }
       }
       else if (m.type === "threads") {
-        // sent on every stop (and replayed to late joiners).
-        setThreads(m.threads || []);
-        setCurTid(m.current ?? -1);
-        // Top frame per thread for the panel (id-correlated fetches — they
+        // Top frame per thread for the panel (id-correlated fetches: they
         // don't touch the user's thread/frame selection).
-        setTlocs(new Map());
         for (const t of m.threads || []) {
           const id = ++evalSeq;
           pending.set(id, { kind: "tloc", done: (r: any) => {
             const f = r.frames?.[0];
-            if (f) setTlocs((p) => new Map(p).set(t.id, { label: `${f.name}:${f.line}`, pc: f.ipRef || "" }));
+            if (f) dispatch({ type: "local/tloc", tid: t.id, label: `${f.name}:${f.line}`, pc: f.ipRef || "" });
           }});
           send({ cmd: "threadStack", tid: t.id, id });
         }
@@ -672,12 +590,9 @@ export default function App() {
       }
       else if (m.type === "stopped") {
         tidRef.current = m.tid;
-        setCurTid(m.tid);
         frame0Ref.current = m.frames?.[0]?.id ?? -1;
-        setSelFrame(0);
         const f0 = m.frames?.[0];
         const sp = (f0?.path || m.path || "");
-        setStopPath(sp);
         // The server's source-push dedup tracks only what *it* last sent; make
         // sure we have and show the stop file (real source only — pseudo-paths
         // get disassembly instead, and keep the last real file in the editor).
@@ -686,17 +601,7 @@ export default function App() {
           else setViewPath(sp);
           setTabs((t) => (t.includes(sp) ? t : [...t, sp]));
         }
-        setStopLine(m.line);
-        setFrames(m.frames || []);
-        setLocals(m.locals || []);
-        setScopeRef(m.scopeRef || 0);
-        setRegistersRef(m.registersRef || 0);
-        setStopSeq((s) => s + 1);
-        setPhase("stopped");
-        const where = hasSrc(sp) ? `${base(sp)}:${m.line}` : (f0?.name || "");
-        const why = stopWhy(m.reason || "");
-        const short = where ? `${why} · ${where}` : why;
-        setStatus({ text: m.description ? `${short}: ${m.description}` : short, short, cls: "stopped" });
+        setStatus(stopStatus(stopOf(m)));
         // Keep the asm pane live across steps; auto-open it for no-source frames.
         if (f0 && (!hasSrc(f0.path) || disasmOpenRef.current) && f0.ipRef) requestDisasm(f0);
         else setDisasm(null);
@@ -709,8 +614,6 @@ export default function App() {
         else if (p.kind === "hover") p.done(m.error ? null : m);
         else if (p.kind === "watch")
           setWatches((wsx) => wsx.map((w) => (w.expr === p.expr ? { ...w, value: m.value } : w)));
-      } else if (m.type === "regions") {
-        setRegions(m.regions || []);
       } else if (m.type === "children") {
         const p = pending.get(m.id);
         if (p) { pending.delete(m.id); p.done(m.vars || []); }
@@ -720,10 +623,8 @@ export default function App() {
         const p = pending.get(m.id);
         if (pending.delete(m.id)) {
           if (p?.done) p.done(m.vars || []);
-          else if (frameReqRef.current === m.id) {
-            setLocals(m.vars || []);
-            setScopeRef(m.scopeRef || 0);
-          }
+          else if (frameReqRef.current === m.id)
+            dispatch({ type: "local/frameLocals", vars: m.vars || [], scopeRef: m.scopeRef || 0 });
         }
       } else if (m.type === "setVarResult") {
         const p = pending.get(m.id);
@@ -788,15 +689,9 @@ export default function App() {
         send({ cmd: "kill" });
       }
       else if (m.type === "terminated") {
-        setPhase("done");
-        setStopLine(0);
-        setFrames([]);
-        setThreads([]);
-        setLocals([]);
         setDisasm(null);
-        // return the pane to the program's source; leaving a dead no-source
+        // Return the pane to the program's source; leaving a dead no-source
         // (dyld/libc) frame in viewPath strands the "disassembling…" placeholder.
-        setStopPath("");
         // With no configured source (a bare `dapweb ./prog`), the file the run
         // stopped in is the best thing to show; a pseudo-path is not.
         setViewPath(srcPathRef.current || (hasSrc(viewPathRef.current) ? viewPathRef.current : ""));
@@ -880,10 +775,8 @@ export default function App() {
     if (phaseRef.current !== "stopped") return;
     const f = frames[i];
     if (!f) return;
-    setSelFrame(i);
+    dispatch({ type: "local/selectFrame", i });
     frame0Ref.current = f.id;
-    setStopLine(f.line);
-    setStopPath(f.path);
     if (hasSrc(f.path)) openFile(f.path);
     if (!hasSrc(f.path) || disasmOpenRef.current) requestDisasm(f); else setDisasm(null);
     const id = ++evalSeq;
@@ -898,17 +791,14 @@ export default function App() {
   const selectThread = (t: Thread) => {
     if (phaseRef.current !== "stopped" || t.id === curTid) return;
     tidRef.current = t.id;
-    setCurTid(t.id);
+    dispatch({ type: "local/selectThread", tid: t.id });
     const id = ++evalSeq;
     pending.set(id, { kind: "threadStack", done: (m: any) => {
       const fs: Frame[] = m.frames || [];
-      setFrames(fs);
-      setSelFrame(0);
+      dispatch({ type: "local/threadFrames", frames: fs });
       const f0 = fs[0];
-      if (!f0) { setLocals([]); return; }
+      if (!f0) return;
       frame0Ref.current = f0.id;
-      setStopLine(f0.line);
-      setStopPath(f0.path);
       if (hasSrc(f0.path)) openFile(f0.path, f0.line);
       if (!hasSrc(f0.path) || disasmOpenRef.current) requestDisasm(f0); else setDisasm(null);
       const fid = ++evalSeq;
@@ -957,7 +847,7 @@ export default function App() {
     // pushing something the server answers with "attach needs a target".
     if (!live && hasTarget(c)) send({ cmd: "setConfig", ...c });
   };
-  const writeCfg = (c: any) => { cfgTextRef.current = JSON.stringify(c, null, 2); setCfg(c); pushCfg(c); };
+  const writeCfg = (c: any) => { cfgTextRef.current = JSON.stringify(c, null, 2); dispatch({ type: "local/config", config: c }); pushCfg(c); };
 
   const applyTarget = (text: string) => {
     const c = readCfg();
@@ -1057,7 +947,7 @@ export default function App() {
     const text = stripJsonc(cfgTextRef.current).trim();  // config dialect is JSONC (launch.json)
     if (text) {
       try { config = JSON.parse(text); }
-      catch (e: any) { setConfigErr(`invalid JSON: ${e.message}`); setShowConfig(true); return; }
+      catch (e: any) { dispatch({ type: "local/configError", error: `invalid JSON: ${e.message}` }); setShowConfig(true); return; }
     }
     const force = phaseRef.current === "running" || phaseRef.current === "stopped";
     // Retargeting is the destructive surprise: you meant to launch something else
@@ -1065,10 +955,9 @@ export default function App() {
     // what Restart does without asking, so Run should not ask either.
     const retarget = force && !!config && (config.program ?? "") !== (cfg.program ?? "");
     if (retarget && !confirm(`Switch this session to ${config.program} ? The running program is killed first.`)) return;
-    setConfigErr("");
-    setPhase("running");
+    dispatch({ type: "local/configError", error: "" });
+    dispatch({ type: "local/resumed" });
     setStatus({ text: force ? "restarting with the new target…" : "running…", short: "running", cls: "running" });
-    setStopLine(0);
     send({ cmd: "run", stopAtMain: stopMain, ...(config ? { config } : {}), ...(force ? { force: true } : {}) });
     termRef.current?.focus();
   };
@@ -1078,15 +967,13 @@ export default function App() {
   // kill+rerun fallback (e.g. debugpy).
   const restart = () => {
     if (phase !== "running" && phase !== "stopped") return;
-    setPhase("running");
+    dispatch({ type: "local/resumed" });
     setStatus({ text: "restarting…", short: "restarting", cls: "running" });
-    setStopLine(0);
     send({ cmd: "restart" });
   };
   const resume = (cmd: string, granularity?: string) => {
-    setPhase("running");
+    dispatch({ type: "local/resumed" });
     setStatus({ text: "running…", short: "running", cls: "running" });
-    setStopLine(0);
     send({ cmd, tid: tidRef.current, ...(granularity ? { granularity } : {}) });
   };
   // VS Code's debug keys. Read through a ref so the one window listener always
@@ -1531,7 +1418,7 @@ export default function App() {
           {memLinks && (
             <div className={"tab" + (tab === "mem" ? " active" : "")} onClick={() => setTab("mem")}>Memory</div>
           )}
-          {registersRef > 0 && (
+          {S.hasRegisters && (
             <div className={"tab" + (tab === "regs" ? " active" : "")} onClick={() => setTab("regs")}>Registers</div>
           )}
           {memLinks && (
@@ -1565,7 +1452,7 @@ export default function App() {
         </div>
         {/* Always mounted (display-toggled): RegistersPanel reports sp/fp/lr up via
             onFrame, which the Memory and Stack views depend on regardless of tab. */}
-        {registersRef > 0 && (
+        {S.hasRegisters && (
           <div className="tabpane regpane" style={{ display: tab === "regs" ? "flex" : "none" }}>
             <RegistersPanel regRef={registersRef} stopSeq={stopSeq} disabled={!stopped}
                             classify={classifyRegion} onFrame={setRegFrame}
