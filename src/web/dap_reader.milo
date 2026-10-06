@@ -25,13 +25,10 @@ from "json-rpc/frame" import {
     writeFrame as writeFrameFd
 }
 from "std/io" import {
-    fdChannel
+    OwnedFd, fdChannel
 }
 from "std/json" import {
     Json
-}
-from "std/os" import {
-    close
 }
 from "std/path" import {
     Path
@@ -247,39 +244,46 @@ fn respErrText(doc: &Json): string {
 // P: pty master → browser terminal. fdChannel owns the read/EAGAIN pump; we just
 // wrap each chunk and forward.
 //
-// This task OWNS `master` and is the only thing allowed to close it. fdChannel's
-// reader parks in schedulerWaitRead(master); closing the fd from anywhere else
-// leaves that reader parked on a free descriptor number, and the next pipe() to
-// reuse the number gets its bytes stolen by a task from a dead session (which
-// showed up as a second debug run hanging with its DAP responses vanishing into
-// the previous run's stderr log).
-fn ptyPumpLoop(master: i32, ch: Channel<string>): void {
-    for chunk in fdChannel(master) {
+// `reader` is this task's own dup of the master, and dropping it at the end is the
+// only close it gets. fdChannel's reader parks in schedulerWaitRead on that number;
+// had anything else closed it, the reader would sit parked on a free descriptor and
+// the next pipe() to reuse the number would get its bytes stolen by a task from a
+// dead session (which showed up as a second debug run hanging with its DAP responses
+// vanishing into the previous run's stderr log). The Pty in proc.pty owns the
+// original master, used by the stdin and resize commands; see closePty.
+fn ptyPumpLoop(reader: OwnedFd, master: i32, ch: Channel<string>): void {
+    for chunk in reader.channel() {
         wsPush(ch, Json.obj().str("type", "ptyData").str("data", chunk).build())
     }
-    // The stdin command writes through proc.pty. Forget it before the close, or a
-    // keystroke after the debuggee exits lands on whatever reuses this number.
+    // The debuggee is gone: stdin typed from now on is buffered for the next run.
     if let Option.Some(p) = replace(gSession.proc.pty, Option.None) {
         if p.fd() != master {
             gSession.proc.pty = Option.Some(p)
+        } else {
+            closePty(p)
         }
     }
-    close(master)
+}
+
+// The one way a Pty leaves proc.pty for good: Pty has no Drop, so overwriting or
+// clearing the slot without this leaks the master.
+fn closePty(p: Pty): void {
+    var pty = p
+    pty.close()
 }
 
 // Drain the adapter's stderr so the pipe never fills (mergeStderr=false) and
 // stash the head of it for the pre-handshake death diagnostic. Cap at 8 KB —
 // a Python traceback / lldb-dap gripe fits; a chatty adapter can't grow it
 // unbounded. Also echoed to the server log so it's visible there too.
-fn adapterStderrPump(errFd: i32): void {
-    for chunk in fdChannel(errFd) {
+fn adapterStderrPump(errFd: OwnedFd): void {
+    for chunk in errFd.channel() {
         eprint("[adapter] " + chunk)
         if gSession.proc.adapterStderr.len < 8192 {
             gSession.proc.adapterStderr = gSession.proc.adapterStderr + chunk
         }
     }
-    // Owns the fd — see ptyPumpLoop for why nobody else may close it.
-    close(errFd)
+    // Dropping errFd here closes it: see ptyPumpLoop for why its reader must be the closer.
 }
 
 fn outputMsg(doc: &Json): string {
@@ -556,18 +560,32 @@ fn handleRunInTerminal(cl: &mut DapClient, doc: &Json, reqSeq: i64, ch: &Channel
                     gSession.proc.debuggeePid = Option.Some(pid as i64)
                     cl.respond(reqSeq, "runInTerminal", Json.obj().int("processId", pid as i64).build())
                     let master = pty.masterFd
+                    let reader = match OwnedFd.dup(master) {
+                        Result.Ok(r) => {
+                            r
+                        }
+                        Result.Err(_e) => {
+                            eprint("[srv] pty dup failed\n")
+                            closePty(pty)
+                            return -1
+                        }
+                    }
                     // direct global set (same scheduler thread) — and flush
                     // any keystrokes typed while the adapter was launching.
                     if gSession.proc.stdinBuf.len > 0 {
                         let _n = pty.writeOnce(gSession.proc.stdinBuf)
                         gSession.proc.stdinBuf = ""
                     }
-                    gSession.proc.pty = Option.Some(pty)
+                    // A restart replaces the pty: the old one's pump keeps its own
+                    // dup until the dead child EOFs it, so its master can go now.
+                    if let Option.Some(old) = replace(gSession.proc.pty, Option.Some(pty)) {
+                        closePty(old)
+                    }
                     // Channel handles are refcounted: the pump task outlives this
                     // call, so it gets its own retained handle rather than ours.
                     let ptyCh = ch.clone()
                     Task.spawn(move(): void => {
-                        ptyPumpLoop(master, ptyCh)
+                        ptyPumpLoop(reader, master, ptyCh)
                     }
                     )
                     return master
@@ -1123,9 +1141,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
             // arrives as terminated or adapter EOF (recv error above).
         } else if msg.kind == "request" {
             if msg.command == "runInTerminal" {
-                // A restart replaces the pty; the old master needs no close
-                // here — its own pump owns it and closes it when the dead child
-                // EOFs the master.
+                // A restart replaces the pty; handleRunInTerminal closes the old one.
                 let _m = handleRunInTerminal(&mut cl, msg.doc, msg.seq, ch)
             } else if msg.command == "startDebugging" {
                 // js-debug: the debuggee lives in a CHILD session the adapter
@@ -1205,7 +1221,9 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
     gSession.proc.runTo = Option.None
     gSession.proc.started = false
     gSession.proc.dapIn = Option.None
-    gSession.proc.pty = Option.None
+    if let Option.Some(p) = replace(gSession.proc.pty, Option.None) {
+        closePty(p)
+    }
     gSession.proc.stdinBuf = ""
     gSession.proc.oddSeq = -1 as i64
     gSession.stop.resume()
@@ -1275,18 +1293,18 @@ fn parseListenPort(s: &string): i64 {
 // pumped. Returns the port to connect to; the server pid lands in proc.srvPid for
 // teardown (closing our sockets leaves it listening forever).
 fn spawnTcpAdapter(prog: &string, args: &Vec<string>): Result<i64> {
-    let child = Child.spawn(prog, args, false)?
+    var child = Child.spawn(prog, args, false)?
     gSession.proc.srvPid = Option.Some(child.pid as i64)
-    let errFd = child.stderrFd
-    if errFd >= 0 {
+    let errFd = child.takeStderr()
+    if errFd.fd() >= 0 {
         // same pre-handshake crash capture as stdio adapters
         Task.spawn(move(): void => {
             adapterStderrPump(errFd)
         }
         )
     }
-    let outFd = child.stdoutFd
-    var chOut = fdChannel(outFd)
+    let outFd = child.takeStdout()
+    var chOut = outFd.channel()
     var acc: string = ""
     var port: i64 = 0
     for chunk in chOut {
@@ -1307,7 +1325,8 @@ fn spawnTcpAdapter(prog: &string, args: &Vec<string>): Result<i64> {
         for c in rest {
             eprint("[adapter] " + c)
         }
-        close(outFd)
+        // Closes stdout now that its pump is drained: this task is its last user.
+        let _drained = outFd
     }
     )
     return Result.Ok(port)
@@ -1453,11 +1472,10 @@ pub fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
             gSession.proc.dapIn = Option.Some(dfd)
             // Drain + capture adapter stderr (stdio spawns only; TCP has no child
             // stderr, errFd -1). Must start before cl moves into the reader task.
-            let errFd = cl.child.stderrFd
-            if errFd >= 0 {
-                // Hand the descriptor to the pump: -1 here makes Child.close()
-                // skip it, so it is closed exactly once, by its only reader.
-                cl.child.stderrFd = -1
+            // The pump owns the descriptor from here (takeStderr leaves -1 behind,
+            // so Child.close() skips it): it is closed exactly once, by its reader.
+            let errFd = cl.child.takeStderr()
+            if errFd.fd() >= 0 {
                 Task.spawn(move(): void => {
                     adapterStderrPump(errFd)
                 }
