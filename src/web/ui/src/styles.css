@@ -532,13 +532,14 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
 /* Muted, not orange — orange is the data-region hue; ascii shouldn't share it. */
 .memascii { color: var(--muted); }
 .mem-err { color: var(--bp); font-size: 12px; }
-/* Annotation line under every dump row (empty ones included, so the grid keeps
-   a fixed 2-line pitch). Same font-size as the row above: `ch` is font-relative,
-   and a smaller one would put the columns on a different axis. */
-.memannot { display: flex; gap: 16px; white-space: pre; line-height: 1.45; }
-.memannot .annospacer { visibility: hidden; }
-.annocell { display: inline-block; overflow: hidden; text-overflow: ellipsis;
-            white-space: nowrap; vertical-align: top; }
+/* Annotation column: one cell per 8-byte word, fixed width so every row keeps
+   one line and the columns line up; a cell shrinks (ellipsis) rather than
+   push the dump into a horizontal scroll. */
+.memannos { display: flex; gap: 2ch; min-width: 0; flex: 1; }
+/* The fixed height is what keeps rows equal: the italic face has a taller line
+   box than the upright one, and an annotated row came out half a pixel taller. */
+.annocell { flex: 0 1 22ch; min-width: 0; height: 1.45em; overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap; }
 .anno { color: var(--muted); font-style: italic; white-space: nowrap; }
 .anno.annofollow { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 .anno.annofollow:hover { color: var(--accent); }

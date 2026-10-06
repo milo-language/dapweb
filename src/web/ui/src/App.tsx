@@ -2405,7 +2405,7 @@ function StackView({ enabled, regFrame, frames, stopSeq, onAddr }: {
   );
 }
 
-// A per-slot annotation under an 8-byte group: what this word *is* — a typed
+// A per-slot annotation for an 8-byte group: what this word *is* — a typed
 // local (from DWARF), a saved frame pointer / return address, or a pointer into
 // a named region. `follow` (present on typed pointers) opens the struct view.
 type Anno = { text: string; full?: string; cls?: string; follow?: { ref: number; name: string; type: string; target: string } };
@@ -2521,7 +2521,6 @@ function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, locals, f
   };
 
   const rows: React.ReactNode[] = [];
-  const wordW = elemsPerWord * (elemChars + 1) - 1;   // char width of an 8-byte word
   if (mem) {
     let baseAddr = 0n;
     try { baseAddr = BigInt(mem.addr); } catch {}
@@ -2557,29 +2556,22 @@ function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, locals, f
         annos.push(sub.length === 8 ? annotate(baseAddr + BigInt(off + g), ptr, looksPtr) : null);
       }
       const ascii = [...chunk].map((b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : "·")).join("");
+      // Annotations sit in a fixed-width column at the end of the row, one cell
+      // per 8-byte word in word order, each clipped with the full text on hover.
+      // Lines under the dump made rows two or one lines tall, and the dump
+      // stopped reading as a grid.
       rows.push(
         <div key={off} className="memrow">
           <span className="memaddr">0x{(baseAddr + BigInt(off)).toString(16).padStart(12, "0")}</span>
           <span className="membytes">{groups}</span>
           <span className="memascii">{ascii}</span>
-        </div>
-      );
-      // Exactly one annotation line per dump row, always — every row is two
-      // lines tall whether or not it holds pointers, so the address column and
-      // the scroll position keep a fixed rhythm instead of jumping by how many
-      // slots happened to be annotated. Each label is clipped to its own word
-      // column (full text on hover), so labels can never collide or widen the
-      // dump into a horizontal scroll.
-      rows.push(
-        <div key={`a${off}`} className="memannot">
-          <span className="memaddr annospacer">0x000000000000</span>
-          <span className="membytes">
+          <span className="memannos">
             {annos.map((a, wi) => (
-              <span key={wi} className="annocell" style={{ width: `${wordW + 2}ch` }}>
+              <span key={wi} className="annocell"
+                    title={a ? (a.follow ? `follow ${a.follow.name} → ${a.follow.target}  (typed as ${a.follow.type})` : (a.full || a.text)) : undefined}>
                 {a && (
                   <span className={"anno" + (a.cls ? " " + a.cls : "") + (a.follow ? " annofollow" : "")}
-                        title={a.follow ? `follow ${a.follow.name} → ${a.follow.target}  (typed as ${a.follow.type})` : (a.full || a.text)}
-                        onClick={a.follow ? () => doFollow(a.follow!) : undefined}>↑ {a.text}</span>
+                        onClick={a.follow ? () => doFollow(a.follow!) : undefined}>{a.text}</span>
                 )}
               </span>
             ))}
