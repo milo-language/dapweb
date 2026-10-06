@@ -146,6 +146,7 @@ self_suite  e2e-commands
 self_suite  e2e-start
 self_suite  e2e-history
 self_suite  journal
+self_suite  update
 
 rm -rf "$state"
 echo ""

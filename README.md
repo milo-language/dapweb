@@ -160,7 +160,15 @@ cd dapweb-$P && ./dapweb /path/to/your-binary
 ```
 
 Use `curl`, not a browser download: macOS quarantines the archive and kills the
-unsigned binary on first run. Re-run the command to update.
+unsigned binary on first run.
+
+To update, run `dapweb update` (or `dapweb upgrade`). It checks the latest
+release, and if it is a different build, downloads it and swaps the binary in
+place; `dapweb update --check` only reports. `dapweb --version` prints the build
+you have. `dapweb web` and `dapweb start` also check at most once a day, in the
+background, and print one line (and show a banner in the browser) when a newer
+release exists; nothing is ever installed automatically. Set
+`DAPWEB_NO_UPDATE_CHECK=1` to turn that check off.
 
 ## Usage
 

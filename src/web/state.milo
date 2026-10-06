@@ -8,6 +8,9 @@
 from "../dap/session" import {
     LaunchSpec, adapterIdForKind, specConfigJson
 }
+from "../version" import {
+    buildId, versionString
+}
 from "std/json" import {
     Json
 }
@@ -114,6 +117,9 @@ pub struct ServerInfo {
     // UI bundle dir served from disk (--webroot); None serves the embedded copy.
     webroot: Option<string>,
     restored: bool, // booted idle and staged history[0] (banner hint)
+    // The update notice line, "" for none. In hello so a tab that joins after
+    // the background check finished still shows the banner.
+    update: string,
 }
 
 // js-debug runs the debuggee under a CHILD session it asks us to start (the
@@ -316,7 +322,7 @@ pub var gSession: Session = Session {
     output: [],
     server: ServerInfo {
         sessionId: "", listenPort: Option.None, startedAt: 0, noBrowser: false,
-        idleTtlSecs: 0, logLevel: 0, webroot: Option.None, restored: false,
+        idleTtlSecs: 0, logLevel: 0, webroot: Option.None, restored: false, update: "",
     },
 }
 
@@ -380,6 +386,10 @@ pub fn helloMsg(s: &Session): string {
     b = b.raw("history", s.persisted.history)
     if s.server.restored {
         b = b.bool("restored", true)
+    }
+    b = b.str("version", versionString(buildId()))
+    if s.server.update.len > 0 {
+        b = b.str("update", s.server.update)
     }
     return b.build()
 }

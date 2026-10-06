@@ -101,6 +101,12 @@ header .prog { color: var(--muted); font-size: 11px; margin-left: 8px; }
   color: var(--bp); background: rgba(248,81,73,0.14);
   border-bottom: 1px solid rgba(248,81,73,0.4);
 }
+.update-banner {
+  flex: none; display: flex; align-items: center; justify-content: center; gap: 10px;
+  font-size: 12px; padding: 3px 10px; color: var(--fg);
+  background: rgba(63,185,80,0.12); border-bottom: 1px solid rgba(63,185,80,0.4);
+}
+.update-banner .update-x { padding: 0 6px; line-height: 16px; border: none; background: none; color: var(--muted); }
 button {
   background: var(--surface); color: var(--fg); border: 1px solid var(--border);
   border-radius: 6px; padding: 5px 11px; cursor: pointer; font: inherit;

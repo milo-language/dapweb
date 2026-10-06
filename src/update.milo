@@ -1,0 +1,352 @@
+// Release updates: the "is there a newer build" check behind the notice that
+// `dapweb web`/`start` show, and `dapweb update`, which replaces this binary
+// with the latest release in place.
+//
+// Releases are a rolling `latest` GitHub release, rebuilt on every push to main,
+// carrying version.json ({"sha","date"}) next to the tarballs. A binary knows its
+// own identity from .version (see version.milo), so "newer" is a sha mismatch.
+//
+// Test-only env overrides (never set in normal use):
+//   DAPWEB_UPDATE_URL        version.json URL (default: the latest release's)
+//   DAPWEB_UPDATE_BASE       download base the tarball name is appended to
+//   DAPWEB_UPDATE_TEST_SELF  this binary's identity (see version.milo)
+
+from "std/env" import {
+    Env
+}
+from "std/json" import {
+    Json
+}
+from "std/fetch" import {
+    fetch
+}
+from "std/fs" import {
+    mkdirAll, removeAll, renameFile, setMode, realPath, pathExists, readFile, writeFile
+}
+from "std/process" import {
+    Command, Stdio, exePath
+}
+from "std/io" import {
+    fdChannel
+}
+from "std/path" import {
+    Path
+}
+from "std/time" import {
+    epochSecs
+}
+from "std/sysinfo" import {
+    pid as selfPid
+}
+from "std/sync" import {
+    Channel
+}
+from "std/runtime" import {
+    spawnOsThreadDetached
+}
+from "std/argparse" import {
+    ArgParser
+}
+from "./version" import {
+    BuildId, buildId, parseBuildId, versionString
+}
+from "./sessions" import {
+    stateDir
+}
+
+let RELEASE_BASE: string = "https://github.com/milo-language/dapweb/releases/download/latest"
+let CHECK_INTERVAL_SECS: i64 = 86400
+
+fn releaseBase(): string {
+    let b = Env.getOr("DAPWEB_UPDATE_BASE", "")
+    if b.len > 0 {
+        return b
+    }
+    return RELEASE_BASE.clone()
+}
+
+fn versionUrl(): string {
+    let u = Env.getOr("DAPWEB_UPDATE_URL", "")
+    if u.len > 0 {
+        return u
+    }
+    return releaseBase() + "/version.json"
+}
+
+// Byte-wise, which is chronological for the YYYY-MM-DD dates CI stamps.
+fn strLess(a: &string, b: &string): bool {
+    var i: i64 = 0
+    while i < a.len && i < b.len {
+        if a[i] != b[i] {
+            return a[i] < b[i]
+        }
+        i = i + 1
+    }
+    return a.len < b.len
+}
+
+// The notice line for `local` given the release's `remote`, or "" for none.
+// A different sha is newer because `latest` only ever moves forward along main;
+// the date guard is for a binary built from a commit newer than the last
+// release (a local stamped build), which must not be told to "update" backwards.
+pub fn noticeFor(local: &BuildId, remote: &BuildId): string {
+    if local.sha.len == 0 || remote.sha.len == 0 || remote.sha == local.sha {
+        return ""
+    }
+    if strLess(remote.date, local.date) {
+        return ""
+    }
+    return $"dapweb {remote.date} is available (you have {local.date}): run `dapweb update`"
+}
+
+fn fetchRemote(): Option<BuildId> {
+    match fetch(versionUrl()) {
+        Result.Ok(r) => {
+            if r.status != 200 {
+                return Option.None
+            }
+            let id = parseBuildId(r.body)
+            if id.sha.len == 0 {
+                return Option.None
+            }
+            return Option.Some(id)
+        }
+        Result.Err(_e) => {
+            return Option.None
+        }
+    }
+}
+
+fn cachePath(): string {
+    return stateDir() + "/update-check.json"
+}
+
+// The cached release identity if it was fetched less than a day ago.
+fn cachedRemote(now: i64): Option<BuildId> {
+    let Result.Ok(text) = readFile(cachePath()) else {
+        return Option.None
+    }
+    let Result.Ok(doc) = Json.parse(text) else {
+        return Option.None
+    }
+    let at = doc.i64("checkedAt") ?? (0 as i64)
+    // A clock that went backwards must not pin a stale answer forever.
+    if at > now || now - at >= CHECK_INTERVAL_SECS {
+        return Option.None
+    }
+    let id = BuildId {
+        sha: doc.str("sha") ?? "", date: doc.str("date") ?? ""
+    }
+    if id.sha.len == 0 {
+        return Option.None
+    }
+    return Option.Some(id)
+}
+
+fn saveCache(now: i64, id: &BuildId): void {
+    let _m = mkdirAll(stateDir(), 493)
+    let _w = writeFile(cachePath(), Json.obj().int("checkedAt", now).str("sha", id.sha).str("date", id.date).build())
+}
+
+// The notice for this binary, or "". Blocking (network), so callers run it on
+// checkInBackground's thread. Every failure is silent: an offline laptop is not
+// an error worth a line on the terminal.
+pub fn checkForUpdate(): string {
+    if Env.getOr("DAPWEB_NO_UPDATE_CHECK", "").len > 0 {
+        return ""
+    }
+    let local = buildId()
+    if local.sha.len == 0 {
+        return ""
+    }
+    let now = epochSecs()
+    if let Option.Some(r) = cachedRemote(now) {
+        return noticeFor(local, r)
+    }
+    if let Option.Some(r) = fetchRemote() {
+        saveCache(now, r)
+        return noticeFor(local, r)
+    }
+    return ""
+}
+
+// Run checkForUpdate on its own OS thread and deliver the result (possibly "")
+// on the returned channel. An OS thread, not a green task: getaddrinfo blocks
+// the calling thread, and on the scheduler thread a slow resolver would freeze
+// every session task with it. Callers poll with tryRecv.
+pub fn checkInBackground(): Channel<string> {
+    let ch = Channel<string>.new(1)!
+    let tx = ch.clone()
+    spawnOsThreadDetached(move(): void => {
+        let _s = tx.send(checkForUpdate())
+    }
+    )
+    return ch
+}
+
+// ── dapweb update ──
+
+// Run a command to completion, returning (exit code, combined output).
+fn runCapture(cmd: Command): Result<string> {
+    match cmd.stdout(Stdio.Pipe).spawn() {
+        Result.Ok(child) => {
+            var ch = child
+            var out: string = ""
+            if ch.stdoutFd >= 0 {
+                for chunk in fdChannel(ch.stdoutFd) {
+                    out = out + chunk
+                }
+            }
+            match ch.wait() {
+                Result.Ok(code) => {
+                    if code != 0 {
+                        return Result.Err($"exited {code}: {out.trim()}")
+                    }
+                    return Result.Ok(out)
+                }
+                Result.Err(e) => {
+                    return Result.Err(e)
+                }
+            }
+        }
+        Result.Err(e) => {
+            return Result.Err(e)
+        }
+    }
+}
+
+// install.sh's naming: `uname -s` lowercased, `uname -m` with x86_64 -> x64 and
+// aarch64 -> arm64. Asking uname keeps the two in lockstep.
+fn platformName(): Result<string> {
+    let os = runCapture(Command.new("uname").arg("-s"))?.trim().toLower()
+    var arch = runCapture(Command.new("uname").arg("-m"))?.trim()
+    if arch == "x86_64" {
+        arch = "x64"
+    } else if arch == "aarch64" {
+        arch = "arm64"
+    }
+    return Result.Ok($"{os}-{arch}")
+}
+
+fn updateParser(): ArgParser {
+    var p = ArgParser.new("dapweb update", "replace this dapweb binary with the latest release\n\n"
+        + "Checks the rolling `latest` release; if it is a different build, downloads\n"
+        + "the tarball for this platform and swaps it in atomically. Alias: upgrade.")
+    p.addBool("check", "", "only say whether a newer release exists; install nothing")
+    return p
+}
+
+// Download, unpack and swap in the latest release. Every step before the final
+// rename works in a scratch dir next to the binary (same filesystem, so the
+// rename is atomic), and a failure anywhere leaves the old binary untouched.
+pub fn updateMain(argv: Vec<string>): i32 {
+    var parser = updateParser()
+    let a = parser.parseFrom(argv)
+    let local = buildId()
+    if a.getBool("check") {
+        let Option.Some(remote) = fetchRemote() else {
+            eprint($"error: could not fetch {versionUrl()}\n")
+            return 1
+        }
+        let line = noticeFor(local, remote)
+        if line.len > 0 {
+            print(line)
+        } else {
+            print($"no newer release: you have dapweb {versionString(local)}, latest is {versionString(remote)}")
+        }
+        return 0
+    }
+
+    // Always our own executable, never a caller-supplied path. Symlinks are
+    // resolved so the rename replaces the binary, not the link pointing at it.
+    let Result.Ok(exe0) = exePath() else {
+        eprint("error: could not determine where this dapweb binary lives\n")
+        return 1
+    }
+    let exe = realPath(exe0) ?? exe0
+    let dir = Path.dirname(exe)
+
+    print("checking for a newer dapweb...")
+    let Option.Some(remote) = fetchRemote() else {
+        eprint($"error: could not fetch {versionUrl()}\n")
+        return 1
+    }
+    if remote.sha == local.sha {
+        print($"already up to date: dapweb {versionString(local)}")
+        return 0
+    }
+    let Result.Ok(plat) = platformName() else {
+        eprint("error: could not determine this platform (uname failed)\n")
+        return 1
+    }
+    let tarName = $"dapweb-{plat}.tar.gz"
+    let url = $"{releaseBase()}/{tarName}"
+    let manual = $"curl -fsSL {url} | tar xz -C '{dir}' --strip-components=1 dapweb-{plat}/dapweb"
+
+    let work = $"{dir}/.dapweb-update-{selfPid()}"
+    if mkdirAll(work, 448).isErr() {
+        eprint($"error: {dir} is not writable, so dapweb cannot replace itself. Run instead:\n  sudo {exe} update\nor install by hand:\n  {manual}\n")
+        return 1
+    }
+    let rc = installInto(exe, work, url, tarName, plat, local, remote)
+    let _r = removeAll(work)
+    if rc != 0 {
+        eprint($"the old binary at {exe} is unchanged. To install by hand:\n  {manual}\n")
+    }
+    return rc
+}
+
+fn installInto(exe: &string, work: &string, url: &string, tarName: &string, plat: &string, local: &BuildId, remote: &BuildId): i32 {
+    print($"downloading {url}")
+    var body: string = ""
+    match fetch(url) {
+        Result.Ok(r) => {
+            if r.status != 200 {
+                eprint($"error: download failed: HTTP {r.status}\n")
+                return 1
+            }
+            body = r.body
+        }
+        Result.Err(_e) => {
+            eprint("error: download failed\n")
+            return 1
+        }
+    }
+    let tarPath = $"{work}/{tarName}"
+    if writeFile(tarPath, body).isErr() {
+        eprint($"error: could not write {tarPath}\n")
+        return 1
+    }
+    // std has inflate but no tar reader, and the system tar handles both.
+    if let Result.Err(e) = runCapture(Command.new("tar").arg("xzf").arg(tarPath).arg("-C").arg(work)) {
+        eprint($"error: could not unpack the download: {e}\n")
+        return 1
+    }
+    let fresh = $"{work}/dapweb-{plat}/dapweb"
+    if !pathExists(fresh) {
+        eprint($"error: the download has no dapweb-{plat}/dapweb\n")
+        return 1
+    }
+    let _m = setMode(fresh, 493) // 0755: tar keeps the bit, but a hand-made archive may not
+    // A binary that cannot even print its version (wrong arch, truncated) must
+    // not replace one that works.
+    if let Result.Err(e) = runCapture(Command.new(fresh).arg("--version")) {
+        eprint($"error: the downloaded binary does not run: {e}\n")
+        return 1
+    }
+    // Staged in the binary's own directory: rename() is only atomic within one
+    // filesystem, and the scratch dir is in that directory too.
+    let staged = exe.clone() + ".new"
+    if let Result.Err(_e) = renameFile(fresh, staged) {
+        eprint($"error: could not stage {staged}\n")
+        return 1
+    }
+    // The swap. Until it succeeds the old binary is still in place, untouched.
+    if let Result.Err(_e) = renameFile(staged, exe) {
+        let _rm = removeAll(staged)
+        eprint($"error: could not replace {exe}\n")
+        return 1
+    }
+    print($"updated {exe}: {versionString(local)} -> {versionString(remote)}")
+    return 0
+}

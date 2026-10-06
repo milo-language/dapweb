@@ -2,8 +2,8 @@
 import React, { useState } from "react";
 import { send } from "./rpc";
 
-export function SessionMenu({ caps, dbgLabel, adapterCmd, sessionId, live, onConfigure }: {
-  caps: Record<string, any>; dbgLabel: string; adapterCmd: string; sessionId: string;
+export function SessionMenu({ caps, dbgLabel, adapterCmd, sessionId, version, live, onConfigure }: {
+  caps: Record<string, any>; dbgLabel: string; adapterCmd: string; sessionId: string; version: string;
   live: boolean; onConfigure: () => void;
 }) {
   const [showInfo, setShowInfo] = useState(false);    // adapter + capabilities popover
@@ -44,6 +44,7 @@ export function SessionMenu({ caps, dbgLabel, adapterCmd, sessionId, live, onCon
           <div className="info-pop">
             <div className="info-line"><span className="info-k">adapter</span> {dbgLabel}{adapterCmd ? ` — ${adapterCmd}` : ""}</div>
             <div className="info-line"><span className="info-k">session</span> {sessionId || "—"}</div>
+            <div className="info-line"><span className="info-k">dapweb</span> {version || "—"}</div>
             <details>
               <summary>capabilities</summary>
               <div className="caps-list">

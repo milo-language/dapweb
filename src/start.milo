@@ -22,6 +22,9 @@ from "std/argparse" import {
 from "std/json" import {
     Json
 }
+from "./update" import {
+    checkInBackground
+}
 from "./sessions" import {
     freePortFrom, spawnSessionOn, awaitSessionOn
 }
@@ -108,6 +111,9 @@ pub fn startMain(argv: Vec<string>): i32 {
         return 0
     }
     let want = portFrom(argv)
+    // Runs alongside the spawn+wait; whatever it has by the time the session is
+    // up is reported, and a slower answer is dropped rather than waited for.
+    let updateCh = checkInBackground()
 
     // 8080 is `web`'s own default, so an unconfigured `start` lands where a
     // human would have looked for it, and only walks upward when it is taken.
@@ -144,6 +150,12 @@ pub fn startMain(argv: Vec<string>): i32 {
     // so the timeout is also how a misspelled flag is reported.
     match awaitSessionOn(childPid, START_TIMEOUT_MS) {
         Option.Some(row) => {
+            // stderr: stdout is the one JSON line an agent parses.
+            if let Option.Some(line) = updateCh.tryRecv() {
+                if line.len > 0 {
+                    eprint(line + "\n")
+                }
+            }
             print(Json.obj()
                 .bool("ok", true)
                 .str("sessionId", row.id)

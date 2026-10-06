@@ -48,6 +48,14 @@ export default function App() {
   // Offline gets more than the status pill: a banner, because every control in
   // the app is a silent no-op until the socket comes back.
   const [offline, setOffline] = useState(false);
+  // This server's build ("dev" for a local build) and, when a newer release
+  // exists, the notice line naming the command. Dismissal is remembered per
+  // notice, so the next release brings the banner back.
+  const [version, setVersion] = useState("");
+  const [update, setUpdate] = useState("");
+  const [updateDismissed, setUpdateDismissed] = useState(() => {
+    try { return localStorage.getItem("dapweb.updateDismissed") || ""; } catch { return ""; }
+  });
   // Everything the server pushes, folded by one pure reducer (session.ts).
   const [S, dispatch] = useReducer(sessionReducer, initialSession);
   const { program, sourcePath: srcPath, files, bps, stopLine, stopPath, frames, threads, tlocs,
@@ -254,7 +262,10 @@ export default function App() {
       // A stop and a source already switch the editor below; a breakpoint never
       // did, so following one is the only reason to open its file.
       if (ft && m.type === "breakpoint") openFile(ft.path);
+      if (m.type === "update") setUpdate(m.text || "");
       if (m.type === "hello") {
+        setVersion(m.version || "");
+        setUpdate(m.update || "");
         setViewPath(m.sourcePath || "");
         setDbgTag(m.adapterId || "debugger");
         setTabs(m.sourcePath ? [m.sourcePath] : []);
@@ -676,9 +687,18 @@ export default function App() {
         {/* Three unlabelled glyphs (ⓘ, +, ⚙) asked the reader to remember which
             was which. One labelled menu says what it opens, and has room for the
             things that had nowhere to live — like the list of other sessions. */}
-        <SessionMenu caps={caps} dbgLabel={dbgLabel} adapterCmd={adapterCmd} sessionId={S.sessionId}
+        <SessionMenu caps={caps} dbgLabel={dbgLabel} adapterCmd={adapterCmd} sessionId={S.sessionId} version={version}
                      live={phase === "running" || phase === "stopped"} onConfigure={() => setShowConfig(true)} />
       </header>
+      {update && update !== updateDismissed && (
+        <div className="update-banner">
+          <span>{update}</span>
+          <button className="update-x" aria-label="dismiss" onClick={() => {
+            setUpdateDismissed(update);
+            try { localStorage.setItem("dapweb.updateDismissed", update); } catch {}
+          }}>×</button>
+        </div>
+      )}
       {offline && <div className="offline-banner">disconnected from the dapweb server: nothing you click will reach the session until it reconnects</div>}
       {/* main + the terminal are one workspace, and the target sheet overlays the
           whole of it. Living inside <main> it was capped at whatever height the

@@ -54,6 +54,9 @@ from "./http" import {
 from "std/json" import {
     Json
 }
+from "../update" import {
+    checkInBackground
+}
 from "../commands" import {
     commandsJson
 }
@@ -94,7 +97,7 @@ from "../dap/session" import {
     resolveAdapterCmd
 }
 from "./peers" import {
-    logEvent, broadcastLoop
+    logEvent, broadcastLoop, wsPush
 }
 from "./persist" import {
     absSourcePath, adapterId, applyConfig, mergeCliDefaults, loadHistory, loadBps, recordConfig, firstHistoryConfig, sessionNameSeeds, registerSession, unregisterSession
@@ -423,6 +426,29 @@ fn acceptLoop(listener: TcpListener, bus: Channel<string>, pendCh: Channel<Pendi
     }
 }
 
+// Wait for the background update check without ever blocking the scheduler,
+// then announce a newer release on the terminal and to every tab. The check
+// thread answers "" for no notice (or opted out, offline, dev build).
+fn updateNoticeLoop(bus: Channel<string>): void {
+    let ch = checkInBackground()
+    var waited: i64 = 0
+    // A check that has not answered in two minutes is a hung connection; the
+    // thread is abandoned and this session simply shows no notice.
+    while waited < 120000 {
+        if let Option.Some(line) = ch.tryRecv() {
+            if line.len > 0 {
+                gSession.server.update = line.clone()
+                print(line)
+                flush()
+                wsPush(bus, Json.obj().str("type", "update").str("text", line).build())
+            }
+            return
+        }
+        sleepMs(250)
+        waited = waited + 250
+    }
+}
+
 // Best-effort: pop the default browser open at the served URL. Fire-and-forget —
 // a headless box (no xdg-open/open, or DAPWEB_NO_OPEN set) just skips silently.
 // The whole thing is backgrounded inside the shell so sh returns instantly and
@@ -635,6 +661,11 @@ pub fn webMain(argv: Vec<string>): i32 {
             if !gSession.server.noBrowser {
                 openBrowser($"http://localhost:{port}")
             }
+            let updBus = bus.clone()
+            Task.spawn(move(): void => {
+                updateNoticeLoop(updBus)
+            }
+            )
             let acceptBus = bus.clone()
             let acceptPend = pendCh.clone()
             Task.spawn(move(): void => {
