@@ -331,7 +331,13 @@ pub fn apiMain(argv: Vec<string>): i32 {
         if path.len > 0 {
             b = b.str("path", path)
         }
-        return postCmd(port, b.build(), awaitFlag, timeout, pretty)
+        // Wait for the ack by default, so a refused breakpoint (no path to put it
+        // in) comes back as the error instead of a bare {"ok":true}.
+        var aw = awaitFlag.clone()
+        if aw.len == 0 {
+            aw = "breakpoint"
+        }
+        return postCmd(port, b.build(), aw, timeout, pretty)
     }
 
     if cmd == "eval" {

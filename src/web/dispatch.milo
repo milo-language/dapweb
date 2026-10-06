@@ -122,6 +122,13 @@ fn cmdPath(c: &string, doc: &Json): string {
     var path = absSourcePath(doc.str("path") ?? "")
     if path.len == 0 && (c == "setBreakpoint" || c == "clearBreakpoint" || c == "runToCursor" || c == "setNextStatement") {
         path = absSourcePath(gSession.target.spec.srcPath)
+        // No --source: the file the program is stopped in is the one the caller
+        // is looking at.
+        if path.len == 0 {
+            if let Option.Some(st) = gSession.stop.stop {
+                path = st.path.clone()
+            }
+        }
     }
     return path
 }
@@ -210,6 +217,12 @@ fn cmdBreakpoint(cmd: &Cmd): void {
     let set = cmd.name == "setBreakpoint"
     let line = cmd.int("line", 0 as i64)
     let path = cmdPath(cmd.name, cmd.doc)
+    // A breakpoint with no file can never bind; it used to be stored anyway and
+    // acknowledged as if it had worked.
+    if path.len == 0 {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "a breakpoint needs a path: no source is configured and nothing is stopped"))
+        return
+    }
     // Upsert: drop any existing bp at (path, line), then re-add for
     // "set" (a condition edit is a set on an existing line).
     var keep: Vec<Bp> = []
@@ -288,13 +301,20 @@ fn cmdRun(cmd: &Cmd): void {
 // continue, the three steps, and pause.
 fn cmdStep(cmd: &Cmd): void {
     let pause = cmd.name == "pause"
+    // No tid means the thread that is stopped now, read before resume() clears the
+    // stop. It used to be thread 1, which lldb never uses, so a bare `stepOver` from a
+    // browser or script moved nothing.
+    var stoppedTid: i64 = -1 as i64
+    if let Option.Some(st) = gSession.stop.stop {
+        stoppedTid = st.tid
+    }
     if !pause {
         gSession.stop.resume()
     }
     let Option.Some(dfd) = gSession.proc.dapIn else {
         return
     }
-    let t = cmd.int("tid", 1 as i64)
+    let t = cmd.int("tid", stoppedTid)
     if pause && t < 0 {
         // Attach flow: Pause can arrive before any stop, so
         // there's no tid yet — ask for threads and pause the first.

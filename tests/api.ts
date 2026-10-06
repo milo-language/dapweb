@@ -71,10 +71,17 @@ try {
     ok(r.json?.phase === "idle", "state is idle before run", r.json);
   }
 
+  // No --source and nothing stopped: a breakpoint without --path has no file to go in.
+  // It used to be stored with an empty path and acknowledged as if it had worked.
+  {
+    const b = await api(["break", "--line", "5"]);
+    ok(b.code !== 0 && b.json?.ok === false && /needs a path/.test(b.json?.error ?? ""), "a pathless break with no source is refused", { code: b.code, json: b.json });
+  }
+
   // set a breakpoint inside the loop body, then run — blocks until the stop
   {
     const b = await api(["break", "--line", "5", "--path", src]);
-    ok(b.json?.ok === true, "break acks", b.json);
+    ok(b.json?.type === "breakpoint" && b.json?.set === true && b.json?.line === 5, "break waits for the ack", b.json);
     const run = await api(["run"]);
     ok(run.json?.type === "stopped" && run.json?.line === 5, "run blocks and stops at line 5", run.json);
   }
@@ -95,6 +102,13 @@ try {
   {
     const r = await api(["request", "--await", "stopped", JSON.stringify({ cmd: "continue" })]);
     ok(r.json?.type === "stopped" && r.json?.line === 5, "raw continue loops back to the breakpoint", r.json);
+  }
+
+  // A raw step with no tid steps the stopped thread. The server used to default to
+  // thread 1, which lldb never uses, so the step went nowhere and the await timed out.
+  {
+    const r = await api(["request", "--await", "stopped", "--timeout", "8000", JSON.stringify({ cmd: "stepOver" })]);
+    ok(r.json?.type === "stopped" && r.json?.line === 6, "a raw stepOver with no tid steps the stopped thread", r.json);
   }
 
   // await timeout is a distinct non-zero exit code, so scripts can branch on it.

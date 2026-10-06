@@ -23,7 +23,7 @@ dapweb web
 To interact with debug sessions, run
 ```console
 $ dapweb api break --line 12
-{"ok":true}
+{"type":"breakpoint","path":".../examples/demo.c","line":12,"set":true,...}
 $ dapweb api run
 {"type":"stopped","line":12,"path":".../examples/demo.c","frames":[{"id":1572864,"name":"main","line":12,...}],"locals":[{"name":"x","value":"7","type":"int",...},...]}
 $ dapweb api eval 'x + y'
