@@ -107,11 +107,17 @@ const hb = await b.wait(m => m.type === "hello");
 ok(hb.history.length === 2, "two launches → two history entries", hb.history.length);
 ok(hb.history.some((h: any) => h.name === "inter run"), "history entry keeps `name`", hb.history);
 
-// cap: merge 12 legacy entries → total ≤ 10, newest first
-const legacy = Array.from({ length: 12 }, (_, i) => ({ type: "lldb", program: `/tmp/fake_${i}` }));
-b.send({ cmd: "importHistory", entries: legacy });
-const hcap = await b.wait(m => m.type === "historyChanged");
+// cap: 12 more targets recorded through setConfig → total stays at 10, newest first.
+// setConfig refuses a program that does not exist, so give each one a file.
+let hcap: any = null;
+for (let i = 0; i < 12; i++) {
+  const prog = `${xdg}/fake_${i}`;
+  await Bun.write(prog, "");
+  b.send({ cmd: "setConfig", type: "lldb", request: "launch", program: prog });
+  hcap = await b.wait(m => m.type === "historyChanged" && m.history.some((h: any) => h.program === prog));
+}
 ok(hcap.history.length === 10, "history capped at 10", hcap.history.length);
+ok(hcap.history[0].program === `${xdg}/fake_11`, "newest target first", hcap.history[0]);
 
 a.ws.close(); b.ws.close();
 srv.kill();

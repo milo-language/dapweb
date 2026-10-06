@@ -60,7 +60,6 @@ pub fn commandSpecs(): Vec<CmdSpec> {
     v.push(CmdSpec { name: "resize", args: "rows, cols", summary: "set the debuggee terminal size", awaits: "", dap: "", verb: "resize the program terminal" })
     v.push(CmdSpec { name: "openSource", args: "path", summary: "load a source file into the editor", awaits: "source", dap: "", verb: "open a source file" })
     v.push(CmdSpec { name: "setConfig", args: "type, program|pid, ...", summary: "change the debug target (idle sessions only)", awaits: "hello", dap: "", verb: "change the debug target" })
-    v.push(CmdSpec { name: "importHistory", args: "entries", summary: "merge config history entries (one-shot migration)", awaits: "historyChanged", dap: "", verb: "import config history" })
     v.push(CmdSpec { name: "newSession", args: "", summary: "reset the session, keeping the target", awaits: "hello", dap: "", verb: "reset the session" })
     return v
 }

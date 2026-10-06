@@ -273,16 +273,6 @@ export default function App() {
         }
         // joining a live shared session — a stopped replay may refine this.
         if (m.phase === "running") setStatus({ text: "joined a live session already in progress", short: "running", cls: "running" });
-        // History is server-owned: run the one-shot localStorage → server
-        // migration and retire the client-local store.
-        try {
-          const legacy = localStorage.getItem("dapweb.configHistory");
-          if (legacy) {
-            const entries = JSON.parse(legacy);
-            if (Array.isArray(entries) && entries.length) send({ cmd: "importHistory", entries });
-            localStorage.removeItem("dapweb.configHistory");
-          }
-        } catch {}
         // A hello now arrives on every target change, not only on connect, so
         // this announces the STATE and not the message: re-printing the same
         // banner into the terminal on each retarget is how one config edit

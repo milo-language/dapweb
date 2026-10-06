@@ -1020,30 +1020,3 @@ pub fn histInsert(histJson: &string, item: &string, cap: i64): string {
     return arr.build()
 }
 
-// Merge legacy client entries (localStorage migration, one-shot) into the history
-// array: each is inserted oldest-first so the newest client entry ends up in
-// front, then the whole thing is de-duped/capped by histInsert.
-pub fn histMergeMany(histJson: &string, entriesJson: &string, cap: i64): string {
-    var out = histJson.clone()
-    match Json.parse(entriesJson) {
-        Result.Ok(d) => {
-            if d.isArray() {
-                let n = d.len()
-                var i: i64 = n - 1
-                while i >= 0 {
-                    match d.at(i) {
-                        Option.Some(el) => {
-                            out = histInsert(out, el.rawStr(), cap)
-                        }
-                        Option.None => {
-                        }
-                    }
-                    i = i - 1
-                }
-            }
-        }
-        Result.Err(_e) => {
-        }
-    }
-    return out
-}

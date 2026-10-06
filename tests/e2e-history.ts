@@ -141,17 +141,6 @@ b.ws.close();
 boot.srv.kill();
 await sleep(200);
 
-// ── part 3: one-shot localStorage migration ──
-
-const mig = await spawnSrv([]);
-const c = new Peer(); await c.connect(mig.port);
-await c.wait(m => m.type === "hello");
-c.send({ cmd: "importHistory", entries: [{ type: "python", program: "/tmp/legacy.py" }] });
-const hmig = await c.wait(m => m.type === "historyChanged");
-ok(hmig.history.some((h: any) => h.program === "/tmp/legacy.py"), "importHistory merges legacy entries", hmig.history.map((h: any) => h.program));
-c.ws.close();
-mig.srv.kill();
-
 await Bun.$`rm -rf ${xdg}`.quiet();
 console.log(`\ne2e-history: ${pass} assertions passed`);
 process.exit(0);
