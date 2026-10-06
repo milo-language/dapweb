@@ -28,7 +28,7 @@ from "std/net" import {
     TcpListener, TcpStream
 }
 from "std/os" import {
-    read, write, close, pipe, getpid
+    close, getpid, recvFd, sendFd
 }
 from "std/io" import {
     readFile, fdChannel
@@ -37,10 +37,7 @@ from "std/ws" import {
     WsConn, WsMessage, wsAccept, isWsUpgrade
 }
 from "std/runtime" import {
-    Task, schedulerWaitRead, schedulerWaitWrite, schedulerYield, schedulerRunToCompletion
-}
-from "std/platform" import {
-    getErrno, eagain
+    Task, schedulerYield, schedulerRunToCompletion
 }
 from "std/sync" import {
     Channel
@@ -2945,23 +2942,8 @@ fn sendHttp(fd: i32, status: i32, contentType: &string, body: &string): void {
     resp = resp + body
     // Accepted fds are non-blocking under the green runtime: a single write()
     // stops at the socket buffer (~half a MB of app.js got dropped this way).
-    // Loop with scheduler parking until the whole response is out.
-    var sent: i64 = 0
-    while sent < resp.len {
-        let chunk = resp.substr(sent, resp.len)
-        var n: i64 = 0
-        unsafe {
-            n = write(fd, chunk, chunk.len)
-        }
-        if n < 0 {
-            if getErrno() == eagain() {
-                schedulerWaitWrite(fd)
-                continue
-            }
-            return
-        }
-        sent = sent + n
-    }
+    // sendFd parks until the whole response is out.
+    let _n = sendFd(fd, resp, resp.len)
 }
 
 // UI assets are embedded, so the binary is self-contained: a downloaded release
@@ -3219,213 +3201,208 @@ fn requestAllowed(raw: &string): bool {
 
 fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): void {
     var buf: [u8; 8192] = [0; 8192]
-    unsafe {
-        schedulerWaitRead(fd)
-        let n = read(fd, buf as *u8, 8192)
-        if n <= 0 {
-            close(fd)
-            return
+    let n = recvFd(fd, buf, 8192)
+    if n <= 0 {
+        close(fd)
+        return
+    }
+    var raw: string = ""
+    for i in 0..n {
+        raw.push(buf[i])
+    }
+    // Headers can arrive split across TCP segments. Read to the blank line
+    // before judging them: requestAllowed would otherwise refuse a request
+    // whose Host has not arrived yet. Capped so a client cannot grow it forever.
+    while !raw.contains("\r\n\r\n") && raw.len < 65536 {
+        let more = recvFd(fd, buf, 8192)
+        if more <= 0 {
+            break
         }
-        var raw: string = ""
-        for i in 0..n {
+        for i in 0..more {
             raw.push(buf[i])
         }
-        // Headers can arrive split across TCP segments. Read to the blank line
-        // before judging them: requestAllowed would otherwise refuse a request
-        // whose Host has not arrived yet. Capped so a client cannot grow it forever.
-        while !raw.contains("\r\n\r\n") && raw.len < 65536 {
-            schedulerWaitRead(fd)
-            let more = read(fd, buf as *u8, 8192)
-            if more <= 0 {
-                break
-            }
-            for i in 0..more {
-                raw.push(buf[i])
-            }
-        }
-
-        let rl = parseRequestLine(raw)
-        if !requestAllowed(raw) {
-            sendHttp(fd, 403, "text/plain", "forbidden: dapweb only answers localhost, same-origin")
-            close(fd)
-            return
-        }
-        if isWsUpgrade(raw) {
-            // Peer kind rides the upgrade path's query string: browsers
-            // hit /ws bare, other clients pass ?client=<kind> — known
-            // before the first frame, so connect logs carry the right kind.
-            var wsPath = rl.path.clone()
-            var query: string = ""
-            var qi2: i64 = 0
-            while qi2 < wsPath.len {
-                if wsPath[qi2] == '?' {
-                    query = wsPath.substr(qi2 + 1, wsPath.len)
-                    wsPath = wsPath.substr(0, qi2)
-                    break
-                }
-                qi2 = qi2 + 1
-            }
-            if wsPath == "/ws" {
-                var kind: string = "browser"
-                if query.startsWith("client=") {
-                    kind = query.substr(7, query.len)
-                }
-                match wsAccept(fd, raw) {
-                    Result.Ok(ws) => {
-                        handleDebugWs(ws, kind, bus, pendCh)
-                    }
-                    Result.Err(_e) => {
-                        close(fd)
-                    }
-                }
-            } else {
-                close(fd)
-            }
-            return
-        }
-
-        // ── HTTP API (same command vocabulary as the WS the browser speaks) ──
-        var apiPath = rl.path.clone()
-        var apiQuery: string = ""
-        var qi3: i64 = 0
-        while qi3 < apiPath.len {
-            if apiPath[qi3] == '?' {
-                apiQuery = apiPath.substr(qi3 + 1, apiPath.len)
-                apiPath = apiPath.substr(0, qi3)
-                break
-            }
-            qi3 = qi3 + 1
-        }
-        if apiPath == "/api/state" {
-            sendHttp(fd, 200, "application/json", apiStateJson())
-            close(fd)
-            return
-        }
-        // Reports on the configured target only, with no path parameter: the API
-        // port is unauthenticated, and a caller-supplied path would make this an
-        // arbitrary-file header reader.
-        if apiPath == "/api/processes" {
-            sendHttp(fd, 200, "application/json", processListJson())
-            close(fd)
-            return
-        }
-        // Every live dapweb on this machine, for the /sessions dashboard. Reads
-        // the same registry `dapweb api list` does, and prunes it on the way.
-        // The vocabulary, so a caller can discover it over the same port it
-        // drives the session on rather than by reading the source.
-        if apiPath == "/api/commands" {
-            sendHttp(fd, 200, "application/json", commandsJson())
-            close(fd)
-            return
-        }
-        // What this machine's sessions have done. Same rows `dapweb log` prints,
-        // over the port an agent is already talking to. Defaults to THIS
-        // session, since the caller driving it is usually asking about its own
-        // work; ?session=all widens to every session in the journal.
-        if apiPath == "/api/log" {
-            var f = logFilter()
-            f.session = gSessionId.clone()
-            let qs = queryParam(apiQuery, "session")
-            if qs == "all" {
-                f.session = ""
-            } else if qs.len > 0 {
-                f.session = qs
-            }
-            f.kind = queryParam(apiQuery, "kind")
-            f.dir = queryParam(apiQuery, "dir")
-            f.since = queryParam(apiQuery, "since").parseInt() ?? (0 as i64)
-            f.limit = queryParam(apiQuery, "limit").parseInt() ?? (0 as i64)
-            var arr: Vec<string> = []
-            if queryParam(apiQuery, "view") == "sessions" {
-                arr = journalSessions(f.limit)
-            } else if queryParam(apiQuery, "view") == "breakpoints" {
-                arr = journalBreakpoints(queryParam(apiQuery, "program"), f.limit)
-            } else {
-                arr = journalRows(f)
-            }
-            var body: string = "["
-            var ai: i64 = 0
-            while ai < arr.len {
-                if ai > 0 {
-                    body = body + ","
-                }
-                body = body + arr[ai]
-                ai = ai + 1
-            }
-            body = body + "]"
-            sendHttp(fd, 200, "application/json", Json.obj().bool("ok", true).raw("rows", body).build())
-            close(fd)
-            return
-        }
-        if apiPath == "/api/sessions" {
-            sendHttp(fd, 200, "application/json", sessionsJson(gSessionId))
-            close(fd)
-            return
-        }
-        if apiPath == "/api/spawn" {
-            if rl.method != "POST" {
-                sendHttp(fd, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
-                close(fd)
-                return
-            }
-            sendHttp(fd, 200, "application/json", spawnSessionJson())
-            close(fd)
-            return
-        }
-        if apiPath == "/api/binfo" {
-            sendHttp(fd, 200, "application/json", binInfoJson(binPath))
-            close(fd)
-            return
-        }
-        if apiPath == "/api/cmd" {
-            if rl.method != "POST" {
-                sendHttp(fd, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
-                close(fd)
-                return
-            }
-            // Body follows the header terminator. Small JSON commands arrive in the
-            // first read; keep pulling while the declared length is short.
-            var body: string = ""
-            var hi: i64 = 0
-            while hi + 3 < raw.len {
-                if raw[hi] == '\r' && raw[hi + 1] == '\n' && raw[hi + 2] == '\r' && raw[hi + 3] == '\n' {
-                    body = raw.substr(hi + 4, raw.len)
-                    break
-                }
-                hi = hi + 1
-            }
-            // Absent/garbage content-length reads as 0, same as the old parser: the
-            // body is whatever already arrived.
-            let want = headerVal(raw, "content-length").parseInt() ?? (0 as i64)
-            while body.len < want {
-                var more: [u8; 8192] = [0; 8192]
-                schedulerWaitRead(fd)
-                let n2 = read(fd, more as *u8, 8192)
-                if n2 <= 0 {
-                    break
-                }
-                for j in 0..n2 {
-                    body.push(more[j])
-                }
-            }
-            var timeoutMs = queryParam(apiQuery, "timeout").parseInt() ?? (0 as i64)
-            if timeoutMs <= 0 {
-                timeoutMs = 5000
-            }
-            let reply = apiRunCmd(body, queryParam(apiQuery, "await"), timeoutMs, apiWho(apiQuery), bus, pendCh)
-            sendHttp(fd, 200, "application/json", reply)
-            close(fd)
-            return
-        }
-
-        if rl.method == "GET" {
-            // requestAllowed has already pinned Host to a loopback name.
-            serveStatic(fd, rl.path, "http://" + headerVal(raw, "host"))
-        } else {
-            sendHttp(fd, 404, "text/plain", "not found")
-        }
-        close(fd)
     }
+
+    let rl = parseRequestLine(raw)
+    if !requestAllowed(raw) {
+        sendHttp(fd, 403, "text/plain", "forbidden: dapweb only answers localhost, same-origin")
+        close(fd)
+        return
+    }
+    if isWsUpgrade(raw) {
+        // Peer kind rides the upgrade path's query string: browsers
+        // hit /ws bare, other clients pass ?client=<kind> — known
+        // before the first frame, so connect logs carry the right kind.
+        var wsPath = rl.path.clone()
+        var query: string = ""
+        var qi2: i64 = 0
+        while qi2 < wsPath.len {
+            if wsPath[qi2] == '?' {
+                query = wsPath.substr(qi2 + 1, wsPath.len)
+                wsPath = wsPath.substr(0, qi2)
+                break
+            }
+            qi2 = qi2 + 1
+        }
+        if wsPath == "/ws" {
+            var kind: string = "browser"
+            if query.startsWith("client=") {
+                kind = query.substr(7, query.len)
+            }
+            match wsAccept(fd, raw) {
+                Result.Ok(ws) => {
+                    handleDebugWs(ws, kind, bus, pendCh)
+                }
+                Result.Err(_e) => {
+                    close(fd)
+                }
+            }
+        } else {
+            close(fd)
+        }
+        return
+    }
+
+    // ── HTTP API (same command vocabulary as the WS the browser speaks) ──
+    var apiPath = rl.path.clone()
+    var apiQuery: string = ""
+    var qi3: i64 = 0
+    while qi3 < apiPath.len {
+        if apiPath[qi3] == '?' {
+            apiQuery = apiPath.substr(qi3 + 1, apiPath.len)
+            apiPath = apiPath.substr(0, qi3)
+            break
+        }
+        qi3 = qi3 + 1
+    }
+    if apiPath == "/api/state" {
+        sendHttp(fd, 200, "application/json", apiStateJson())
+        close(fd)
+        return
+    }
+    // Reports on the configured target only, with no path parameter: the API
+    // port is unauthenticated, and a caller-supplied path would make this an
+    // arbitrary-file header reader.
+    if apiPath == "/api/processes" {
+        sendHttp(fd, 200, "application/json", processListJson())
+        close(fd)
+        return
+    }
+    // Every live dapweb on this machine, for the /sessions dashboard. Reads
+    // the same registry `dapweb api list` does, and prunes it on the way.
+    // The vocabulary, so a caller can discover it over the same port it
+    // drives the session on rather than by reading the source.
+    if apiPath == "/api/commands" {
+        sendHttp(fd, 200, "application/json", commandsJson())
+        close(fd)
+        return
+    }
+    // What this machine's sessions have done. Same rows `dapweb log` prints,
+    // over the port an agent is already talking to. Defaults to THIS
+    // session, since the caller driving it is usually asking about its own
+    // work; ?session=all widens to every session in the journal.
+    if apiPath == "/api/log" {
+        var f = logFilter()
+        f.session = gSessionId.clone()
+        let qs = queryParam(apiQuery, "session")
+        if qs == "all" {
+            f.session = ""
+        } else if qs.len > 0 {
+            f.session = qs
+        }
+        f.kind = queryParam(apiQuery, "kind")
+        f.dir = queryParam(apiQuery, "dir")
+        f.since = queryParam(apiQuery, "since").parseInt() ?? (0 as i64)
+        f.limit = queryParam(apiQuery, "limit").parseInt() ?? (0 as i64)
+        var arr: Vec<string> = []
+        if queryParam(apiQuery, "view") == "sessions" {
+            arr = journalSessions(f.limit)
+        } else if queryParam(apiQuery, "view") == "breakpoints" {
+            arr = journalBreakpoints(queryParam(apiQuery, "program"), f.limit)
+        } else {
+            arr = journalRows(f)
+        }
+        var body: string = "["
+        var ai: i64 = 0
+        while ai < arr.len {
+            if ai > 0 {
+                body = body + ","
+            }
+            body = body + arr[ai]
+            ai = ai + 1
+        }
+        body = body + "]"
+        sendHttp(fd, 200, "application/json", Json.obj().bool("ok", true).raw("rows", body).build())
+        close(fd)
+        return
+    }
+    if apiPath == "/api/sessions" {
+        sendHttp(fd, 200, "application/json", sessionsJson(gSessionId))
+        close(fd)
+        return
+    }
+    if apiPath == "/api/spawn" {
+        if rl.method != "POST" {
+            sendHttp(fd, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
+            close(fd)
+            return
+        }
+        sendHttp(fd, 200, "application/json", spawnSessionJson())
+        close(fd)
+        return
+    }
+    if apiPath == "/api/binfo" {
+        sendHttp(fd, 200, "application/json", binInfoJson(binPath))
+        close(fd)
+        return
+    }
+    if apiPath == "/api/cmd" {
+        if rl.method != "POST" {
+            sendHttp(fd, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
+            close(fd)
+            return
+        }
+        // Body follows the header terminator. Small JSON commands arrive in the
+        // first read; keep pulling while the declared length is short.
+        var body: string = ""
+        var hi: i64 = 0
+        while hi + 3 < raw.len {
+            if raw[hi] == '\r' && raw[hi + 1] == '\n' && raw[hi + 2] == '\r' && raw[hi + 3] == '\n' {
+                body = raw.substr(hi + 4, raw.len)
+                break
+            }
+            hi = hi + 1
+        }
+        // Absent/garbage content-length reads as 0, same as the old parser: the
+        // body is whatever already arrived.
+        let want = headerVal(raw, "content-length").parseInt() ?? (0 as i64)
+        while body.len < want {
+            var more: [u8; 8192] = [0; 8192]
+            let n2 = recvFd(fd, more, 8192)
+            if n2 <= 0 {
+                break
+            }
+            for j in 0..n2 {
+                body.push(more[j])
+            }
+        }
+        var timeoutMs = queryParam(apiQuery, "timeout").parseInt() ?? (0 as i64)
+        if timeoutMs <= 0 {
+            timeoutMs = 5000
+        }
+        let reply = apiRunCmd(body, queryParam(apiQuery, "await"), timeoutMs, apiWho(apiQuery), bus, pendCh)
+        sendHttp(fd, 200, "application/json", reply)
+        close(fd)
+        return
+    }
+
+    if rl.method == "GET" {
+        // requestAllowed has already pinned Host to a loopback name.
+        serveStatic(fd, rl.path, "http://" + headerVal(raw, "host"))
+    } else {
+        sendHttp(fd, 404, "text/plain", "not found")
+    }
+    close(fd)
 }
 
 fn acceptLoop(listener: TcpListener, bus: Channel<string>, pendCh: Channel<Pending>): void {
