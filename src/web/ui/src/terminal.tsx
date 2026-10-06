@@ -3,6 +3,10 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { send } from "./rpc";
 
+// xterm paints on a canvas and needs concrete colours, so read the design tokens
+// from :root instead of repeating their hex here.
+const token = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
 // ── Merged terminal (program + debugger output in one xterm) ──
 // VS Code interleaves the debuggee's tty and the debugger's own output in a
 // single view; we do the same. Program bytes (pty / DAP category "stdout")
@@ -71,7 +75,7 @@ export function XTermView({ termRef }: { termRef: React.MutableRefObject<Termina
     const term = new Terminal({
       fontSize: 12,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-      theme: { background: "#0d1117", foreground: "#c9d1d9", cursor: "#c9d1d9" },
+      theme: { background: token("--bg"), foreground: token("--fg"), cursor: token("--fg") },
       // No blink, and no cursor at all unless the terminal itself is focused —
       // REPL input lives in the console box, so a pulsing block here just distracts.
       cursorBlink: false,
