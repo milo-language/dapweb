@@ -42,9 +42,9 @@
           font-family: var(--mono); line-height: 1; display: flex; align-items: center; gap: 20px; }
   .moth { width: 78px; height: 78px; flex: none; }
   .moth-sm { width: 15px; height: 15px; flex: none; }
-  .tag { font-size: 27px; line-height: 1.42; margin-top: 30px; color: var(--fg); }
-  .tag b { color: var(--accent); font-weight: 600; }
-  .tag .m { color: var(--agent); font-weight: 600; }
+  .tag { font-size: 30px; line-height: 1.4; margin-top: 30px; color: var(--fg); }
+  .tag b { color: var(--accent); font-weight: 800; }
+  .tag .m { color: var(--agent); font-weight: 800; }
   /* Language logos, not adapter names: at unfurl size a word dies but a mark
      survives, and colour alone reads as "many languages". */
   .langs { margin-top: 38px; display: flex; flex-wrap: wrap; align-items: center;
@@ -112,8 +112,9 @@
         <rect x="9" y="21" width="20" height="5.5" rx="2" fill="var(--r-stack)"/>
       </svg>dapweb</div>
     <div class="tag">
-      Debug with <span class="m">AI</span>: a <b>web UI</b> for humans, a CLI
-      for <span class="m">agents</span>, one shared session.
+      <b>You</b> click in the browser.<br>
+      <span class="m">Your agent</span> types in the terminal.<br>
+      Same debug session.
     </div>
     <div class="langs">
       <svg class="lg" viewBox="0 0 24 24" aria-label="C"><path fill="#659ad2" d="M16.5921 9.1962s-.354-3.298-3.627-3.39c-3.2741-.09-4.9552 2.474-4.9552 6.14 0 3.6651 1.858 6.5972 5.0451 6.5972 3.184 0 3.5381-3.665 3.5381-3.665l6.1041.365s.36 3.31-2.196 5.836c-2.552 2.5241-5.6901 2.9371-7.8762 2.9201-2.19-.017-5.2261.034-8.1602-2.97-2.938-3.0101-3.436-5.9302-3.436-8.8002 0-2.8701.556-6.6702 4.047-9.5502C7.444.72 9.849 0 12.254 0c10.0422 0 10.7172 9.2602 10.7172 9.2602z"/></svg>
@@ -141,7 +142,7 @@
       <span class="inp">/tmp/demo --verbose</span>
       <span class="btn go">▶</span>
       <span class="btn">⏸</span>
-      <span class="st"><i></i>stopped:43</span>
+      <span class="st"><i></i>paused · fib:43</span>
     </div>
     <div class="body">
       <div class="code">
