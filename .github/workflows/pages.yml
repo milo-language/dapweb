@@ -28,7 +28,7 @@ jobs:
       - name: assemble site
         run: |
           mkdir -p _site/img
-          cp docs/site/index.html _site/
+          cp docs/site/index.html docs/site/install.sh _site/
           cp docs/images/debugging.png docs/images/how-it-works.svg _site/img/
           cp src/web/ui/og.png src/web/ui/favicon.svg _site/img/
       - uses: actions/configure-pages@v5
