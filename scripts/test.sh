@@ -167,6 +167,8 @@ self_suite  e2e-agent
 self_suite  e2e-timeline
 self_suite  e2e-config
 self_suite  e2e-attach
+self_suite  e2e-runtime
+self_suite  e2e-infer
 self_suite  e2e-commands
 self_suite  e2e-start
 self_suite  e2e-history
