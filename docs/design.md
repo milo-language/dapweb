@@ -40,6 +40,11 @@ Adapters:
 - **lldb-dap reports the stop-at-main breakpoint as plain `reason: "breakpoint"`.** The
   server records the id `setFunctionBreakpoints` returned for main and compares it with
   the stop's `hitBreakpointIds` to set `atMain`.
+- **lldb-dap reports a watchpoint stop on the line after the write** (reason `"data
+  breakpoint"`): the trap fires once the writing instruction retires. Its dataId is
+  `"ADDR/SIZE"` and it never answers `canPersist`, so dapweb drops data breakpoints when
+  the run ends. With no `variablesReference`, `dataBreakpointInfo` evaluates `name` and
+  watches the address it VALUES to (`g_total` = 0 is refused, `&g_total` works).
 - **readMemory at unmapped pages**: lldb-dap replies success-but-empty (no error, no
   data); surface it in the Memory pane, not the terminal.
 

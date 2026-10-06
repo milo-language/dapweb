@@ -181,6 +181,11 @@ subprocesses); build it when an adapter needs it.
 Order: F1 inline values → F2 goto → F4 follow agent → F3 timeline → F5 data bps.
 Each one gets an e2e test driven through `dapweb api` plus a browser assertion.
 
+F5 shipped: `setDataBreakpoint` / `clearDataBreakpoint` and `dapweb api watch`; entry from
+the Locals context menu and a right-clicked memory word; `tests/e2e-watch.ts`. lldb-dap 22
+advertises `supportsDataBreakpoints` + `supportsDataBreakpointBytes`, never `canPersist`,
+so every watch is dropped when its run ends or restarts.
+
 ## Phase 5.5: landing page (new)
 
 Inspiration: messenger.com. Huge bold headline in the accent colour, lots of whitespace,

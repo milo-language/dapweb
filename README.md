@@ -201,6 +201,7 @@ browser sends, so an agent or a shell script needs no separate protocol:
 ./dapweb api run  # blocks until the first stop
 ./dapweb api step --pretty  # step, and indent the reply for a human
 ./dapweb api eval 'x + 1'
+./dapweb api watch total  # break when a local of the current stop is written
 ./dapweb api request --await stopped '{"cmd":"continue"}'
 ```
 

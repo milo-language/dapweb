@@ -23,6 +23,8 @@ way. Response-vs-event ordering is **not** guaranteed.
 | `setBreakpoints` | `{"source":{"path":"/f.c"},"breakpoints":[{"line":6},{"line":12,"condition":"x>3"}]}` |
 | `setFunctionBreakpoints` | `{"breakpoints":[{"name":"add"}]}` |
 | `setExceptionBreakpoints` | `{"filters":["cpp_throw","cpp_catch"]}` |
+| `dataBreakpointInfo` | `{"variablesReference":R,"name":"x"}` or `{"name":"0x1000","asAddress":true,"bytes":4}` → body `{dataId,accessTypes,description}` |
+| `setDataBreakpoints` | `{"breakpoints":[{"dataId":"100008000/4","accessType":"write"}]}` (replaces the set) |
 
 ## Stop events (unsolicited)
 | event | body |
