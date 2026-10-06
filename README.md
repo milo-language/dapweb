@@ -3,6 +3,7 @@
 </p>
 
 <p align="center">
+  <b><a href="https://milo-language.github.io/dapweb/">Website</a></b> ·
   <b><a href="#install">Install</a></b> ·
   built in <a href="https://github.com/milo-language/milo">Milo</a>
 </p>

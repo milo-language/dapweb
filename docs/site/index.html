@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dapweb · debug with your agent</title>
+<meta name="description" content="A web UI for you, a CLI for your AI agent, one shared debug session. Works with any Debug Adapter Protocol debugger.">
+<meta property="og:title" content="dapweb · debug with your agent">
+<meta property="og:description" content="You and your AI agent drive the same debugger at the same time.">
+<meta property="og:image" content="https://milo-language.github.io/dapweb/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="img/favicon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  /* Light page, dark product: the screenshots carry the app's own palette. */
+  :root {
+    --bg: #ffffff;
+    --fg: #1c1e21;
+    --muted: #5b6270;
+    --accent: #1f6feb;
+    --accent-2: #8a3ffc;
+    --agent: #d6338f;
+    --field: #f0f2f5;
+    --line: #e4e6eb;
+    --term-bg: #0d1117;
+    --term-fg: #e6edf3;
+    --term-dim: #8b949e;
+    --term-key: #79c0ff;
+    --term-str: #a5d6ff;
+    --term-num: #ffa657;
+    --code: #79c0ff;
+    --heap: #f778ba;
+    --stack: #3fb950;
+    --ui: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { overflow-x: hidden; background: var(--bg); color: var(--fg); font-family: var(--ui); -webkit-font-smoothing: antialiased; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 0 32px; }
+
+  nav { display: flex; align-items: center; justify-content: space-between; padding: 28px 0; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 22px; color: var(--fg); }
+  .brand:hover { text-decoration: none; }
+  nav ul { display: flex; gap: 32px; list-style: none; margin: 0; padding: 0; font-weight: 700; font-size: 17px; }
+  nav ul a { color: var(--fg); }
+
+  /* ── hero ── */
+  .hero > div { min-width: 0; }
+  .hero { display: grid; grid-template-columns: 1fr 1.05fr; gap: 48px; align-items: center; padding: 72px 0 96px; }
+  h1 {
+    font-size: clamp(52px, 7.4vw, 104px); line-height: 0.98; letter-spacing: -0.035em; font-weight: 800; margin: 0 0 32px;
+    background: linear-gradient(100deg, var(--accent) 0%, var(--accent-2) 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .lede { font-size: 22px; line-height: 1.5; color: var(--muted); margin: 0 0 36px; max-width: 34ch; font-weight: 500; }
+  .lede b { color: var(--fg); }
+  .install { display: flex; align-items: center; gap: 10px; background: var(--field); border-radius: 14px; padding: 6px 6px 6px 18px; max-width: 560px; }
+  .install code { flex: 1; min-width: 0; font-family: var(--mono); font-size: 14px; overflow-x: auto; white-space: nowrap; color: var(--fg); padding: 12px 0; scrollbar-width: none; }
+  .install code::-webkit-scrollbar { display: none; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; border: 0; border-radius: 999px; font: 700 17px var(--ui); padding: 14px 26px; cursor: pointer; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: #1a5fd0; text-decoration: none; }
+  .copy { background: var(--accent); color: #fff; border: 0; border-radius: 10px; font: 700 14px var(--ui); padding: 12px 16px; cursor: pointer; }
+  .ctas { display: flex; align-items: center; gap: 24px; margin-top: 28px; font-weight: 700; font-size: 17px; }
+  .note { margin-top: 14px; font-size: 14px; color: var(--muted); }
+
+  /* the art: product screenshot with a terminal laid over it, tilted like two phones */
+  .art { position: relative; height: 560px; }
+  .shot {
+    position: absolute; right: 0; top: 10px; width: 92%; border-radius: 16px; overflow: hidden;
+    box-shadow: 0 30px 80px rgba(31, 111, 235, 0.22), 0 6px 18px rgba(0, 0, 0, 0.12);
+    transform: rotate(2.5deg);
+  }
+  .shot img { display: block; width: 100%; }
+  .term {
+    position: absolute; left: 0; bottom: 0; width: 64%; background: var(--term-bg); color: var(--term-fg);
+    border-radius: 16px; padding: 0 0 18px; font: 13px/1.6 var(--mono);
+    box-shadow: 0 30px 80px rgba(214, 51, 143, 0.25), 0 6px 18px rgba(0, 0, 0, 0.25);
+    transform: rotate(-3deg);
+  }
+  .term .bar { display: flex; gap: 7px; padding: 12px 14px; border-bottom: 1px solid #21262d; margin-bottom: 12px; }
+  .term .bar i { width: 11px; height: 11px; border-radius: 50%; background: #30363d; display: block; }
+  .term pre { margin: 0; padding: 0 18px; white-space: pre-wrap; word-break: break-all; }
+  .term .p { color: var(--heap); font-weight: 600; }
+  .term .d { color: var(--term-dim); }
+  .term .k { color: var(--term-key); }
+  .term .s { color: var(--term-str); }
+  .term .n { color: var(--term-num); }
+  .sticker {
+    position: absolute; bottom: 24px; right: 4%; width: 116px; height: 116px; transform: rotate(-12deg);
+    filter: drop-shadow(0 12px 22px rgba(31, 111, 235, 0.3));
+  }
+  .sticker rect { animation: bob 3.2s ease-in-out infinite; transform-box: fill-box; }
+  .sticker rect:nth-child(2) { animation-delay: 0.25s; }
+  .sticker rect:nth-child(3) { animation-delay: 0.5s; }
+  @keyframes bob { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(6px); } }
+  @media (prefers-reduced-motion: reduce) { .sticker rect { animation: none; } }
+
+  /* ── sections ── */
+  section { padding: 88px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: clamp(36px, 4.6vw, 60px); letter-spacing: -0.03em; line-height: 1.05; margin: 0 0 20px; font-weight: 800; }
+  .sub { font-size: 21px; color: var(--muted); margin: 0 0 48px; max-width: 40ch; font-weight: 500; line-height: 1.5; }
+  .diagram { width: 100%; border-radius: 20px; display: block; }
+
+  .langs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; }
+  .lang { background: var(--field); border-radius: 18px; padding: 26px 22px; }
+  .lang b { display: block; font-size: 26px; font-weight: 800; letter-spacing: -0.02em; }
+  .lang span { color: var(--muted); font-size: 15px; font-family: var(--mono); }
+  .anymore { margin-top: 20px; font-size: 17px; color: var(--muted); }
+
+  .feats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  .feat { border: 1px solid var(--line); border-radius: 20px; padding: 30px; }
+  .feat h3 { font-size: 24px; margin: 0 0 10px; letter-spacing: -0.02em; }
+  .feat p { margin: 0; color: var(--muted); font-size: 17px; line-height: 1.5; }
+  .feat .dot { width: 14px; height: 14px; border-radius: 4px; margin-bottom: 18px; }
+
+  .final { text-align: center; }
+  .final h2 { margin-bottom: 28px; }
+  .final .install { margin: 0 auto; text-align: left; }
+  footer { padding: 40px 0 56px; color: var(--muted); font-size: 15px; display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+
+  @media (max-width: 960px) {
+    .hero { grid-template-columns: 1fr; padding: 32px 0 64px; }
+    .art { height: 440px; }
+    .langs { grid-template-columns: repeat(2, 1fr); }
+    .feats { grid-template-columns: 1fr; }
+    nav ul { gap: 18px; font-size: 15px; }
+  }
+  @media (max-width: 560px) {
+    .wrap { padding: 0 16px; }
+    nav ul li.hide-sm { display: none; }
+    .art { height: 360px; }
+    .term { width: 86%; font-size: 11px; }
+    .sticker { width: 80px; height: 80px; }
+    .lede, .sub { font-size: 18px; }
+    section { padding: 64px 0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="brand" href="./">
+      <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="3" y="6" width="26" height="5.5" rx="2" fill="var(--code)"/>
+        <rect x="6" y="13.5" width="23" height="5.5" rx="2" fill="var(--heap)"/>
+        <rect x="9" y="21" width="20" height="5.5" rx="2" fill="var(--stack)"/>
+      </svg>
+      dapweb
+    </a>
+    <ul>
+      <li class="hide-sm"><a href="#how">How it works</a></li>
+      <li class="hide-sm"><a href="#languages">Languages</a></li>
+      <li><a href="https://github.com/milo-language/dapweb">GitHub</a></li>
+    </ul>
+  </nav>
+
+  <div class="hero">
+    <div>
+      <h1>Debug with your agent.</h1>
+      <p class="lede">You click through a real debugger in your browser. <b>Your AI agent drives the same session from the command line.</b> Both of you see every stop.</p>
+      <div class="install">
+        <code id="cmd">curl -fsSL https://github.com/milo-language/dapweb/releases/download/latest/dapweb-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/').tar.gz | tar xz</code>
+        <button class="copy" data-copy="cmd">Copy</button>
+      </div>
+      <p class="note">macOS and Linux. Then run <code>./dapweb-*/dapweb ./your-program</code>.</p>
+      <div class="ctas">
+        <a class="btn btn-primary" href="https://github.com/milo-language/dapweb#install">Get started</a>
+        <a href="https://github.com/milo-language/dapweb">View on GitHub →</a>
+      </div>
+    </div>
+
+    <div class="art" aria-hidden="true">
+      <div class="shot"><img src="img/debugging.png" alt=""></div>
+      <div class="term">
+        <div class="bar"><i></i><i></i><i></i></div>
+<pre><span class="p">$</span> dapweb api break --line 23
+<span class="d">{"ok":true}</span>
+<span class="p">$</span> dapweb api run
+<span class="d">{</span><span class="k">"type"</span>:<span class="s">"stopped"</span>, <span class="k">"reason"</span>:<span class="s">"breakpoint"</span>,
+ <span class="k">"line"</span>:<span class="n">23</span>, <span class="k">"locals"</span>:[{<span class="k">"name"</span>:<span class="s">"p"</span>,
+ <span class="k">"value"</span>:<span class="s">"5.196"</span>}, ...]<span class="d">}</span>
+<span class="p">$</span> dapweb api eval 'total + p'
+<span class="d">{</span><span class="k">"value"</span>:<span class="s">"(double) 5.196"</span><span class="d">}</span></pre>
+      </div>
+      <svg class="sticker" viewBox="0 0 32 32">
+        <rect x="3" y="6" width="26" height="5.5" rx="2" fill="var(--code)"/>
+        <rect x="6" y="13.5" width="23" height="5.5" rx="2" fill="var(--heap)"/>
+        <rect x="9" y="21" width="20" height="5.5" rx="2" fill="var(--stack)"/>
+      </svg>
+    </div>
+  </div>
+</div>
+
+<section id="how">
+  <div class="wrap">
+    <h2>One session. Two drivers.</h2>
+    <p class="sub">Whatever your agent does shows up in your tab as it happens. Whatever you do, your agent can read back.</p>
+    <img class="diagram" src="img/how-it-works.svg" alt="You (in the browser) and your agent (on the command line) both drive one debug session, which runs your program">
+  </div>
+</section>
+
+<section id="languages">
+  <div class="wrap">
+    <h2>Any language with a debugger.</h2>
+    <p class="sub">dapweb speaks the Debug Adapter Protocol, the same one VS Code uses. Nearly every debugger speaks it too.</p>
+    <div class="langs">
+      <div class="lang"><b>C, C++, Rust</b><span>lldb-dap</span></div>
+      <div class="lang"><b>Python</b><span>debugpy</span></div>
+      <div class="lang"><b>Go</b><span>delve</span></div>
+      <div class="lang"><b>JS, TS</b><span>js-debug</span></div>
+      <div class="lang"><b>Java</b><span>java-dap</span></div>
+    </div>
+    <p class="anymore">Plus anything else with a DAP adapter: <code>--dapPath "gdb -i dap"</code>.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>A real debugger, not a toy.</h2>
+    <p class="sub">Everything you expect, plus views of the machine most debuggers hide.</p>
+    <div class="feats">
+      <div class="feat"><div class="dot" style="background:var(--agent)"></div><h3>Agent-native CLI</h3><p>Every action is a <code>dapweb api</code> command with a JSON reply. No plugin, no protocol to learn.</p></div>
+      <div class="feat"><div class="dot" style="background:var(--accent)"></div><h3>Full breakpoints</h3><p>Conditions, hit counts and log points, kept across restarts.</p></div>
+      <div class="feat"><div class="dot" style="background:var(--stack)"></div><h3>Memory you can read</h3><p>Hex dump colored by region (stack, heap, code), with your locals labeled where they live.</p></div>
+      <div class="feat"><div class="dot" style="background:var(--heap)"></div><h3>Registers and disassembly</h3><p>What changed since the last stop, and instruction-level stepping.</p></div>
+      <div class="feat"><div class="dot" style="background:var(--code)"></div><h3>Your launch.json</h3><p>Reuse the VS Code launch configs you already have.</p></div>
+      <div class="feat"><div class="dot" style="background:var(--accent-2)"></div><h3>A memory of every session</h3><p>Every event is journaled, so you or your agent can ask what happened last time.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="final">
+  <div class="wrap">
+    <h2>Try it in thirty seconds.</h2>
+    <div class="install">
+      <code id="cmd2">curl -fsSL https://github.com/milo-language/dapweb/releases/download/latest/dapweb-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/').tar.gz | tar xz</code>
+      <button class="copy" data-copy="cmd2">Copy</button>
+    </div>
+  </div>
+</section>
+
+<div class="wrap">
+  <footer>
+    <span>dapweb is built in <a href="https://github.com/milo-language/milo">Milo</a>.</span>
+    <a href="https://github.com/milo-language/dapweb">github.com/milo-language/dapweb</a>
+  </footer>
+</div>
+
+<script>
+  for (const b of document.querySelectorAll(".copy")) {
+    b.addEventListener("click", async () => {
+      const text = document.getElementById(b.dataset.copy).textContent;
+      try { await navigator.clipboard.writeText(text); b.textContent = "Copied"; }
+      catch { b.textContent = "Select it"; }
+      setTimeout(() => (b.textContent = "Copy"), 1600);
+    });
+  }
+</script>
+</body>
+</html>

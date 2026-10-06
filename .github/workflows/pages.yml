@@ -1,0 +1,39 @@
+name: pages
+
+# The landing page. docs/site holds only the HTML; the images it shows are the
+# README's own, copied in here so there is one committed copy of each.
+on:
+  push:
+    branches: [main]
+    paths: ["docs/site/**", "docs/images/**", "src/web/ui/og.png", "src/web/ui/favicon.svg", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: assemble site
+        run: |
+          mkdir -p _site/img
+          cp docs/site/index.html _site/
+          cp docs/images/debugging.png docs/images/how-it-works.svg _site/img/
+          cp src/web/ui/og.png src/web/ui/favicon.svg _site/img/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
