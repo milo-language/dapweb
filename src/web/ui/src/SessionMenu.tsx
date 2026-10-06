@@ -44,7 +44,7 @@ export function SessionMenu({ caps, dbgLabel, adapterCmd, sessionId, version, li
           <div className="info-pop">
             <div className="info-line"><span className="info-k">adapter</span> {dbgLabel}{adapterCmd ? ` — ${adapterCmd}` : ""}</div>
             <div className="info-line"><span className="info-k">session</span> {sessionId || "—"}</div>
-            <div className="info-line"><span className="info-k">dapweb</span> {version || "—"}</div>
+            <div className="info-line"><span className="info-k">dapweb</span> {version || "unknown"}</div>
             <details>
               <summary>capabilities</summary>
               <div className="caps-list">
