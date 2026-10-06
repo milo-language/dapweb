@@ -107,6 +107,7 @@ serve_suite e2e-latejoin   $((base + 80)) --program /tmp/dapweb_nested --source 
 serve_suite e2e-goto       $((base + 90)) --program /tmp/dapweb_nested --source examples/nested/main.c
 self_suite  configform
 self_suite  tablabels
+self_suite  inlinevalues
 self_suite  primary
 self_suite  threadlabel
 self_suite  session-reducer
