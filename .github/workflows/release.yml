@@ -9,7 +9,22 @@ permissions:
   contents: write
 
 jobs:
+  # One identity for the whole release: every platform's binary and the
+  # published version.json must agree, or a build that straddles midnight UTC
+  # would tell its own users to update to itself.
+  stamp:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.s.outputs.sha }}
+      date: ${{ steps.s.outputs.date }}
+    steps:
+      - id: s
+        run: |
+          echo "sha=$(printf '%s' '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: stamp
     strategy:
       fail-fast: false
       matrix:
@@ -64,9 +79,10 @@ jobs:
           fi
 
       # Stamp build identity into the binary. `.version` is embedded via embedFile(),
-      # so this must happen before the build; the committed value is "dev".
+      # so this must happen before the build; the committed value is "dev". Same
+      # bytes as the release's version.json, which `dapweb update` compares against.
       - name: stamp version
-        run: printf '%s (%s)' "$(git rev-parse --short HEAD)" "$(date -u +%Y-%m-%d)" > .version
+        run: printf '{"sha":"%s","date":"%s"}' "${{ needs.stamp.outputs.sha }}" "${{ needs.stamp.outputs.date }}" > .version
 
       # Must run before `milo build`: the UI bundle is embedded via embedFile(),
       # so it has to exist on disk at compile time. A missing bundle fails the
@@ -103,7 +119,7 @@ jobs:
           path: dapweb-${{ matrix.target }}.tar.gz
 
   release:
-    needs: build
+    needs: [stamp, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -111,11 +127,9 @@ jobs:
           merge-multiple: true
       - run: ls -lh dapweb-*.tar.gz
 
-      - name: stamp release identity
-        id: stamp
-        run: |
-          echo "sha=$(printf '%s' '${{ github.sha }}' | cut -c1-7)" >> "$GITHUB_OUTPUT"
-          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      # What `dapweb update` and the startup notice fetch to learn the latest build.
+      - name: write version.json
+        run: printf '{"sha":"%s","date":"%s"}\n' "${{ needs.stamp.outputs.sha }}" "${{ needs.stamp.outputs.date }}" > version.json
 
       # GitHub stamps published_at once, on the draft->published transition, and
       # never on update. A rolling `latest` tag is only ever updated after the
@@ -131,7 +145,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: Latest Build ${{ steps.stamp.outputs.sha }} (${{ steps.stamp.outputs.date }})
+          name: Latest Build ${{ needs.stamp.outputs.sha }} (${{ needs.stamp.outputs.date }})
           body: |
             Rolling release from the latest passing commit on main.
 
@@ -143,8 +157,12 @@ jobs:
             curl -fsSL https://github.com/milo-language/dapweb/releases/download/latest/dapweb-$P.tar.gz | tar xz
             cd dapweb-$P && ./dapweb web
             ```
+
+            Update an existing install in place: `dapweb update`
           prerelease: false
           make_latest: true
-          files: dapweb-*.tar.gz
+          files: |
+            dapweb-*.tar.gz
+            version.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

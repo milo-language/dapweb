@@ -1,13 +1,59 @@
 // Build identity. `.version` is committed as "dev" and overwritten by release CI
-// with the commit sha + build date. Without it a binary from the rolling `latest`
-// tag cannot say what it is, which makes bug reports unattributable.
+// with {"sha":...,"date":...}, the same document the release publishes as
+// version.json, so the binary and the update check compare like with like.
+// Without it a binary from the rolling `latest` tag cannot say what it is, which
+// makes bug reports unattributable and an update check impossible.
 
-fn versionLine(): string {
-    return "dapweb " + @embedFile("../.version").trim()
+from "std/json" import {
+    Json
+}
+from "std/env" import {
+    Env
 }
 
-// Rolling `latest` means re-running the install is the update path; there is no
-// in-place upgrade to point at, so print where to get a newer build.
+pub struct BuildId {
+    sha: string, // short sha; "" for a dev build
+    date: string, // YYYY-MM-DD (UTC); "" for a dev build
+}
+
+// Parse a version.json document. Anything without a sha (the committed "dev",
+// a truncated download) is a dev identity, which never claims to be up to date
+// and never triggers a notice.
+pub fn parseBuildId(text: &string): BuildId {
+    match Json.parse(text.trim()) {
+        Result.Ok(doc) => {
+            if doc.isObject() {
+                return BuildId {
+                    sha: doc.str("sha") ?? "", date: doc.str("date") ?? ""
+                }
+            }
+        }
+        Result.Err(_e) => {
+        }
+    }
+    return BuildId {
+        sha: "", date: ""
+    }
+}
+
+// The identity this binary was built with. DAPWEB_UPDATE_TEST_SELF replaces it
+// FOR TESTS ONLY: every binary a test runs is a dev build, and dev builds never
+// check for updates, so without it the notice path could not be exercised.
+pub fn buildId(): BuildId {
+    let fake = Env.getOr("DAPWEB_UPDATE_TEST_SELF", "")
+    if fake.len > 0 {
+        return parseBuildId(fake)
+    }
+    return parseBuildId(@embedFile("../.version"))
+}
+
+pub fn versionString(id: &BuildId): string {
+    if id.sha.len == 0 {
+        return "dev"
+    }
+    return $"{id.sha} ({id.date})"
+}
+
 pub fn versionText(): string {
-    return versionLine() + "\nhttps://github.com/milo-language/dapweb/releases — rolling `latest`; re-run the install command to update"
+    return "dapweb " + versionString(buildId()) + "\nhttps://github.com/milo-language/dapweb/releases (rolling `latest`); run `dapweb update` to update"
 }
