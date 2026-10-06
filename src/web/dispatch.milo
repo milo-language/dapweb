@@ -18,7 +18,7 @@ from "./dap_reader" import {
     Pending, sendReqFd, buildBpArgsForPath, excArgs, startRun
 }
 from "./peers" import {
-    logEvent, peerCountStr, wsPush, peerPush, wsWriterLoop, sinkRegister, sinkUnregister, pushHelloState, configErrMsg, bpAckMsg
+    logEvent, peerCountStr, wsPush, peerPush, wsWriterLoop, sinkRegister, sinkUnregister, pushHelloState, configErrMsg, cmdErrorMsg, bpAckMsg
 }
 from "./persist" import {
     absSourcePath, applyConfig, persistBps, loadBps, persistHistory, recordConfig, historyChangedMsg, sessionNameSeeds, journalHere
@@ -106,6 +106,12 @@ fn activityText(cmd: &Cmd): string {
     if cmd.name == "setVar" {
         return $"set {cmd.str("name")} = {cmd.str("value")}"
     }
+    if cmd.name == "runToCursor" {
+        return $"run to line {cmd.int("line", 0 as i64)}"
+    }
+    if cmd.name == "setNextStatement" {
+        return $"move the next statement to line {cmd.int("line", 0 as i64)}"
+    }
     return cmdVerb(cmd.name)
 }
 
@@ -116,7 +122,7 @@ fn activityText(cmd: &Cmd): string {
 // what would make those counts wrong.
 fn cmdPath(c: &string, doc: &Json): string {
     var path = absSourcePath(doc.str("path") ?? "")
-    if path.len == 0 && (c == "setBreakpoint" || c == "clearBreakpoint") {
+    if path.len == 0 && (c == "setBreakpoint" || c == "clearBreakpoint" || c == "runToCursor" || c == "setNextStatement") {
         path = absSourcePath(gSession.target.spec.srcPath)
     }
     return path
@@ -135,6 +141,8 @@ fn cmdHandler(name: string): Option<(&Cmd) => void> {
         "stepIn" => { return Option.Some(cmdStep) }
         "stepOut" => { return Option.Some(cmdStep) }
         "pause" => { return Option.Some(cmdStep) }
+        "runToCursor" => { return Option.Some(cmdRunToCursor) }
+        "setNextStatement" => { return Option.Some(cmdSetNextStatement) }
         "restart" => { return Option.Some(cmdRestart) }
         "kill" => { return Option.Some(cmdKill) }
         "evaluate" => { return Option.Some(cmdEvaluate) }
@@ -302,6 +310,76 @@ fn cmdStep(cmd: &Cmd): void {
     }
     let seq = gSession.proc.nextSeq()
     sendReqFd(dfd, seq, dapCmd, b.build())
+}
+
+// Continue to a line, VS Code's one-shot: the line is armed as an extra
+// breakpoint (gSession.proc.runTo) that D disarms at the next stop, whatever
+// caused it. The user's own breakpoint list is never touched, so no peer sees a
+// breakpoint appear and vanish. The setBreakpoints is written before the
+// continue on the same fd, and the adapter handles requests in order.
+fn cmdRunToCursor(cmd: &Cmd): void {
+    if gSession.stop.stop.isNone() || gSession.proc.dapIn.isNone() {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "run to cursor needs a stopped program"))
+        return
+    }
+    let path = cmdPath(cmd.name, cmd.doc)
+    let line = cmd.int("line", 0 as i64)
+    if path.len == 0 || line <= 0 {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "run to cursor needs a line (and a path when no source is configured)"))
+        return
+    }
+    let t = cmd.int("tid", stopTid())
+    gSession.proc.runTo = Option.Some(Bp {
+        path: path.clone(), line: line, condition: "", hitCondition: "", logMessage: "", enabled: true,
+    }
+    )
+    sendPending(cmd.pendCh, "bpLive", 0, "", "setBreakpoints", buildBpArgsForPath(gSession.persisted.bps, path))
+    gSession.stop.resume()
+    let Option.Some(dfd) = gSession.proc.dapIn else {
+        return
+    }
+    sendReqFd(dfd, gSession.proc.nextSeq(), "continue", Json.obj().int("threadId", t).build())
+}
+
+// The thread of the current stop, for callers that name none.
+fn stopTid(): i64 {
+    if let Option.Some(st) = gSession.stop.stop {
+        return st.tid
+    }
+    return 1 as i64
+}
+
+// Whether the adapter's initialize response advertised a capability.
+fn adapterCan(key: &string): bool {
+    let Option.Some(raw) = gSession.stop.caps else {
+        return false
+    }
+    let Result.Ok(doc) = Json.parse(raw) else {
+        return false
+    }
+    return doc.curBool(doc.curField(doc.curField(doc.curRoot(), "body"), key)) ?? false
+}
+
+// Move the program counter without running anything: gotoTargets for the
+// line, then goto its first target (D chains the two; see kind "gotoT"). The
+// adapter answers with a stopped event, reason "goto".
+fn cmdSetNextStatement(cmd: &Cmd): void {
+    if gSession.stop.stop.isNone() || gSession.proc.dapIn.isNone() {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "set next statement needs a stopped program"))
+        return
+    }
+    if !adapterCan("supportsGotoTargetsRequest") {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "this debug adapter does not support goto (supportsGotoTargetsRequest)"))
+        return
+    }
+    let path = cmdPath(cmd.name, cmd.doc)
+    let line = cmd.int("line", 0 as i64)
+    if path.len == 0 || line <= 0 {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "set next statement needs a line (and a path when no source is configured)"))
+        return
+    }
+    let t = cmd.int("tid", stopTid())
+    sendPending(cmd.pendCh, "gotoT", 0, t.toString(), "gotoTargets", Json.obj().obj("source", Json.obj().str("path", path)).int("line", line).build())
 }
 
 // Native restart: the adapter re-launches with the same launch config; the bps
@@ -533,7 +611,7 @@ pub fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, b
                 // A rejected command never produces the awaited reply, so return
                 // the refusal rather than burning the caller's whole timeout and
                 // then reporting a useless {"error":"timeout"}.
-                if mt == "configError" {
+                if mt == "configError" || mt == "cmdError" {
                     out = Json.obj().bool("ok", false).str("error", d.str("error") ?? "").build()
                     break
                 }

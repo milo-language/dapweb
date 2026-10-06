@@ -64,7 +64,7 @@ serve_suite() {
         echo "  FAIL $name: its server exited at startup (port $port taken?), see /tmp/dapweb_test_$name.log"
         fail=$((fail + 1)); failed="$failed $name"; return 0
     fi
-    if bun "tests/$name.ts" "$port"; then pass=$((pass + 1)); else fail=$((fail + 1)); failed="$failed $name"; fi
+    if bun "tests/$name.ts" "$port" ./dapweb; then pass=$((pass + 1)); else fail=$((fail + 1)); failed="$failed $name"; fi
     kill "$srv" 2>/dev/null || true
     wait "$srv" 2>/dev/null || true
 }
@@ -104,8 +104,10 @@ serve_suite e2e-session    $((base + 50)) --program /tmp/dapweb_nested --source 
 serve_suite e2e-threads    $((base + 60)) --program /tmp/dapweb_threads
 serve_suite e2e-security   $((base + 70))
 serve_suite e2e-latejoin   $((base + 80)) --program /tmp/dapweb_nested --source examples/nested/main.c
+serve_suite e2e-goto       $((base + 90)) --program /tmp/dapweb_nested --source examples/nested/main.c
 self_suite  configform
 self_suite  tablabels
+self_suite  inlinevalues
 self_suite  primary
 self_suite  threadlabel
 self_suite  session-reducer

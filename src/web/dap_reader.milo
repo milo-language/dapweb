@@ -13,7 +13,7 @@ from "./jsonaccess" import {
     bodyI64, bodyStr, frame0Field, frame0Path, scopes0Ref
 }
 from "./peers" import {
-    logEvent, wsPush, pushHelloState, configErrMsg, terminatedMsg
+    logEvent, wsPush, pushHelloState, configErrMsg, cmdErrorMsg, terminatedMsg
 }
 from "./persist" import {
     applyConfig, loadBps, appendHistory
@@ -302,7 +302,19 @@ pub fn sendReqFd(fd: i32, seq: i64, command: &string, argsJson: &string): void {
     let _w = writeFrameFd(fd, payload)
 }
 
-// setBreakpoints args for one file (breakpoints are per-source in DAP).
+// DAP keys breakpoints on (source, line), so a second entry at a line the user
+// already holds would be a duplicate the adapter may reject.
+fn bpEnabledAt(bps: &Vec<Bp>, path: &string, line: i64): bool {
+    for bp in bps {
+        if bp.path == path && bp.line == line && bp.enabled {
+            return true
+        }
+    }
+    return false
+}
+
+// setBreakpoints args for one file (breakpoints are per-source in DAP), plus
+// the in-flight runToCursor line when it is in this file.
 pub fn buildBpArgsForPath(bps: &Vec<Bp>, path: &string): string {
     var arr = Json.arr()
     for bp in bps {
@@ -318,6 +330,11 @@ pub fn buildBpArgsForPath(bps: &Vec<Bp>, path: &string): string {
                 o = o.str("logMessage", bp.logMessage)
             }
             arr = arr.obj(o)
+        }
+    }
+    if let Option.Some(t) = gSession.proc.runTo {
+        if t.path == path && !bpEnabledAt(bps, path, t.line) {
+            arr = arr.obj(Json.obj().int("line", t.line))
         }
     }
     return Json.obj()
@@ -611,6 +628,8 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     wsPush(ch, Json.obj().str("type", "threadStack").int("id", pid).raw("tid", t).raw("frames", "[]").build())
                 } else if kind == "readmem" {
                     wsPush(ch, Json.obj().str("type", "memory").int("id", pid).str("address", "").str("data", "").str("error", msg.doc.curStr(msg.doc.curField(msg.doc.curRoot(), "message")) ?? "").build())
+                } else if kind == "gotoT" || kind == "goto" {
+                    wsPush(ch, cmdErrorMsg("setNextStatement", $"{msg.command} failed: {respErrText(msg.doc)}"))
                 } else if kind == "restartR" {
                     // Adapter without restart support (e.g. debugpy): tell the
                     // UI so it falls back to kill+rerun. lldb-dap handles
@@ -647,6 +666,19 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 // Launch ack'd: this config actually ran, so record it (single
                 // writer — clients never save) and tell every peer.
                 wsPush(ch, appendHistory())
+            } else if kind == "gotoT" {
+                // The first target is the line itself; adapters list more only
+                // when one line maps to several code locations.
+                let target = msg.doc.curInt(msg.doc.curPath("body.targets[0].id")) ?? (-1 as i64)
+                if target < 0 {
+                    wsPush(ch, cmdErrorMsg("setNextStatement", "no code at that line to jump to"))
+                } else {
+                    let gs = cl.send("goto", Json.obj().raw("threadId", pextra).int("targetId", target).build())
+                    pend.push(Pending {
+                        seq: gs, kind: "goto", id: 0, extra: ""
+                    }
+                    )
+                }
             } else if kind == "thrPause" {
                 // Pause with no known tid (attach before first stop): pause
                 // the first thread the adapter reports.
@@ -889,6 +921,16 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 if gSession.server.logLevel >= 2 {
                     logEvent("stopped", $"thread {bodyI64(msg.doc, "threadId", -1 as i64)}  reason {bodyStr(msg.doc, "reason")}")
                 }
+                // Any stop ends a runToCursor, wherever it landed: a user
+                // breakpoint hit on the way leaves the temporary line armed
+                // otherwise, and a later continue would stop there unasked.
+                if let Option.Some(t) = replace(gSession.proc.runTo, Option.None) {
+                    let rs = cl.send("setBreakpoints", buildBpArgsForPath(gSession.persisted.bps, t.path))
+                    pend.push(Pending {
+                        seq: rs, kind: "bpLive", id: 0, extra: ""
+                    }
+                    )
+                }
                 tid = bodyI64(msg.doc, "threadId", -1 as i64)
                 stopReason = bodyStr(msg.doc, "reason")
                 stopDesc = bodyStr(msg.doc, "description")
@@ -1004,6 +1046,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
     killAdapterSrv()
     reapDebuggee()
     gSession.proc.child = Option.None
+    gSession.proc.runTo = Option.None
     gSession.proc.started = false
     gSession.proc.dapIn = Option.None
     gSession.proc.pty = Option.None

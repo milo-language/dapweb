@@ -139,6 +139,17 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
 .filetab { padding: 4px 12px; cursor: pointer; color: var(--muted); font-size: 11px;
            white-space: nowrap; }
 .filetab.active { color: var(--fg); border-bottom: 2px solid var(--accent); }
+/* Editor toggles at the right end of the tab strip, chips like the terminal legend's. */
+.edtools { margin-left: auto; display: flex; align-items: center; padding: 0 8px;
+           font-size: 10px; color: var(--muted); }
+.edtools .termchip { font-family: var(--mono); white-space: nowrap; }
+/* Inline values: injected after a source line's end, so they take the editor's
+   own mono font. Muted so they never read as code; a value that changed since
+   the last stop takes --stop, the same cue a changed register gets. */
+/* Scoped under .monaco-editor to outrank the token class (.mtk1) Monaco puts on the same span. */
+.monaco-editor .inline-val { color: var(--muted); font-style: italic; opacity: 0.85; }
+.monaco-editor .inline-val.first { margin-left: 3ch; }
+.monaco-editor .inline-val.changed { color: var(--stop); opacity: 1; }
 .source-wrap { flex: 1; min-height: 0; min-width: 0; display: flex; }
 .source { flex: 1; min-width: 0; }
 .source + .source { border-left: 1px solid var(--border); }

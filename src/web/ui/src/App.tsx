@@ -358,6 +358,9 @@ export default function App() {
         writeOutput(termRef.current, m.category, m.text);
       }
       else if (m.type === "ptyData") termPut(termRef.current, "prog", m.data);
+      // A command the server accepted but could not carry out (a goto the
+      // adapter refused): say why where the user is looking for output.
+      else if (m.type === "cmdError") consoleAppend(`${m.cmd}: ${m.error}\n`, "err");
       else if (m.type === "restartFailed") {
         pendingRestart.current = true;
         send({ cmd: "kill" });
@@ -564,6 +567,15 @@ export default function App() {
     setStatus({ text: "running…", short: "running", cls: "running" });
     send({ cmd, tid: tidRef.current, ...(granularity ? { granularity } : {}) });
   };
+  // The editor's line actions. Stable, so the editor's action set is not rebuilt per render.
+  const runToLine = useCallback((path: string, line: number) => {
+    dispatch({ type: "local/resumed" });
+    setStatus({ text: `running to line ${line}…`, short: "running", cls: "running" });
+    send({ cmd: "runToCursor", path, line, tid: tidRef.current });
+  }, []);
+  const gotoLine = useCallback((path: string, line: number) => {
+    send({ cmd: "setNextStatement", path, line, tid: tidRef.current });
+  }, []);
   // VS Code's debug keys. Read through a ref so the one window listener always
   // sees this render's phase and actions.
   const debugKeyRef = useRef<(e: KeyboardEvent) => boolean>(() => false);
@@ -661,6 +673,7 @@ export default function App() {
                     stopPath={stopPath} stopLine={stopLine} caps={caps} jump={jump}
                     disasm={disasm} inlineAsm={inlineAsm} fetchDisasm={fetchDisasm}
                     onToggleBp={toggleBp} onSetBpMeta={setBpMeta} onHoverEval={evalHover}
+                    stop={S.stop} stopSeq={stopSeq} onRunToLine={runToLine} onGotoLine={gotoLine}
                     emptyHint={!targetSet ? "none"
                       : stopped ? (caps.supportsDisassembleRequest ? "disassembling…" : "no source available for this frame")
                       : attachMode ? "Run attaches and opens the source where the process stops"

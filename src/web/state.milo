@@ -139,6 +139,10 @@ pub struct RunState {
     parentIn: Option<i32>,
     child: Option<ChildLaunch>,
     pendingRun: Option<PendingRun>,
+    // The line a runToCursor is heading for. Kept out of persisted.bps so no
+    // peer ever lists it as a breakpoint; it rides along in every setBreakpoints
+    // for its file until the next stop of any kind takes it out of the adapter.
+    runTo: Option<Bp>,
     runStartMs: i64, // epochMillis at adapter spawn — run duration
     lastExit: Option<i64>, // debuggee exitCode from the "exited" event
 }
@@ -241,7 +245,7 @@ pub var gSession: Session = Session {
         started: false, dapIn: Option.None, pty: Option.None, term: Option.None,
         oddSeq: -1, stdinBuf: "", adapterStderr: "", srvPid: Option.None,
         srvPort: Option.None, debuggeePid: Option.None, parentIn: Option.None,
-        child: Option.None, pendingRun: Option.None, runStartMs: 0, lastExit: Option.None,
+        child: Option.None, pendingRun: Option.None, runTo: Option.None, runStartMs: 0, lastExit: Option.None,
     },
     stop: StopState {
         caps: Option.None, stop: Option.None, threads: Option.None, regions: Option.None,
