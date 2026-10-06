@@ -89,6 +89,7 @@ serve_suite e2e-security   $((base + 70))
 self_suite  configform
 self_suite  tablabels
 self_suite  primary
+self_suite  threadlabel
 self_suite  hermetic
 self_suite  api
 self_suite  e2e-agent

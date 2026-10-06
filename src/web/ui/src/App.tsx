@@ -6,6 +6,7 @@ import SourceView, { langFor, BpMeta, BpPopover, HoverVar } from "./SourceView";
 import ConfigDrawer, { DebugConfig, stripJsonc } from "./ConfigDrawer";
 import { tabLabels } from "./tabLabels";
 import { primaryAction, exitLabel, Phase } from "./primary";
+import { threadLabel } from "./threadLabel";
 
 type Frame = { id: number; name: string; line: number; path: string; ipRef: string };
 type Thread = { id: number; name: string };
@@ -1416,10 +1417,11 @@ export default function App() {
             <Panel title="Threads">
               {threads.map((t) => {
                 const loc = tlocs.get(t.id);
+                const tl = threadLabel(t.name, t.id);
                 return (
                   <div key={t.id} className={"frame" + (t.id === curTid ? " top" : "")}
-                       title={`thread id ${t.id}`} onClick={() => selectThread(t)}>
-                    <span className="tname">{t.name || `thread ${t.id}`}</span>
+                       title={tl.tip} onClick={() => selectThread(t)}>
+                    <span className="tname">{tl.label}</span>
                     {loc && <span className="tloc">
                       {loc.label}
                       {loc.pc && memLinks && (
