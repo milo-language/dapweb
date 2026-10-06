@@ -88,7 +88,7 @@ var gDb: Vec<Database> = []
 var gIns: Vec<Statement> = []
 var gFailed: bool = false // an open that failed is never retried
 var gOff: bool = false    // --no-journal / DAPWEB_NO_JOURNAL
-var gSession: string = "" // current session id, stamped on every row
+var gJournalSession: string = "" // current session id, stamped on every row
 var gSinceCheck: i64 = 0
 var gSinceBytes: i64 = 0
 
@@ -234,7 +234,7 @@ pub fn journalSession(id: &string, pid: i64, port: i64, program: &string, adapte
     if !journalOpen() {
         return
     }
-    gSession = id.clone()
+    gJournalSession = id.clone()
     match dbQuery(gDb[0], "INSERT OR IGNORE INTO sessions(id, started_ms, pid, port, program, adapter, cwd) VALUES(?,?,?,?,?,?,?)") {
         Result.Ok(s) => {
             let _1 = dbBindText(s, 1, id.clone())
@@ -270,13 +270,13 @@ pub fn journalSession(id: &string, pid: i64, port: i64, program: &string, adapte
 }
 
 pub fn journalEnd(): void {
-    if gDb.len == 0 || gSession.len == 0 {
+    if gDb.len == 0 || gJournalSession.len == 0 {
         return
     }
     match dbQuery(gDb[0], "UPDATE sessions SET ended_ms=? WHERE id=?") {
         Result.Ok(u) => {
             let _1 = dbBindInt64(u, 1, epochMillis())
-            let _2 = dbBindText(u, 2, gSession.clone())
+            let _2 = dbBindText(u, 2, gJournalSession.clone())
             let _st = dbStep(u)
             dbFinalize(u)
         }
@@ -366,7 +366,7 @@ fn jrnInsert(dir: string, kind: string, peer: string, who: string, okI: i64, err
         text = text.substr(0, PAYLOAD_MAX)
     }
     dbReset(gIns[0])
-    let _1 = dbBindText(gIns[0], 1, gSession.clone())
+    let _1 = dbBindText(gIns[0], 1, gJournalSession.clone())
     let _2 = dbBindInt64(gIns[0], 2, epochMillis())
     let _3 = dbBindText(gIns[0], 3, dir)
     let _4 = dbBindText(gIns[0], 4, kind)

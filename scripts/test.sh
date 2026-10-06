@@ -94,7 +94,27 @@ no_unsafe() {
     fi
 }
 
+# Milo has one flat namespace: two modules defining the same top-level name do not
+# conflict, one silently wins (a fn body via linkonce_odr, a global by merging). The
+# compiler does not report it, so this does.
+no_dup_names() {
+    case "no-dup-names" in *"$filter"*) ;; *) return 0 ;; esac
+    echo ""
+    echo "── no-dup-names"
+    dups=$(grep -hoE '^(pub )?(var|let|fn|struct|enum) [A-Za-z_][A-Za-z0-9_]*' $(find src -name '*.milo') \
+        | awk '{print $NF}' | sort | uniq -d)
+    if [ -n "$dups" ]; then
+        for d in $dups; do grep -nE "^(pub )?(var|let|fn|struct|enum) $d\b" -r --include='*.milo' src | sed 's/^/  /'; done
+        echo "  FAIL no-dup-names: $(echo "$dups" | wc -l | tr -d ' ') top-level name(s) defined in more than one module"
+        fail=$((fail + 1)); failed="$failed no-dup-names"
+    else
+        echo "  ok every top-level name under src/ is defined once"
+        pass=$((pass + 1))
+    fi
+}
+
 no_unsafe
+no_dup_names
 serve_suite e2e            $((base +  0)) --program /tmp/dapweb_inter --source /tmp/dapweb_inter.c
 serve_suite e2e-m8         $((base + 10)) --program /tmp/dapweb_inter --source /tmp/dapweb_inter.c
 serve_suite e2e-multifile  $((base + 20)) --program /tmp/dapweb_nested --source examples/nested/main.c
