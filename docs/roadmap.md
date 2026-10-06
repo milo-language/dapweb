@@ -91,6 +91,35 @@ Independent, small, one commit each. Order: U3, U1, U2, U7, U4, U6, U5, U10, U9,
 
 ## Phase 2: server state + split (S2, S3, S4)
 
+Design (2026-10-05), two serial agents:
+
+2a. State:
+- `Session` struct in `src/web/state.milo` owns every `g*` global, grouped: target
+  config, process (adapter, debuggee pid, `Option<Pty>`), current stop (caps, stop,
+  threads, regions), peers, persisted (bps, history). Sentinels (-1, "") become `Option`.
+  One `var gSession: Session` for now (single scheduler thread); `&mut Session` params
+  where a function's reach is local.
+- `Session.snapshot(): Vec<Shared>`: the ordered late-join replay (hello, source, caps,
+  bp syncs, stop, threads, regions, output log). handleDebugWs and `/api/state` both use
+  it; the four cached `g*Msg` strings go away.
+- Broadcast fanout via `std/seal`: seal + share each message once, clone the `Shared`
+  (refcount) per peer instead of the string. Needs a WsConn send that takes bytes from a
+  `&Sealed` (add to std if missing).
+- New test: a tab joining mid-stop receives exactly the state a tab that watched live
+  holds (stop, threads, regions, caps, bps, output).
+
+2b. Shape:
+- Parse each DAP frame once (`Json` tree); `bodyStr`/`bodyI64`/`framesJson`/`localsJson`
+  take `&JsonNode`.
+- HTTP: seal the raw request; `Request { method, path, query: Span, headers: Vec<(Span,
+  Span)> }`; one query parser (the two copy-pasted loops go).
+- Dispatch: one fn per command. `tests/e2e-commands.ts` parses the dispatcher's
+  `c == "x"` chain from source; update it to read the new shape, keeping the
+  both-directions table check.
+- Delete pre-builder JSON helpers (`jStr`, `dStr`, `jObjRaw`, `var Q`).
+- Split `server.milo`: `http.milo`, `peers.milo` (sinks, writer, broadcast),
+  `dap_reader.milo`, `dispatch.milo`, `persist.milo` (history, bps), `state.milo`.
+
 1. `Session` struct owns all session globals; `snapshot(): Json` replaces the cached
    replay strings. Hello for a new tab, `api state`, and the journal all read the same snapshot.
 2. Parse each DAP frame once; extractors take `&Json`.
