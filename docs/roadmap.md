@@ -97,11 +97,14 @@ suite that fails if any item is dropped, sealed+shared broadcast fanout (milo
 buffer, one handler per command, 17 JSON helpers deleted, server.milo 3667 → 671 lines
 split into http, peers, persist, dap_reader, dispatch.
 
-Milo compiler issues found (open):
-- `match` arms do not receive the expected type (the `if` case is fixed, 39a46ee7).
-- Same-scope `let x` then `var x: T` gives a type error, not a redeclaration error.
-- False "use of moved variable" after a `let ... else { ...; return }` whose else diverges.
-- Raw extern calls (`close`, `kill`) compile without `unsafe`.
+Milo compiler issues found:
+- Fixed: `if`/`match` expressions bound to `Option<T>` could not infer `Option.None` in a
+  branch (39a46ee7, 71bc6293); false "use of moved variable" after a diverging let-else
+  (281d0774); green IO on a closed fd exited the process (771dd722).
+- Not a bug: same-named private fns/globals in two modules are per-module now, clashing
+  `pub fn`s are an error. Same-scope redeclaration is reported; the follow-on type errors
+  are cascades from uses resolving to the first binding (could bind the new one instead).
+- Open, your call: raw extern calls (`close`, `kill`) compile without `unsafe`.
 
 Design (2026-10-05), two serial agents:
 
