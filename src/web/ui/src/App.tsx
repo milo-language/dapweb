@@ -1046,6 +1046,36 @@ export default function App() {
     setStopLine(0);
     send({ cmd, tid: tidRef.current, ...(granularity ? { granularity } : {}) });
   };
+  // VS Code's debug keys. Read through a ref so the one window listener always
+  // sees this render's phase and actions.
+  const debugKeyRef = useRef<(e: KeyboardEvent) => boolean>(() => false);
+  debugKeyRef.current = (e) => {
+    const live = phase === "running" || phase === "stopped";
+    const k = (e.shiftKey ? "S-" : "") + (e.ctrlKey || e.metaKey ? "C-" : "") + e.key;
+    switch (k) {
+      case "F5": if (phase === "stopped") resume("continue"); else if (!live) run(); else return false; return true;
+      case "S-F5": if (live) send({ cmd: "kill" }); return live;
+      case "S-C-F5": restart(); return live;
+      case "F6": if (phase === "running") send({ cmd: "pause", tid: tidRef.current }); return phase === "running";
+      case "F10": if (phase === "stopped") resume("stepOver"); return phase === "stopped";
+      case "F11": if (phase === "stopped") resume("stepIn"); return phase === "stopped";
+      case "S-F11": if (phase === "stopped") resume("stepOut"); return phase === "stopped";
+    }
+    return false;
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      // A text field or the terminal owns its keys (a program reading stdin may
+      // want F5). The source view is a read-only monaco whose hidden textarea
+      // holds focus after any click in it, so it is exempt, as in VS Code.
+      if (t && (t.isContentEditable || t.tagName === "INPUT" || t.tagName === "SELECT" ||
+                (t.tagName === "TEXTAREA" && !t.closest(".source-wrap")))) return;
+      if (debugKeyRef.current(e)) e.preventDefault();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const stopped = phase === "stopped";
   const asm = useMemo(() => (disasm ? buildAsm(disasm) : null), [disasm]);
@@ -1161,30 +1191,30 @@ export default function App() {
         </span>
         <span className="toolbar">
           <button className={phase === "idle" ? "run" : "run live"}
-                  data-tip={phase === "idle" ? "Run — start the program"
-                                            : "Run — relaunch with whatever the target bar says now"} onClick={run}><Ico g={CI.run} /></button>
-          <button disabled={!stopped} data-tip={stopped ? "Continue" : "Continue (needs a stopped program)"}
+                  data-tip={phase === "idle" ? "Run: start the program (F5)"
+                                            : "Run: relaunch with whatever the target bar says now"} onClick={run}><Ico g={CI.run} /></button>
+          <button disabled={!stopped} data-tip={stopped ? "Continue (F5)" : "Continue (F5, needs a stopped program)"}
                   onClick={() => resume("continue")}><Ico g={CI.cont} /></button>
-          <button disabled={phase !== "running"} data-tip="Pause"
+          <button disabled={phase !== "running"} data-tip="Pause (F6)"
                   onClick={() => send({ cmd: "pause", tid: tidRef.current })}><Ico g={CI.pause} /></button>
         </span>
         <span className="toolbar">
-          <button disabled={!stopped} data-tip="Step over" onClick={() => resume("stepOver")}><Ico g={CI.stepOver} /></button>
-          <button disabled={!stopped} data-tip="Step in" onClick={() => resume("stepIn")}><Ico g={CI.stepInto} /></button>
-          <button disabled={!stopped} data-tip="Step out" onClick={() => resume("stepOut")}><Ico g={CI.stepOut} /></button>
-          {asm && <button disabled={!canInstrStep} data-tip="Step one instruction (over calls)"
+          <button disabled={!stopped} data-tip="Step over (F10)" onClick={() => resume("stepOver")}><Ico g={CI.stepOver} /></button>
+          <button disabled={!stopped} data-tip="Step into (F11)" onClick={() => resume("stepIn")}><Ico g={CI.stepInto} /></button>
+          <button disabled={!stopped} data-tip="Step out (Shift+F11)" onClick={() => resume("stepOut")}><Ico g={CI.stepOut} /></button>
+          {asm && <button disabled={!canInstrStep} data-tip="Step one instruction, over calls"
                           onClick={() => resume("stepOver", "instruction")}><Ico g={CI.stepOver} sub="i" /></button>}
-          {asm && <button disabled={!canInstrStep} data-tip="Step one instruction (into calls)"
+          {asm && <button disabled={!canInstrStep} data-tip="Step one instruction, into calls"
                           onClick={() => resume("stepIn", "instruction")}><Ico g={CI.stepInto} sub="i" /></button>}
         </span>
         <span className="toolbar">
           <button disabled={phase !== "running" && phase !== "stopped"}
-                  data-tip="Restart — same target, from the top (breakpoints persist)" onClick={restart}><Ico g={CI.restart} /></button>
+                  data-tip="Restart: same target, from the top, breakpoints persist (Ctrl+Shift+F5)" onClick={restart}><Ico g={CI.restart} /></button>
           <button disabled={phase !== "running" && phase !== "stopped"}
-                  data-tip="Stop — terminate the program" onClick={() => send({ cmd: "kill" })}><Ico g={CI.stop} /></button>
+                  data-tip="Stop: terminate the program (Shift+F5)" onClick={() => send({ cmd: "kill" })}><Ico g={CI.stop} /></button>
           <button disabled={!stopped || !caps.supportsDisassembleRequest}
                   className={asm && !inlineAsm ? "asm-on" : ""}
-                  data-tip={stopped ? "Toggle disassembly pane"
+                  data-tip={stopped ? "Disassembly: show machine code beside the source"
                                  : "Disassembly (available while stopped, adapter must support it)"}
                   onClick={() => {
                     if (disasm) { setDisasm(null); setInlineAsm(false); }
@@ -1196,7 +1226,7 @@ export default function App() {
                   }}><Ico g={CI.chip} /></button>
           <button disabled={!stopped || !caps.supportsDisassembleRequest}
                   className={inlineAsm ? "asm-on" : ""}
-                  data-tip="Show generated asm inline, under each source line"
+                  data-tip="Inline disassembly: show each source line's machine code under it"
                   onClick={() => {
                     if (inlineAsm) { setInlineAsm(false); setDisasm(null); }
                     else {
