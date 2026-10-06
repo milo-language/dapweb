@@ -224,8 +224,8 @@ scripts/test.sh         # every suite against that build, each on its own server
 scripts/test.sh agent   # one suite (substring match)
 ```
 
-The README images are generated, not hand-cropped: `docs/shots/` holds the raw
-screenshots, `docs/*.json` the crops and callouts drawn over them, and
+The README images are generated, not hand-cropped: `docs/shots/` (gitignored, take
+them locally) holds the raw screenshots, `docs/*.json` the crops and callouts drawn over them, and
 `scripts/annotate-shots.py` does the drawing (it reads the palette out of
 `styles.css`, so the pictures cannot drift from the UI). The card at the top is
 `src/web/ui/og-card.html`, screenshotted headless; the command is in its
