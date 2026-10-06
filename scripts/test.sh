@@ -157,6 +157,7 @@ self_suite  configform
 self_suite  tablabels
 self_suite  inlinevalues
 self_suite  primary
+self_suite  targetinfo
 self_suite  threadlabel
 self_suite  session-reducer
 self_suite  follow

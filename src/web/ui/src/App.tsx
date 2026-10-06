@@ -680,7 +680,7 @@ export default function App() {
         <a className="logo" href="/sessions" data-tip="All live dapweb sessions">
           <Mark /><span>dapweb</span>
         </a>
-        <TargetBar cfg={cfg} history={cfgHist} adapterCmd={adapterCmd} readCfg={readCfg} writeCfg={writeCfg}
+        <TargetBar cfg={cfg} history={cfgHist} readCfg={readCfg} writeCfg={writeCfg}
                    onEnter={() => runRef.current?.()} />
         <Transport primary={busy ? { ...primary, disabled: true } : primary} phase={busy ? "running" : phase} asm={!!disasm} inlineAsm={inlineAsm}
                    canInstrStep={canInstrStep} canDisasm={stopped && !!caps.supportsDisassembleRequest}

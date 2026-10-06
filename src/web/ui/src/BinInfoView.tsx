@@ -13,6 +13,9 @@ export function BinInfoView({ info }: { info: any | null }) {
     if (info.fileType) rows.push(["type", info.fileType]);
     if (typeof info.size === "number") rows.push(["size", info.size.toLocaleString() + " bytes"]);
     rows.push(["symbols", info.stripped ? "stripped" : "present"]);
+    // Where the level came from matters as much as the level: "optimized" from
+    // a per-function flag is not the same certainty as a recorded -O2.
+    if (info.opt) rows.push(["optimization", info.opt + (info.optSource ? `  (${info.optSource})` : "")]);
     if (info.dsym) rows.push(["dSYM", info.dsym]);
   }
   return (
