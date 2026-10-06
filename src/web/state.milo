@@ -185,6 +185,7 @@ pub struct StopInfo {
     tid: i64,
     reason: string, // DAP stopped.reason
     description: string, // optional human text the adapter attached
+    atMain: bool, // the stop-at-main breakpoint, not one the user set
     scopeRef: string, // raw JSON number: setVariable's parent ref for top-level locals
     registersRef: i64, // register scope ref (0 = adapter has none)
     frames: string,
@@ -360,6 +361,7 @@ pub fn stoppedMsg(st: &StopInfo): string {
     return Json.obj().str("type", "stopped")
         .int("line", st.line).str("path", st.path).int("tid", st.tid)
         .str("reason", st.reason).str("description", st.description)
+        .bool("atMain", st.atMain)
         .raw("scopeRef", st.scopeRef)
         .int("registersRef", st.registersRef)
         .raw("frames", st.frames)

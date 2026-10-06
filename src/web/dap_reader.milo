@@ -511,6 +511,11 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
     var stopLine: i64 = 0
     var stopReason: string = "" // DAP stopped.reason of the current stop
     var stopDesc: string = "" // optional human text the adapter attached
+    // The stop-at-main function breakpoint's adapter id. DAP reports that stop as a
+    // plain reason "breakpoint", so the only way to tell it from a user's is to
+    // match the stop's hitBreakpointIds against the id setFunctionBreakpoints gave.
+    var mainBpId: i64 = -1 as i64
+    var stopAtMainHit = false
     var frame0: i64 = 0
     var regRef: i64 = 0 // register scope ref for the current stop (0 = adapter has none)
     var lastSrc: string = gSession.target.spec.srcPath.clone() // browser already has the main source
@@ -658,6 +663,8 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     }
                     )
                 }
+            } else if kind == "fbInit" {
+                mainBpId = msg.doc.curInt(msg.doc.curPath("body.breakpoints[0].id")) ?? (-1 as i64)
             } else if kind == "ebInit" {
                 let cd: string = "{}"
                 let s = cl.send("configurationDone", cd)
@@ -709,7 +716,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 }
                 let info = StopInfo {
                     line: stopLine, path: lastSrc.clone(), tid: tid,
-                    reason: stopReason.clone(), description: stopDesc.clone(),
+                    reason: stopReason.clone(), description: stopDesc.clone(), atMain: stopAtMainHit,
                     scopeRef: scopeRef, registersRef: regRef,
                     frames: framesJs.clone(), locals: localsJson(msg.doc),
                 }
@@ -885,6 +892,17 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 tid = bodyI64(msg.doc, "threadId", -1 as i64)
                 stopReason = bodyStr(msg.doc, "reason")
                 stopDesc = bodyStr(msg.doc, "description")
+                stopAtMainHit = false
+                if mainBpId >= 0 {
+                    let hits = msg.doc.curPath("body.hitBreakpointIds")
+                    var hi: i64 = 0
+                    while hi < msg.doc.curLen(hits) {
+                        if (msg.doc.curInt(msg.doc.curChild(hits, hi)) ?? (-1 as i64)) == mainBpId {
+                            stopAtMainHit = true
+                        }
+                        hi = hi + 1
+                    }
+                }
                 let stArgs = Json.obj().int("threadId", tid)
                     .int("startFrame", 0).int("levels", 20).build()
                 let s = cl.send("stackTrace", stArgs)
