@@ -104,7 +104,8 @@ from "../dap/client" import {
     DapClient, DapMsg
 }
 from "./state" import {
-    gSession, Bp, OutLine, cloneBp, ChildLaunch, PendingRun, Sink
+    gSession, Bp, OutLine, cloneBp, ChildLaunch, PendingRun, Sink, StopInfo, ThreadList,
+    helloMsg, sourceMsg, bpSyncMsg, capsMsg, stoppedMsg, threadsMsg, regionsMsg
 }
 from "json-rpc/frame" import {
     writeFrame as writeFrameFd
@@ -117,13 +118,6 @@ from "../dap/session" import {
     mainSymbolFor, histEntryFor, histInsert, histMergeMany, specConfigJson,
 }
 
-// Shared session: ONE debug session per server process, any number of WS
-// peers (browser tabs + `dapweb api` callers) all seeing identical broadcast
-// state. Everything else the session holds is in gSession (./state).
-var gCapsMsg: string = "" // last capabilities push — replayed to late joiners
-var gStopMsg: string = "" // last stopped push while still stopped — replayed
-var gThreadsMsg: string = "" // last threads push while stopped — replayed
-var gRegionsMsg: string = "" // last memory-region push while stopped — replayed (region colors)
 let OUTLOG_MAX: i64 = 400
 
 // Breakpoints are keyed on (path, line) and lldb binds on the FULL path, so the
@@ -560,47 +554,13 @@ fn adapterStderrPump(errFd: i32): void {
 
 // ── Simple outbound messages ──
 
-fn helloMsg(): string {
-    // `config` is THE canonical launch-config object (what the editor shows and
-    // resolveConfig accepts back verbatim); program/adapterCmd ride alongside as
-    // display conveniences (toolbar span, ⓘ adapter line).
-    var b = Json.obj().str("type", "hello")
-        .str("program", gSession.target.spec.binPath)
-        .str("sourcePath", gSession.target.spec.srcPath)
-        .str("adapterCmd", gSession.target.spec.adapterCmd)
-        .str("adapterId", adapterId())
-        .str("sessionId", gSession.server.sessionId)
-        .raw("config", specConfigJson(gSession.target.spec, true, 0 as i64))
-    // late joiners need to know a session is live (kill-confirm on Run etc.);
-    // a replayed stopped snapshot then refines running → stopped.
-    if gSession.proc.started {
-        b = b.str("phase", "running")
-    }
-    b = b.raw("history", gSession.persisted.history)
-    if gSession.server.restored {
-        b = b.bool("restored", true)
-    }
-    return b.build()
-}
-
-// full bp state for a late-joining peer (acks are optimistic client-side).
-fn bpSyncMsg(b: &Bp): string {
-    return Json.obj().str("type", "bpSync")
-        .str("path", b.path).int("line", b.line)
-        .str("condition", b.condition)
-        .str("hitCondition", b.hitCondition)
-        .str("logMessage", b.logMessage)
-        .bool("enabled", b.enabled)
-        .build()
-}
-
 // A hello is a full resync — the browser drops its whole breakpoint map on
 // receipt — so every hello has to be followed by the set it replaced. Only the
 // connect path did that, which is why changing the target (Run with a config,
 // setConfig, newSession) emptied the BREAKPOINTS panel and the gutter until a
 // reload, while the server still held the bps.
 fn pushHelloState(bus: &Channel<string>): void {
-    wsPush(bus, helloMsg())
+    wsPush(bus, helloMsg(gSession))
     if gSession.target.spec.srcPath.len > 0 {
         wsPush(bus, sourceMsg(gSession.target.spec.srcPath))
     }
@@ -611,26 +571,6 @@ fn pushHelloState(bus: &Channel<string>): void {
 
 fn configErrMsg(err: &string): string {
     return Json.obj().str("type", "configError").str("error", err).build()
-}
-
-fn sourceMsg(path: &string): string {
-    var content: string = ""
-    match readFile(path) {
-        Result.Ok(text) => {
-            content = text
-        }
-        Result.Err(_e) => {
-            // Frames without debug info (libc, dyld) report symbol pseudo-paths
-            // like "/usr/lib/dyld`dyld4::...". Show a friendly placeholder
-            // until the disassembly view exists.
-            content = "// no source available for this frame:\n//   " + path.clone()
-            + "\n// (no debug info — try `disassemble --frame` in the Debug Console)"
-        }
-    }
-    return Json.obj().str("type", "source")
-        .str("path", path)
-        .str("content", content)
-        .build()
 }
 
 // exitCode rides along only when the adapter reported one (-1 = unknown: killed,
@@ -1291,10 +1231,8 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 }
             } else if kind == "initialize" {
                 initOk = true
-                // Forward the adapter's capabilities verbatim; the UI digs out
-                // .body and gates features on it.
-                gCapsMsg = Json.obj().str("type", "capabilities").str("raw", msg.raw).build()
-                wsPush(ch, gCapsMsg.clone())
+                gSession.stop.caps = Option.Some(msg.raw.clone())
+                wsPush(ch, capsMsg(msg.raw))
                 // a js-debug child session launches with the configuration the
                 // startDebugging request handed us, not our built launch args;
                 // "childLaunch" so its ack doesn't re-append history.
@@ -1381,20 +1319,20 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 if pextra.len > 0 {
                     scopeRef = pextra.clone()
                 }
-                gStopMsg = Json.obj().str("type", "stopped")
-                    .int("line", stopLine).str("path", lastSrc).int("tid", tid)
-                    .str("reason", stopReason).str("description", stopDesc)
-                    .raw("scopeRef", scopeRef)
-                    .int("registersRef", regRef)
-                    .raw("frames", framesJs)
-                    .raw("locals", localsJson(msg.raw)).build()
-                wsPush(ch, gStopMsg.clone())
+                let info = StopInfo {
+                    line: stopLine, path: lastSrc.clone(), tid: tid,
+                    reason: stopReason.clone(), description: stopDesc.clone(),
+                    scopeRef: scopeRef, registersRef: regRef,
+                    frames: framesJs.clone(), locals: localsJson(msg.raw),
+                }
+                wsPush(ch, stoppedMsg(info))
+                gSession.stop.stop = Option.Some(info)
             } else if kind == "regions" {
-                // Cached + replayed like gStopMsg so a tab that reloads mid-stop
+                // Kept + replayed like the stop so a tab that reloads mid-stop
                 // keeps its region colors instead of going grey until the next step.
-                gRegionsMsg = Json.obj().str("type", "regions")
-                    .raw("regions", regionsJson(bodyStr(msg.raw, "result"))).build()
-                wsPush(ch, gRegionsMsg.clone())
+                let regions = regionsJson(bodyStr(msg.raw, "result"))
+                wsPush(ch, regionsMsg(regions))
+                gSession.stop.regions = Option.Some(regions)
             } else if kind == "eval" {
                 wsPush(ch, Json.obj().str("type", "evalResult").int("id", pid).str("value", bodyStr(msg.raw, "result")).int("ref", bodyI64(msg.raw, "variablesReference", 0 as i64)).build())
             } else if kind == "expand" {
@@ -1428,9 +1366,11 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 wsPush(ch, Json.obj().str("type", "memory").int("id", pid).str("address", bodyStr(msg.raw, "address")).str("data", bodyStr(msg.raw, "data")).build())
             } else if kind == "thr" {
                 // threads at this stop; "current" is the stopping thread.
-                gThreadsMsg = Json.obj().str("type", "threads").int("current", tid)
-                    .raw("threads", threadsJson(msg.raw)).build()
-                wsPush(ch, gThreadsMsg.clone())
+                let tl = ThreadList {
+                    current: tid, threads: threadsJson(msg.raw)
+                }
+                wsPush(ch, threadsMsg(tl))
+                gSession.stop.threads = Option.Some(tl)
                 // lldb-dap fills its thread list lazily after a stop — the
                 // immediate response usually carries only the stopping thread.
                 // Re-poll a few times (attempt count rides in the id field);
@@ -1442,7 +1382,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     let pollPend = pendCh.clone()
                     Task.spawn(move(): void => {
                         sleepMs(300)
-                        if gStopMsg.len > 0 {
+                        if gSession.stop.stop.isSome() {
                             if let Option.Some(dfd) = gSession.proc.dapIn {
                                 let seq = gSession.proc.nextSeq()
                                 let _p = pollPend.trySend(Pending {
@@ -1676,10 +1616,8 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
     gSession.proc.pty = Option.None
     gSession.proc.stdinBuf = ""
     gSession.proc.oddSeq = -1 as i64
-    gStopMsg = ""
-    gThreadsMsg = ""
-    gRegionsMsg = ""
-    gCapsMsg = ""
+    gSession.stop.resume()
+    gSession.stop.caps = Option.None
     while true {
         match pendCh.tryRecv() {
             Option.Some(_p) => {
@@ -2125,10 +2063,8 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         }
     } else if c == "continue" || c == "stepOver" || c == "stepIn" || c == "stepOut" || c == "pause" {
         if c != "pause" {
-            gStopMsg = ""
-            gThreadsMsg = ""
-            gRegionsMsg = ""
-        } // resumed: snapshots are stale for late joiners
+            gSession.stop.resume()
+        }
         if let Option.Some(dfd) = gSession.proc.dapIn {
             var dapCmd: string = "continue"
             if c == "stepOver" {
@@ -2165,9 +2101,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             }
         }
     } else if c == "restart" {
-        gStopMsg = ""
-        gThreadsMsg = ""
-        gRegionsMsg = ""
+        gSession.stop.resume()
         // native restart — adapter re-launches with the same launch
         // config; gBps and the stop-at-main function bp persist. UI gates
         // this on supportsRestartRequest (kill+rerun is its fallback). A
@@ -2400,9 +2334,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         }
         gSession.persisted.bps = []
         persistBps()
-        gStopMsg = ""
-        gThreadsMsg = ""
-        gRegionsMsg = ""
+        gSession.stop.resume()
         gSession.output = []
         gSession.server.sessionId = newSessionName(sessionNameSeeds())
         journalHere()
@@ -2563,7 +2495,7 @@ fn apiStateJson(): string {
     if gSession.proc.started {
         phase = "running"
     }
-    if gStopMsg.len > 0 {
+    if gSession.stop.stop.isSome() {
         phase = "stopped"
     }
     var bps = Json.arr()
@@ -2579,11 +2511,13 @@ fn apiStateJson(): string {
         .str("adapter", adapterId())
         .int("peers", gSession.peers.count)
         .arr("breakpoints", bps)
-    if gStopMsg.len > 0 {
-        b = b.raw("stopped", gStopMsg)
+    // The same renderers the snapshot uses, so these match what a tab joining
+    // now would be sent.
+    if let Option.Some(st) = gSession.stop.stop {
+        b = b.raw("stopped", stoppedMsg(st))
     }
-    if gThreadsMsg.len > 0 {
-        b = b.raw("threads", gThreadsMsg)
+    if let Option.Some(t) = gSession.stop.threads {
+        b = b.raw("threads", threadsMsg(t))
     }
     return b.build()
 }
@@ -2718,29 +2652,8 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, pendCh: &C
     gSession.peers.count = gSession.peers.count + 1
     logEvent("peer connected", $"{peerKind}  {peerCountStr()}")
 
-    wsPush(ch, helloMsg())
-    if gSession.target.spec.srcPath.len > 0 {
-        wsPush(ch, sourceMsg(gSession.target.spec.srcPath))
-    }
-    if gCapsMsg.len > 0 {
-        wsPush(ch, gCapsMsg.clone())
-    }
-    for bp in gSession.persisted.bps {
-        wsPush(ch, bpSyncMsg(bp))
-    }
-    if gStopMsg.len > 0 {
-        wsPush(ch, gStopMsg.clone())
-    }
-    if gThreadsMsg.len > 0 {
-        wsPush(ch, gThreadsMsg.clone())
-    }
-    if gRegionsMsg.len > 0 {
-        wsPush(ch, gRegionsMsg.clone())
-    }
-    // replay buffered terminal history. Flagged so a same-session reconnect
-    // (which kept its scrollback) can drop it; a fresh/new-session tab renders it.
-    for outLine in gSession.output {
-        wsPush(ch, Json.obj().str("type", "output").str("text", outLine.text).str("category", outLine.category).bool("replay", true).build())
+    for m in gSession.snapshot() {
+        wsPush(ch, m.clone())
     }
 
     while true {
@@ -3407,10 +3320,6 @@ pub fn webMain(argv: Vec<string>): i32 {
     // gSession's declaration holds the rest of the initial state; these need a
     // runtime value (a non-empty string literal at module scope is NYI).
     gSession.persisted.history = "[]"
-    gCapsMsg = ""
-    gStopMsg = ""
-    gThreadsMsg = ""
-    gRegionsMsg = ""
     gSession.server.sessionId = newSessionName(sessionNameSeeds())
     gSession.peers.lastActivityMs = epochMillis()
     gSession.server.idleTtlSecs = args.getI64("idle-ttl")

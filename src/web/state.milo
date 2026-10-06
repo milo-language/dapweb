@@ -6,7 +6,13 @@
 // atomic is atomic because it contains no yield point, not because of a lock.
 
 from "../dap/session" import {
-    LaunchSpec
+    LaunchSpec, adapterIdForKind, specConfigJson
+}
+from "std/json" import {
+    Json
+}
+from "std/io" import {
+    readFile
 }
 from "std/pty" import {
     Pty
@@ -168,9 +174,47 @@ pub struct Persisted {
     bps: Vec<Bp>, // shared breakpoint set, keyed by program on disk
 }
 
+// One stop as the UI shows it. frames/locals are the JSON arrays framesJson and
+// localsJson build from the adapter's bodies.
+pub struct StopInfo {
+    line: i64,
+    path: string,
+    tid: i64,
+    reason: string, // DAP stopped.reason
+    description: string, // optional human text the adapter attached
+    scopeRef: string, // raw JSON number: setVariable's parent ref for top-level locals
+    registersRef: i64, // register scope ref (0 = adapter has none)
+    frames: string,
+    locals: string,
+}
+
+pub struct ThreadList {
+    current: i64, // the stopping thread
+    threads: string, // JSON array from threadsJson
+}
+
+// What a tab joining now needs to show the adapter and the current stop. The
+// stop fields are Some only while the debuggee is stopped; caps lives for the run.
+pub struct StopState {
+    caps: Option<string>, // the adapter's raw initialize response
+    stop: Option<StopInfo>,
+    threads: Option<ThreadList>,
+    regions: Option<string>, // JSON array from regionsJson (lldb only)
+}
+
+impl StopState {
+    // Resumed: the stop is stale for late joiners. Caps stay; they are the run's.
+    fn resume(self: &mut Self): void {
+        self.stop = Option.None
+        self.threads = Option.None
+        self.regions = Option.None
+    }
+}
+
 pub struct Session {
     target: Target,
     proc: RunState,
+    stop: StopState,
     peers: Peers,
     persisted: Persisted,
     // recent terminal output (debugger console + program stdout/stderr),
@@ -195,6 +239,9 @@ pub var gSession: Session = Session {
         srvPort: Option.None, debuggeePid: Option.None, parentIn: Option.None,
         child: Option.None, pendingRun: Option.None, runStartMs: 0, lastExit: Option.None,
     },
+    stop: StopState {
+        caps: Option.None, stop: Option.None, threads: Option.None, regions: Option.None,
+    },
     peers: Peers {
         sinks: [], count: 0, nextClient: 1, lastActivityMs: 0,
     },
@@ -206,4 +253,121 @@ pub var gSession: Session = Session {
         sessionId: "", listenPort: Option.None, startedAt: 0, noBrowser: false,
         idleTtlSecs: 0, logLevel: 0, webroot: Option.None, restored: false,
     },
+}
+
+// ── Messages rendered from session state ──
+//
+// The live pushes and the late-join snapshot both go through these, so a tab
+// that joins mid-stop is sent the bytes a tab that watched live was sent.
+
+impl Session {
+    // The late-join replay, in the order a tab applies it: hello resets the
+    // client, source and caps before the breakpoints that key on them, then the
+    // stop and what refines it, then the terminal history.
+    fn snapshot(self: &Self): Vec<string> {
+        var out: Vec<string> = []
+        out.push(helloMsg(self))
+        if self.target.spec.srcPath.len > 0 {
+            out.push(sourceMsg(self.target.spec.srcPath))
+        }
+        if let Option.Some(c) = self.stop.caps {
+            out.push(capsMsg(c))
+        }
+        for bp in self.persisted.bps {
+            out.push(bpSyncMsg(bp))
+        }
+        if let Option.Some(st) = self.stop.stop {
+            out.push(stoppedMsg(st))
+        }
+        if let Option.Some(t) = self.stop.threads {
+            out.push(threadsMsg(t))
+        }
+        if let Option.Some(r) = self.stop.regions {
+            out.push(regionsMsg(r))
+        }
+        // Flagged so a same-session reconnect (which kept its scrollback) can
+        // drop it; a fresh/new-session tab renders it.
+        for o in self.output {
+            out.push(Json.obj().str("type", "output").str("text", o.text).str("category", o.category).bool("replay", true).build())
+        }
+        return out
+    }
+}
+
+pub fn helloMsg(s: &Session): string {
+    // `config` is THE canonical launch-config object (what the editor shows and
+    // resolveConfig accepts back verbatim); program/adapterCmd ride alongside as
+    // display conveniences (toolbar span, ⓘ adapter line).
+    var b = Json.obj().str("type", "hello")
+        .str("program", s.target.spec.binPath)
+        .str("sourcePath", s.target.spec.srcPath)
+        .str("adapterCmd", s.target.spec.adapterCmd)
+        .str("adapterId", adapterIdForKind(s.target.spec.adapterKind))
+        .str("sessionId", s.server.sessionId)
+        .raw("config", specConfigJson(s.target.spec, true, 0 as i64))
+    // late joiners need to know a session is live (kill-confirm on Run etc.);
+    // a replayed stopped snapshot then refines running → stopped.
+    if s.proc.started {
+        b = b.str("phase", "running")
+    }
+    b = b.raw("history", s.persisted.history)
+    if s.server.restored {
+        b = b.bool("restored", true)
+    }
+    return b.build()
+}
+
+pub fn sourceMsg(path: &string): string {
+    var content: string = ""
+    match readFile(path) {
+        Result.Ok(text) => {
+            content = text
+        }
+        Result.Err(_e) => {
+            // Frames without debug info (libc, dyld) report symbol pseudo-paths
+            // like "/usr/lib/dyld`dyld4::...". Show a friendly placeholder
+            // until the disassembly view exists.
+            content = "// no source available for this frame:\n//   " + path.clone()
+            + "\n// (no debug info — try `disassemble --frame` in the Debug Console)"
+        }
+    }
+    return Json.obj().str("type", "source")
+        .str("path", path)
+        .str("content", content)
+        .build()
+}
+
+// full bp state for a late-joining peer (acks are optimistic client-side).
+pub fn bpSyncMsg(b: &Bp): string {
+    return Json.obj().str("type", "bpSync")
+        .str("path", b.path).int("line", b.line)
+        .str("condition", b.condition)
+        .str("hitCondition", b.hitCondition)
+        .str("logMessage", b.logMessage)
+        .bool("enabled", b.enabled)
+        .build()
+}
+
+// The adapter's capabilities verbatim; the UI digs out .body and gates features on it.
+pub fn capsMsg(raw: &string): string {
+    return Json.obj().str("type", "capabilities").str("raw", raw).build()
+}
+
+pub fn stoppedMsg(st: &StopInfo): string {
+    return Json.obj().str("type", "stopped")
+        .int("line", st.line).str("path", st.path).int("tid", st.tid)
+        .str("reason", st.reason).str("description", st.description)
+        .raw("scopeRef", st.scopeRef)
+        .int("registersRef", st.registersRef)
+        .raw("frames", st.frames)
+        .raw("locals", st.locals).build()
+}
+
+pub fn threadsMsg(t: &ThreadList): string {
+    return Json.obj().str("type", "threads").int("current", t.current)
+        .raw("threads", t.threads).build()
+}
+
+pub fn regionsMsg(regions: &string): string {
+    return Json.obj().str("type", "regions").raw("regions", regions).build()
 }
