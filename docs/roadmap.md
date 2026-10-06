@@ -80,7 +80,10 @@ Milo upstream items found on the way:
   so it can borrow (`&conn`) instead of laundering an fd through `i32`. Makes the WS
   use-after-close unrepresentable rather than fixed.
 
-## Phase 1: UI quick wins (U1-U10, S8)
+## Phase 1: UI quick wins (U1-U10, S8), done
+
+Shipped in two batches plus a primary call-to-action button (Run / Pause / Continue /
+Run again), exit code in the pill, and empty states that name the next step.
 
 Independent, small, one commit each. Order: U3, U1, U2, U7, U4, U6, U5, U10, U9, U8, S8.
 - Test: existing e2e suites; add assertions for stop reason text (U3) and disambiguated
@@ -109,6 +112,9 @@ Canonical-Milo cleanup folded into this phase:
 ## Phase 3: UI state + split (S6)
 
 - One reducer over the server event stream; its state shape mirrors `snapshot()`.
+  Reset per-stop state on terminate: Registers still shows the last stop after exit.
+  Pill says "paused on breakpoint" for stop-at-main (it is a breakpoint underneath);
+  say "paused at main".
 - Extract `MemView`, `RegistersPanel`, `StackView`, `DebugConsole`, `VarList` into files.
 - Test: all suites green; `App.tsx` lines (2557 → target < 800).
 
