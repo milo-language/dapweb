@@ -1,16 +1,15 @@
 // DAP-specific message glue. The wire framing (Content-Length header + body,
 // identical to LSP) comes from the json-rpc package, which owns that format for
-// both protocols; this file binds it to a Child.
+// both protocols; this file binds it to the adapter's input fd.
 
-from "std/process" import { Child }
 from "json-rpc/frame" import { writeFrame as writeFramedTo }
 
-// Frame and write a JSON payload to the child's stdin. Collapses back to the
+// Frame and write a JSON payload to the adapter's input fd. Collapses back to the
 // i64 contract its callers already check (`< 0` is the failure): ShortWrite is
 // the only thing the package can report on this path, and no caller has a
 // second thing it could do about it.
-pub fn writeFrame(child: &Child, payload: &string): i64 {
-    match writeFramedTo(child.stdinFd, payload) {
+pub fn writeFrame(fd: i32, payload: &string): i64 {
+    match writeFramedTo(fd, payload) {
         Result.Ok(n) => {
             return n
         }

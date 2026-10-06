@@ -34,7 +34,10 @@ from "std/path" import {
     Path
 }
 from "std/process" import {
-    Child
+    Child, processAlive
+}
+from "std/os" import {
+    kill
 }
 from "std/pty" import {
     Pty
@@ -1171,12 +1174,12 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                             }
                             )
                             var parentCl = cl
-                            gSession.proc.parentIn = Option.Some(parentCl.child.stdinFd)
+                            gSession.proc.parentIn = Option.Some(parentCl.child.stdinFd())
                             cl = childCl
                             // parent pendings can never match child seqs — drop
                             // them (the drain task ignores stray responses).
                             pend = []
-                            gSession.proc.dapIn = Option.Some(cl.child.stdinFd)
+                            gSession.proc.dapIn = Option.Some(cl.child.stdinFd())
                             let dch = ch.clone()
                             Task.spawn(move(): void => {
                                 parentDrainLoop(parentCl, dch)
@@ -1290,11 +1293,10 @@ fn parseListenPort(s: &string): i64 {
 
 // Spawn a TCP-only adapter (js-debug's dapDebugServer) with a port argument of
 // 0, read the port the OS picked off its stdout, and leave both output streams
-// pumped. Returns the port to connect to; the server pid lands in proc.srvPid for
+// pumped. Returns the port to connect to; the server lands in proc.srv for
 // teardown (closing our sockets leaves it listening forever).
 fn spawnTcpAdapter(prog: &string, args: &Vec<string>): Result<i64> {
     var child = Child.spawn(prog, args, false)?
-    gSession.proc.srvPid = Option.Some(child.pid as i64)
     let errFd = child.takeStderr()
     if errFd.fd() >= 0 {
         // same pre-handshake crash capture as stdio adapters
@@ -1304,6 +1306,8 @@ fn spawnTcpAdapter(prog: &string, args: &Vec<string>): Result<i64> {
         )
     }
     let outFd = child.takeStdout()
+    // Stored once both pipes are taken: what teardown holds is only the process.
+    gSession.proc.srv = Option.Some(child)
     var chOut = outFd.channel()
     var acc: string = ""
     var port: i64 = 0
@@ -1332,36 +1336,25 @@ fn spawnTcpAdapter(prog: &string, args: &Vec<string>): Result<i64> {
     return Result.Ok(port)
 }
 
-// SIGTERM + reap the spawned TCP adapter server, if any. Synthetic Child: only
-// the pid matters; the stdio fds are owned (and closed) by their pump tasks.
-// signal 0 delivers nothing and only asks "could I signal this pid?", the
-// portable liveness check for a process that is not our child (so not waitable).
-fn pidAlive(c: &mut Child): bool {
-    if let Result.Ok(_) = c.signal(0) {
-        return true
-    }
-    return false
-}
-
+// SIGTERM + reap the spawned TCP adapter server, if any. Its stdio fds are owned
+// (and closed) by their pump tasks. processAlive is the signal-0 probe: it delivers
+// nothing and works on a pid that is not our child (the debuggee below).
 fn killAdapterSrv(): void {
-    if let Option.Some(spid) = gSession.proc.srvPid {
-        var c = Child {
-            pid: spid as i32, stdinFd: -1 as i32, stdoutFd: -1 as i32, stderrFd: -1 as i32
-        }
+    if let Option.Some(c) = gSession.proc.srv {
         // Let it exit on its own first: the disconnect we just sent is what makes
         // it kill the debuggee, and SIGTERMing it mid-teardown skips that.
         // Blocking, not sleepMs: D calls this mid-teardown with proc.started, proc.dapIn
-        // and proc.srvPid still describing the dead session, and a parked D would let
+        // and proc.srv still describing the dead session, and a parked D would let
         // a peer's step or run act on them (proc.dapIn names an fd cl.close() freed).
         var waited: i64 = 0
-        while waited < 1000 && pidAlive(&mut c) {
+        while waited < 1000 && processAlive(c.pid()) {
             sleepBlockingMs(50)
             waited = waited + 50
         }
         let _k = c.signal(15)
         let _w = c.wait()
     }
-    gSession.proc.srvPid = Option.None
+    gSession.proc.srv = Option.None
     gSession.proc.srvPort = Option.None
 }
 
@@ -1370,20 +1363,21 @@ fn killAdapterSrv(): void {
 // under a SERVER we spawned: SIGTERMing that server reparents the program to
 // init and dapweb reports "idle" while it is still running (and still holding
 // the port/file the next run wants). Give it a moment to go on its own, then
-// SIGTERM it. Not a child of ours, so signal, never wait.
+// SIGTERM it. Not a child of ours: no Child handle exists for it, so this is a raw
+// kill by pid (unsafe: the pid may have been reused), and never a wait.
 fn reapDebuggee(): void {
     if let Option.Some(dpid) = gSession.proc.debuggeePid {
-        var c = Child {
-            pid: dpid as i32, stdinFd: -1 as i32, stdoutFd: -1 as i32, stderrFd: -1 as i32
-        }
+        let pid = dpid as i32
         // blocking for the same reason as killAdapterSrv
         var waited: i64 = 0
-        while waited < 500 && pidAlive(&mut c) {
+        while waited < 500 && processAlive(pid) {
             sleepBlockingMs(50)
             waited = waited + 50
         }
-        if pidAlive(&mut c) {
-            let _k = c.signal(15)
+        if processAlive(pid) {
+            unsafe {
+                let _k = kill(pid, 15)
+            }
             logEvent("debuggee reaped", $"pid {dpid} outlived the adapter (SIGTERM)")
         }
     }
@@ -1467,19 +1461,20 @@ pub fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
             var cl = client
             gSession.proc.runStartMs = epochMillis()
             gSession.proc.lastExit = Option.None
-            logEvent("run started", $"{gSession.target.spec.binPath}  {label} pid {cl.child.pid}")
-            let dfd = cl.child.stdinFd
+            logEvent("run started", $"{gSession.target.spec.binPath}  {label} pid {cl.child.pid()}")
+            let dfd = cl.child.stdinFd()
             gSession.proc.dapIn = Option.Some(dfd)
             // Drain + capture adapter stderr (stdio spawns only; TCP has no child
-            // stderr, errFd -1). Must start before cl moves into the reader task.
+            // stderr, so None). Must start before cl moves into the reader task.
             // The pump owns the descriptor from here (takeStderr leaves -1 behind,
             // so Child.close() skips it): it is closed exactly once, by its reader.
-            let errFd = cl.child.takeStderr()
-            if errFd.fd() >= 0 {
-                Task.spawn(move(): void => {
-                    adapterStderrPump(errFd)
+            if let Option.Some(errFd) = cl.child.takeStderr() {
+                if errFd.fd() >= 0 {
+                    Task.spawn(move(): void => {
+                        adapterStderrPump(errFd)
+                    }
+                    )
                 }
-                )
             }
             let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {

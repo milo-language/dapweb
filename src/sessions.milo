@@ -331,7 +331,7 @@ pub fn spawnSessionOn(port: i64, extra: &Vec<string>): Result<i64> {
         Result.Ok(child) => {
             // Deliberately not waited on: it outlives whoever started it.
             let c = child
-            return Result.Ok(c.pid as i64)
+            return Result.Ok(c.pid() as i64)
         }
         Result.Err(_e) => {
             return Result.Err("could not start a new dapweb")

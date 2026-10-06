@@ -163,8 +163,8 @@ fn processListJson(): string {
         Result.Ok(child) => {
             var ch = child
             var out: string = ""
-            if ch.stdoutFd >= 0 {
-                for chunk in fdChannel(ch.stdoutFd) {
+            if ch.stdoutFd() >= 0 {
+                for chunk in fdChannel(ch.stdoutFd()) {
                     out = out + chunk
                 }
             }

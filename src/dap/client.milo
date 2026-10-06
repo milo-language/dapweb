@@ -10,6 +10,9 @@
 from "std/process" import {
     Child
 }
+from "std/io" import {
+    OwnedFd
+}
 from "std/net" import {
     TcpStream, resolve
 }
@@ -37,8 +40,73 @@ pub struct DapMsg {
     doc: Json,
 }
 
+// The adapter end of a session: a spawned adapter (a Child we own and reap) or a
+// socket to a TCP adapter, one fd for both directions with no process of ours behind
+// it. std's Child cannot be built around a socket (its fields are private), so the
+// socket is its own field. The method names mirror Child's so call sites read the same.
+pub struct DapConn {
+    child: Option<Child>,
+    // TCP adapters only. The stream owns the socket (closing is dropping it); sockFd is
+    // its fd number, cached so reads need not borrow through the Option. -1 otherwise.
+    sock: Option<TcpStream>,
+    sockFd: i32,
+}
+
+impl DapConn {
+    fn pid(self: &Self): i32 {
+        if let Option.Some(c) = self.child {
+            return c.pid()
+        }
+        return -1
+    }
+
+    fn stdinFd(self: &Self): i32 {
+        if let Option.Some(c) = self.child {
+            return c.stdinFd()
+        }
+        return self.sockFd
+    }
+
+    fn stdoutFd(self: &Self): i32 {
+        if let Option.Some(c) = self.child {
+            return c.stdoutFd()
+        }
+        return self.sockFd
+    }
+
+    // None for a TCP adapter, which has no stderr. Child is Copy, so each &mut
+    // method works on a copy and stores it back.
+    fn takeStderr(self: &mut Self): Option<OwnedFd> {
+        if let Option.Some(c) = self.child {
+            var cc = c
+            let fd = cc.takeStderr()
+            self.child = Option.Some(cc)
+            return Option.Some(fd)
+        }
+        return Option.None
+    }
+
+    // Idempotent, like Child.close.
+    fn close(self: &mut Self): void {
+        if let Option.Some(c) = self.child {
+            var cc = c
+            cc.close()
+            self.child = Option.Some(cc)
+        }
+        self.sock = Option.None
+        self.sockFd = -1
+    }
+
+    fn wait(self: &Self): Result<i32> {
+        if let Option.Some(c) = self.child {
+            return c.wait()
+        }
+        return Result.Err("no spawned adapter to wait for")
+    }
+}
+
 pub struct DapClient {
-    child: Child,
+    child: DapConn,
     seq: i64,
 }
 
@@ -67,7 +135,9 @@ impl DapClient {
     // caller must drain stderrFd (server pumps it) or the child deadlocks on a full
     // pipe; the captured text is surfaced if the adapter dies before the handshake.
     fn startArgs(program: &string, args: Vec<string>): Result<DapClient> {
-        let child = Child.spawn(program, args, false)?
+        let child = DapConn {
+            child: Option.Some(Child.spawn(program, args, false)?), sock: Option.None, sockFd: -1
+        }
         return Result.Ok(DapClient {
             child: child, seq: 0
         }
@@ -77,9 +147,9 @@ impl DapClient {
     // Connect to an already-listening DAP adapter over TCP (e.g. `dlv dap
     // --listen=host:port`, or a js-debug server) — the user runs the server, we
     // just attach. The socket is bidirectional, so it presents as a synthetic
-    // Child whose stdin and stdout are the SAME fd; every downstream path
+    // DapConn whose in and out are the SAME fd; every downstream path
     // (writeFrame, recv, the server's gDapIn) then works with zero changes.
-    // pid -1 marks "no spawned process" — nothing to reap on teardown.
+    // pid -1 marks "no spawned process": nothing to reap on teardown.
     fn startTcp(host: &string, port: i64): Result<DapClient> {
         let Result.Ok(ip) = resolve(host) else {
             return Result.Err("cannot resolve DAP host: " + host.clone())
@@ -87,16 +157,9 @@ impl DapClient {
         let Result.Ok(s) = TcpStream.connect(ip, port as u16) else {
             return Result.Err("cannot connect to DAP adapter at " + host.clone() + ":" + port.toString())
         }
-        var st = s
-        // take() detaches the fd so TcpStream's drop won't close it —
-        // the synthetic Child now owns its lifetime.
-        let fd = st.take()
-        // stdin==stdout==fd: Child.close() closes this fd twice
-        // back-to-back with no scheduler yield between the two syscalls,
-        // so the second is a harmless EBADF (safe only because no yield
-        // can reuse the fd number in between).
-        let child = Child {
-            pid: -1 as i32, stdinFd: fd, stdoutFd: fd, stderrFd: -1 as i32
+        let fd = s.rawFd()
+        let child = DapConn {
+            child: Option.None, sock: Option.Some(s), sockFd: fd
         }
         return Result.Ok(DapClient {
             child: child, seq: 0
@@ -117,7 +180,7 @@ impl DapClient {
         let payload = Json.obj().int("seq", s).str("type", "response")
             .int("request_seq", requestSeq).bool("success", true)
             .str("command", command).raw("body", bodyJson).build()
-        let _w = writeFrame(self.child, payload)
+        let _w = writeFrame(self.child.stdinFd(), payload)
     }
 
     // Frame and send a request. Returns the seq assigned, for response matching.
@@ -125,7 +188,7 @@ impl DapClient {
         let s = self._nextSeq()
         let payload = Json.obj().int("seq", s).str("type", "request")
             .str("command", command).raw("arguments", argsJson).build()
-        let w = writeFrame(self.child, payload)
+        let w = writeFrame(self.child.stdinFd(), payload)
         if w < 0 {
             return -1 as i64
         }
@@ -140,7 +203,7 @@ impl DapClient {
     // WHICH happened; the old hand-rolled framing reported a clean adapter exit
     // and a corrupt header with the same "eof or bad header".
     fn recv(self: &Self): Result<DapMsg> {
-        match readFrame(self.child.stdoutFd) {
+        match readFrame(self.child.stdoutFd()) {
             Result.Ok(raw) => {
                 return _decode(raw)
             }
@@ -173,10 +236,10 @@ impl DapClient {
         let disc: string = "{}"
         let _d = self.send("disconnect", disc)
         self.child.close()
-        // synthetic TCP child (pid -1): nothing to reap — and waitpid(-1) is
+        // TCP adapter (pid -1): nothing to reap — and waitpid(-1) is
         // "wait for ANY child", which blocks the whole scheduler thread when
         // some other child (a spawned js-debug server) is still alive.
-        if self.child.pid > 0 {
+        if self.child.pid() > 0 {
             let _s = self.child.wait()
         }
     }

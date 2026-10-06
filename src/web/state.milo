@@ -20,6 +20,9 @@ from "std/io" import {
 from "std/pty" import {
     Pty
 }
+from "std/process" import {
+    Child
+}
 from "std/term" import {
     TermSize
 }
@@ -156,9 +159,10 @@ pub struct RunState {
     adapterStderr: string,
     // js-debug support: its DAP server only listens on TCP, so the node dialect
     // spawns it (`node dapDebugServer.js 0`), parses the printed port, and connects.
-    // srvPid/srvPort are that spawned server; the pid is SIGTERMed at session
-    // teardown, since closing the sockets leaves it listening.
-    srvPid: Option<i64>,
+    // srv/srvPort are that spawned server; it is SIGTERMed and reaped at session
+    // teardown, since closing the sockets leaves it listening. Its stdio pipes were
+    // taken by their pumps, so only the process is held here.
+    srv: Option<Child>,
     srvPort: Option<i64>,
     // pid of a LAUNCHED debuggee, from the adapter's `process` event (None for attach).
     // Behind a spawned TCP adapter the debuggee is our grandchild: killing the
@@ -304,7 +308,7 @@ pub var gSession: Session = Session {
     },
     proc: RunState {
         started: false, dapIn: Option.None, pty: Option.None, term: Option.None,
-        oddSeq: -1, stdinBuf: "", adapterStderr: "", srvPid: Option.None,
+        oddSeq: -1, stdinBuf: "", adapterStderr: "", srv: Option.None,
         srvPort: Option.None, debuggeePid: Option.None, parentIn: Option.None,
         child: Option.None, pendingRun: Option.None, runTo: Option.None, runStartMs: 0, lastExit: Option.None,
         driver: Attribution { by: "user", who: "browser" },
