@@ -6,6 +6,7 @@ import React, { useEffect, useRef, useState } from "react";
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
 import { language as cppLang, conf as cppConf } from "monaco-editor/esm/vs/basic-languages/cpp/cpp.js";
 import { language as pyLang, conf as pyConf } from "monaco-editor/esm/vs/basic-languages/python/python.js";
+import type { InlineVal } from "./inlineValues";
 
 (self as any).MonacoEnvironment = {
   getWorker: (_id: string, label: string) =>
@@ -326,11 +327,21 @@ function glyphClass(m: BpMeta): string {
   return "bp-glyph";
 }
 
+// The editor's line actions (Run to cursor, Set next statement). Each is
+// offered only when it can run; a null action is hidden from the menu.
+export type LineActions = {
+  runToLine: ((ln: number) => void) | null;
+  gotoLine: ((ln: number) => void) | null;
+};
+
+const IS_MAC = typeof navigator !== "undefined" && /Mac|iP(hone|ad)/.test(navigator.platform);
+
 // Normalize an address string for comparison — lldb pads pc wider than the
 // per-instruction addr strings, so compare as BigInt.
 function normAddr(a: string): string { try { return BigInt(a).toString(16); } catch { return a; } }
 
-export default function SourceView({ text, lang, bps, stopLine, onToggle, onSetMeta, onHoverEval, caps, jump, onLineClick, asmByLine, asmPc }: {
+export default function SourceView({ text, lang, bps, stopLine, onToggle, onSetMeta, onHoverEval, caps, jump, onLineClick, asmByLine, asmPc,
+                                     inlineVals, lineActions }: {
   text: string; lang: string; bps: Map<number, BpMeta>; stopLine: number;
   onToggle: (ln: number) => void; onSetMeta: (ln: number, meta: BpMeta) => void;
   onHoverEval?: (expr: string) => Promise<HoverInfo | null>;
@@ -342,6 +353,9 @@ export default function SourceView({ text, lang, bps, stopLine, onToggle, onSetM
   // instruction at the current pc.
   asmByLine?: Map<number, { addr: string; text: string }[]>;
   asmPc?: string;
+  // Inline values: source line → the locals drawn after its end.
+  inlineVals?: Map<number, InlineVal[]>;
+  lineActions?: LineActions;
 }) {
   // Only the source view that actually evaluates hovers owns the shared holder —
   // the asm/disasm views pass no onHoverEval and must NOT null it (doing so
@@ -354,6 +368,7 @@ export default function SourceView({ text, lang, bps, stopLine, onToggle, onSetM
   const elRef = useRef<HTMLDivElement | null>(null);
   const edRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const decoRef = useRef<monaco.editor.IEditorDecorationsCollection | null>(null);
+  const valDecoRef = useRef<monaco.editor.IEditorDecorationsCollection | null>(null);
   const toggleRef = useRef(onToggle);
   toggleRef.current = onToggle;
   const lineClickRef = useRef(onLineClick);
@@ -362,6 +377,10 @@ export default function SourceView({ text, lang, bps, stopLine, onToggle, onSetM
   const [pop, setPop] = useState<{ line: number; x: number; y: number } | null>(null);
   const popRef = useRef(setPop);
   popRef.current = setPop;
+  const actRef = useRef(lineActions);
+  actRef.current = lineActions;
+  const canRunToRef = useRef<monaco.editor.IContextKey<boolean> | null>(null);
+  const canGotoRef = useRef<monaco.editor.IContextKey<boolean> | null>(null);
 
   useEffect(() => {
     const ed = monaco.editor.create(elRef.current!, {
@@ -378,6 +397,7 @@ export default function SourceView({ text, lang, bps, stopLine, onToggle, onSetM
       folding: false,
       occurrencesHighlight: "off",
       renderLineHighlight: "none",
+      // Only the editor with line actions gets a menu; the asm pane has nothing to put in one.
       contextmenu: false,
       automaticLayout: true,
     });
@@ -401,10 +421,34 @@ export default function SourceView({ text, lang, bps, stopLine, onToggle, onSetM
       e.event.stopPropagation();
       popRef.current({ line: e.target.position.lineNumber, x: e.event.posx, y: e.event.posy });
     });
+    // An action's precondition is also its context-menu `when`, so a false
+    // context key hides the item rather than greying it out.
+    canRunToRef.current = ed.createContextKey("dapweb.canRunTo", false);
+    canGotoRef.current = ed.createContextKey("dapweb.canGoto", false);
+    const lineOf = () => ed.getPosition()?.lineNumber ?? 0;
+    ed.addAction({
+      id: "dapweb.runToCursor", label: "Run to Cursor", precondition: "dapweb.canRunTo",
+      // Ctrl, not Cmd, on a Mac too: VS Code's binding. WinCtrl is the Ctrl key there.
+      keybindings: [(IS_MAC ? monaco.KeyMod.WinCtrl : monaco.KeyMod.CtrlCmd) | monaco.KeyCode.F10],
+      contextMenuGroupId: "0_debug", contextMenuOrder: 1,
+      run: () => { const ln = lineOf(); if (ln > 0) actRef.current?.runToLine?.(ln); },
+    });
+    ed.addAction({
+      id: "dapweb.setNextStatement", label: "Set Next Statement", precondition: "dapweb.canGoto",
+      contextMenuGroupId: "0_debug", contextMenuOrder: 2,
+      run: () => { const ln = lineOf(); if (ln > 0) actRef.current?.gotoLine?.(ln); },
+    });
     edRef.current = ed;
     decoRef.current = ed.createDecorationsCollection();
+    valDecoRef.current = ed.createDecorationsCollection();
     return () => ed.dispose();
   }, []);
+
+  useEffect(() => {
+    edRef.current?.updateOptions({ contextmenu: !!lineActions });
+    canRunToRef.current?.set(!!lineActions?.runToLine);
+    canGotoRef.current?.set(!!lineActions?.gotoLine);
+  }, [lineActions]);
 
   useEffect(() => {
     const ed = edRef.current;
@@ -413,6 +457,29 @@ export default function SourceView({ text, lang, bps, stopLine, onToggle, onSetM
     if (model.getValue() !== text) model.setValue(text);
     monaco.editor.setModelLanguage(model, lang);
   }, [text, lang]);
+
+  // Inline values as after-the-line injected text, one decoration per local so
+  // each carries its own changed style and its own full-value hover.
+  useEffect(() => {
+    const ed = edRef.current, model = ed?.getModel();
+    if (!ed || !model) return;
+    const decos: monaco.editor.IModelDeltaDecoration[] = [];
+    inlineVals?.forEach((vals, ln) => {
+      if (ln > model.getLineCount()) return;
+      const col = model.getLineMaxColumn(ln);
+      vals.forEach((v, i) => decos.push({
+        range: new monaco.Range(ln, col, ln, col),
+        options: {
+          after: { content: (i > 0 ? ", " : "") + v.text,
+                   inlineClassName: "inline-val" + (i === 0 ? " first" : "") + (v.changed ? " changed" : "") },
+          // An empty range at the line end: without this the hover never matches it.
+          showIfCollapsed: true,
+          hoverMessage: { value: "`" + v.name + " = " + v.full.replace(/`/g, "'") + "`" + (v.changed ? "\n\nchanged since the last stop" : "") },
+        },
+      }));
+    });
+    valDecoRef.current?.set(decos);
+  }, [inlineVals, text]);
 
   useEffect(() => {
     if (jump.n > 0 && jump.line > 0) edRef.current?.revealLineInCenter(jump.line);

@@ -1,9 +1,16 @@
 // The editor column: file tabs, the source, and the disassembly beside it, in
 // place of it (a frame with no source), or inline under each line.
-import React, { useEffect, useMemo, useState } from "react";
-import SourceView, { langFor, BpMeta, HoverVar } from "./SourceView";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import SourceView, { langFor, BpMeta, HoverVar, LineActions } from "./SourceView";
 import { tabLabels } from "./tabLabels";
-import { base, hasSrc } from "./session";
+import { base, hasSrc, Stop } from "./session";
+import { inlineValues, nextChanged } from "./inlineValues";
+
+const INLINE_KEY = "dapweb.inlineValues";
+// Storage can throw (blocked site data, some private windows); the toggle then
+// just is not remembered.
+const loadInline = () => { try { return localStorage.getItem(INLINE_KEY) !== "0"; } catch { return true; } };
+const saveInline = (on: boolean) => { try { localStorage.setItem(INLINE_KEY, on ? "1" : "0"); } catch {} };
 
 export type Insn = { addr: string; text: string; sym: string; line: number };
 export type Disasm = { lines: Insn[]; pc: string };
@@ -26,7 +33,8 @@ function buildAsm(d: { lines: Insn[]; pc: string }): { text: string; pcLine: num
 }
 
 export function EditorPane({ tabs, viewPath, openFile, files, bps, stopPath, stopLine, caps, jump, disasm, inlineAsm,
-                             fetchDisasm, onToggleBp, onSetBpMeta, onHoverEval, emptyHint }: {
+                             fetchDisasm, onToggleBp, onSetBpMeta, onHoverEval, emptyHint, stop, stopSeq,
+                             onRunToLine, onGotoLine }: {
   tabs: string[]; viewPath: string; openFile: (path: string, line?: number) => void;
   files: Map<string, string>; bps: Map<string, BpMeta>;
   stopPath: string; stopLine: number; caps: Record<string, any>; jump: { line: number; n: number };
@@ -35,9 +43,36 @@ export function EditorPane({ tabs, viewPath, openFile, files, bps, stopPath, sto
   onHoverEval: (expr: string) => Promise<{ value: string; children?: HoverVar[] } | null>;
   // What an editor with no source says; "none" means nothing is configured at all.
   emptyHint: string;
+  // The current stop (null once the run ends) and its sequence number, for
+  // inline values and their changed-since-last-stop marks.
+  stop: Stop | null; stopSeq: number;
+  onRunToLine: (path: string, line: number) => void;
+  onGotoLine: (path: string, line: number) => void;
 }) {
   const tabLabel = useMemo(() => tabLabels(tabs), [tabs]);
   const srcText = files.get(viewPath) ?? "";
+  const [inlineOn, setInlineOn] = useState(loadInline);
+  // Changed marks advance once per stop, keyed on stopSeq so a re-render (or
+  // StrictMode's double render) does not advance them twice; a run that ends
+  // forgets them, so the next run's first stop marks nothing.
+  const chg = useRef({ seq: -1, prev: new Map<string, string>(), marks: new Set<string>() });
+  if (!stop) chg.current = { seq: -1, prev: new Map(), marks: new Set() };
+  else if (chg.current.seq !== stopSeq) {
+    chg.current = { seq: stopSeq, ...nextChanged(chg.current.prev, chg.current.marks, stop.frames[0]?.name ?? "", stop.locals) };
+  }
+  const marks = chg.current.marks;
+  // The top frame's locals, drawn only in its own file and only while stopped.
+  const topPath = stop ? (stop.frames[0]?.path || stop.path) : "";
+  const topLine = stop ? (stop.frames[0]?.line || stop.line) : 0;
+  const showVals = inlineOn && stopLine > 0 && !!stop && topPath === viewPath;
+  const inlineVals = useMemo(
+    () => (showVals ? inlineValues(srcText.split("\n"), topLine, stop!.locals, langFor(viewPath), marks) : undefined),
+    [showVals, srcText, topLine, stop, viewPath, marks]);
+  const stopped = stopLine > 0 && !!stop;
+  const lineActions: LineActions | undefined = useMemo(() => (hasSrc(viewPath) ? {
+    runToLine: stopped ? (ln: number) => onRunToLine(viewPath, ln) : null,
+    gotoLine: stopped && caps.supportsGotoTargetsRequest ? (ln: number) => onGotoLine(viewPath, ln) : null,
+  } : undefined), [viewPath, stopped, caps, onRunToLine, onGotoLine]);
   const viewBps = useMemo(() => {
     const out = new Map<number, BpMeta>();
     bps.forEach((meta, k) => {
@@ -89,6 +124,11 @@ export function EditorPane({ tabs, viewPath, openFile, files, bps, stopPath, sto
             <div key={p} className={"filetab" + (p === viewPath ? " active" : "")}
                  title={p} onClick={() => openFile(p)}>{tabLabel.get(p) ?? base(p)}</div>
           ))}
+          <span className="edtools">
+            <span className={"termchip" + (inlineOn ? " on" : "")} role="switch" aria-checked={inlineOn}
+                  data-tip="Inline values: show each local's value at the end of the line that last uses it"
+                  onClick={() => { setInlineOn(!inlineOn); saveInline(!inlineOn); }}>x = 1</span>
+          </span>
         </div>
       )}
       <div className="source-wrap">
@@ -128,7 +168,7 @@ export function EditorPane({ tabs, viewPath, openFile, files, bps, stopPath, sto
                           onToggle={onToggleBp} onSetMeta={onSetBpMeta} onHoverEval={onHoverEval}
                           caps={caps} jump={jump}
                           asmByLine={inlineAsm && viewPath === stopPath ? asmByLine : undefined}
-                          asmPc={disasm?.pc} />
+                          asmPc={disasm?.pc} inlineVals={inlineVals} lineActions={lineActions} />
               {asm && !inlineAsm && asmPane}
             </>
           );
