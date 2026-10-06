@@ -89,7 +89,22 @@ Independent, small, one commit each. Order: U3, U1, U2, U7, U4, U6, U5, U10, U9,
 - Test: existing e2e suites; add assertions for stop reason text (U3) and disambiguated
   tab labels (U1). Regenerate README shots at end of phase.
 
-## Phase 2: server state + split (S2, S3, S4)
+## Phase 2: server state + split (S2, S3, S4), done
+
+Shipped: `Session` in state.milo (52 globals → 0), `snapshot()` for late join with a
+suite that fails if any item is dropped, sealed+shared broadcast fanout (milo
+`WsConn.sendShared`), one DAP parse per message (was up to 6), `Request` over a sealed
+buffer, one handler per command, 17 JSON helpers deleted, server.milo 3667 → 671 lines
+split into http, peers, persist, dap_reader, dispatch. New gate: no duplicate top-level
+names across modules (milo's flat namespace merges them silently).
+
+Milo compiler issues found (open):
+- Duplicate top-level names across modules merge silently; should be an error (dapweb
+  gates it in test.sh meanwhile).
+- `match` arms do not receive the expected type (the `if` case is fixed, 39a46ee7).
+- Same-scope `let x` then `var x: T` gives a type error, not a redeclaration error.
+- False "use of moved variable" after a `let ... else { ...; return }` whose else diverges.
+- Raw extern calls (`close`, `kill`) compile without `unsafe`.
 
 Design (2026-10-05), two serial agents:
 
