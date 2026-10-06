@@ -176,7 +176,9 @@ r = await run(copy, ["upgrade"], { DAPWEB_UPDATE_TEST_SELF: OLD });
 ok(r.code === 0 && /updated /.test(r.out), "update (as upgrade) installs the newer release", r);
 const after = await run(copy, ["--version"]);
 ok(after.out === "dapweb bbb2222 (2026-02-01)", "the binary at the same path is now the new one", after);
-const mode = (await Bun.$`stat -f %Lp ${copy} 2>/dev/null || stat -c %a ${copy}`.text()).trim();
+// statSync, not the stat CLI: `stat -f` is a format flag on macOS but means
+// "filesystem status" on Linux, which succeeded there and printed the wrong thing.
+const mode = (require("node:fs").statSync(copy).mode & 0o777).toString(8);
 ok(mode === "755", "and is executable", mode);
 const left = (await Bun.$`ls -A ${inst}`.text()).trim();
 ok(left === "dapweb", "no staging files are left behind", left);
