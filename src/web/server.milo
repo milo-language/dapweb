@@ -37,7 +37,7 @@ from "std/ws" import {
     WsConn, WsMessage, wsAccept, isWsUpgrade
 }
 from "std/runtime" import {
-    Task, Promise, schedulerWaitRead, schedulerWaitWrite, schedulerYield, schedulerRunToCompletion
+    Task, schedulerWaitRead, schedulerWaitWrite, schedulerYield, schedulerRunToCompletion
 }
 from "std/platform" import {
     getErrno, eagain
@@ -206,8 +206,6 @@ var gNoBrowser: bool = false
 var gPeers: i64 = 0 // attached WS peers (browser tabs; `api` callers are one-shot HTTP)
 var gLastActivityMs: i64 = 0 // epochMillis of the last peer event OR api call — idle-ttl clock
 var gIdleTtlSecs: i64 = 0 // --idle-ttl; 0 = never reap
-var gTickWr: i32 = -1 // reaper pipe write end (ticker OS thread → green task)
-var gTickUsecs: i64 = 0
 var webroot: string = "" // UI bundle dir served from disk (--webroot)
 var Q: string = ""
 // lifecycle log. 0 = --quiet (banner only), 1 = normal, 2 = --verbose
@@ -2904,35 +2902,14 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, pendCh: &C
 
 // ── Idle TTL (session GC) ──
 
-// OS-thread ticker: the green scheduler blocks in kevent with no timeout, so
-// time-based wakeups need an external poke. Raw usleep + pipe write only — no
-// runtime calls here (the scheduler pointer is a plain global, not
-// thread-local, so std sleep/yield on a foreign thread would corrupt it).
-fn tickerMain(): i64 {
-    while true {
-        unsafe {
-            let _s = usleep((gTickUsecs & 0xffffffff) as u32)
-            var one: [u8; 1] = [116; 1]
-            let _w = write(gTickWr, one as *u8, 1)
-        }
-    }
-    return 0
-}
-
-// Green task: parks on the tick pipe; a session with no peers for the TTL is
+// Green task: sleepMs parks on a select timer arm, and the scheduler bounds its
+// event-loop wait by the nearest timer deadline, so this ticks with the server
+// otherwise idle and needs no OS thread. A session with no peers for the TTL is
 // ended via the same disconnect(terminateDebuggee) path as the kill command —
 // D's terminated/EOF handling resets session state for a later fresh run.
-fn reaperLoop(tickRd: i32, pendCh: Channel<Pending>): void {
-    var buf: [u8; 8] = [0; 8]
+fn reaperLoop(tickMs: i64, pendCh: Channel<Pending>): void {
     while true {
-        var n: i64 = 0
-        unsafe {
-            schedulerWaitRead(tickRd)
-            n = read(tickRd, buf as *u8, 8)
-        }
-        if n <= 0 {
-            break
-        }
+        sleepMs(tickMs)
         if !gStarted || gPeers > 0 || gDapIn < 0 {
             continue
         }
@@ -3661,27 +3638,13 @@ pub fn webMain(argv: Vec<string>): i32 {
 
     if gIdleTtlSecs > 0 {
         // 1s ticks for short (test) TTLs, 30s otherwise — reap latency ≤ ttl + tick.
-        gTickUsecs = 30000000
+        var tickMs: i64 = 30000
         if gIdleTtlSecs <= 60 {
-            gTickUsecs = 1000000
+            tickMs = 1000
         }
-        var tick: [i32; 2] = [0; 2]
-        unsafe {
-            if pipe(tick as *i32) != 0 {
-                eprint("error: pipe failed\n")
-                return 1
-            }
-        }
-        let tickRd = tick[0]
-        gTickWr = tick[1]
         let reapPend = pendCh.clone()
         Task.spawn(move(): void => {
-            reaperLoop(tickRd, reapPend)
-        }
-        )
-        // real OS thread (see tickerMain): fire-and-forget, never returns
-        let _ticker = Promise<i64>.blocking(move(): i64 => {
-            return tickerMain()
+            reaperLoop(tickMs, reapPend)
         }
         )
     }
