@@ -5,7 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import SourceView, { langFor, BpMeta, BpPopover, HoverVar } from "./SourceView";
 import ConfigDrawer, { DebugConfig, stripJsonc } from "./ConfigDrawer";
 import { tabLabels } from "./tabLabels";
-import { primaryAction } from "./primary";
+import { primaryAction, exitLabel, Phase } from "./primary";
 
 type Frame = { id: number; name: string; line: number; path: string; ipRef: string };
 type Thread = { id: number; name: string };
@@ -309,7 +309,8 @@ export default function App() {
   const [curTid, setCurTid] = useState(-1);               // thread frames/stepping follow
   const [locals, setLocals] = useState<Var[]>([]);
   const [watches, setWatches] = useState<Watch[]>([]);
-  const [phase, setPhase] = useState<"idle" | "running" | "stopped" | "done">("idle");
+  // "done" = a run ended in this session; Run then reads "Run again".
+  const [phase, setPhase] = useState<Phase>("idle");
   // The server's canonical launch-config object (hello.config) — seeds the
   // drawer editor. The editor is the source of truth once the user types; this
   // only re-seeds it on load / history restore (see cfgTextRef for the live text).
@@ -786,7 +787,7 @@ export default function App() {
         send({ cmd: "kill" });
       }
       else if (m.type === "terminated") {
-        setPhase("idle");
+        setPhase("done");
         setStopLine(0);
         setFrames([]);
         setThreads([]);
@@ -801,8 +802,10 @@ export default function App() {
           runRef.current();
           return;
         }
-        setStatus({ text: "the program exited — press Run to start it again", short: "exited", cls: "done" });
-        termPut(termRef.current, "repl", "\r\n\x1b[2m[dapweb] session ended — press ▶ Run to start again\x1b[0m\r\n");
+        const code: number | undefined = typeof m.exitCode === "number" ? m.exitCode : undefined;
+        const ex = exitLabel(code);
+        setStatus({ text: `${ex}: press Run again to start it over`, short: ex, cls: code === 0 ? "done" : "" });
+        termPut(termRef.current, "repl", "\r\n\x1b[2m[dapweb] session ended, press Run again to start over\x1b[0m\r\n");
       }
     };
     };
@@ -1309,7 +1312,7 @@ export default function App() {
                 <div className="menu-sep" />
                 <button className="menu-item" onClick={() => {
                   setShowMenu(false);
-                  if (phase !== "idle" && !confirm("End the current debug session and start a new one?")) return;
+                  if ((phase === "running" || phase === "stopped") && !confirm("End the current debug session and start a new one?")) return;
                   send({ cmd: "newSession" });
                 }}>New session <span className="menu-hint">keeps the target</span></button>
                 <a className="menu-item" href="/sessions" onClick={() => setShowMenu(false)}>

@@ -112,7 +112,8 @@ d.send({ cmd: "continue", tid: s3.tid });
 const s4 = await d.wait(m => m.type === "stopped");
 ok(s4.line === 23, "second main.c:23 hit");
 d.send({ cmd: "continue", tid: s4.tid });
-await d.wait(m => m.type === "terminated");
+const term = await d.wait(m => m.type === "terminated");
+ok(term.exitCode === 0, "terminated carries the exit code", term);
 ok(d.ptyBuf.includes("total=15.588"), `program completed (pty: ${JSON.stringify(d.ptyBuf.slice(-80))})`);
 
 console.log(`\nall ${pass} assertions passed`);

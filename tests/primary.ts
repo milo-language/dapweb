@@ -1,7 +1,7 @@
 // The header's primary button: pure, so tested without a browser.
 // Usage: bun tests/primary.ts
 
-import { primaryAction } from "../src/web/ui/src/primary";
+import { primaryAction, exitLabel } from "../src/web/ui/src/primary";
 
 let pass = 0;
 function ok(cond: any, label: string, detail?: any) {
@@ -27,5 +27,12 @@ function ok(cond: any, label: string, detail?: any) {
   const p = primaryAction({ phase: "stopped", hasTarget: true });
   ok(p.kind === "continue" && p.label === "Continue" && p.tip.includes("F5"), "stopped: Continue (F5)", p);
 }
+
+{
+  const p = primaryAction({ phase: "done", hasTarget: true });
+  ok(p.kind === "run" && p.label === "Run again" && !p.disabled, "after the program exits: Run again", p);
+}
+ok(exitLabel(0) === "exited 0" && exitLabel(1) === "exited 1", "the pill carries the exit code");
+ok(exitLabel(undefined) === "ended", "no code: ended, not a claim of a clean exit");
 
 console.log(`primary: ${pass} assertions passed`);

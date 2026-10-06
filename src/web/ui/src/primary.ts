@@ -15,6 +15,10 @@ export function primaryAction(o: { phase: Phase; hasTarget: boolean; attach?: bo
     tip: o.attach ? "Nothing to attach to: type a pid or process name in the target bar"
                   : "Nothing to run: type a program path in the target bar, or start dapweb with one",
   };
-  return { kind: "run", label: "Run", disabled: false,
+  return { kind: "run", label: o.phase === "done" ? "Run again" : "Run", disabled: false,
            tip: o.attach ? "Run: attach to the process (F5)" : "Run: start the program (F5)" };
 }
+
+// The status pill after a run ends. No exit code means the adapter never sent
+// one (killed, detached), and "exited" alone would claim a clean finish.
+export const exitLabel = (code?: number) => (code === undefined ? "ended" : `exited ${code}`);
