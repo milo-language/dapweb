@@ -94,7 +94,7 @@ from "std/time" import {
     epochMillis
 }
 from "std/time" import {
-    sleepMs
+    sleepMs, sleepBlockingMs
 }
 from "std/datetime" import {
     DateTime
@@ -116,8 +116,6 @@ from "../dap/session" import {
     tcpListenArgs,
     mainSymbolFor, histEntryFor, histInsert, histMergeMany, specConfigJson,
 }
-
-extern fn usleep(usec: u32): i32
 
 // NOTE: module-scope string initializers are NYI in Milo and silently produce
 // "" — every one of these is assigned in main() before any request is served.
@@ -1945,11 +1943,12 @@ fn killAdapterSrv(): void {
         }
         // Let it exit on its own first: the disconnect we just sent is what makes
         // it kill the debuggee, and SIGTERMing it mid-teardown skips that.
+        // Blocking, not sleepMs: D calls this mid-teardown with gStarted, gDapIn
+        // and gSrvPid still describing the dead session, and a parked D would let
+        // a peer's step or run act on them (gDapIn names an fd cl.close() freed).
         var waited: i64 = 0
         while waited < 1000 && pidAlive(&mut c) {
-            unsafe {
-                let _u = usleep(50000 as u32)
-            }
+            sleepBlockingMs(50)
             waited = waited + 50
         }
         let _k = c.signal(15)
@@ -1970,11 +1969,10 @@ fn reapDebuggee(): void {
         var c = Child {
             pid: gDebuggeePid as i32, stdinFd: -1 as i32, stdoutFd: -1 as i32, stderrFd: -1 as i32
         }
+        // blocking for the same reason as killAdapterSrv
         var waited: i64 = 0
         while waited < 500 && pidAlive(&mut c) {
-            unsafe {
-                let _u = usleep(50000 as u32)
-            }
+            sleepBlockingMs(50)
             waited = waited + 50
         }
         if pidAlive(&mut c) {
