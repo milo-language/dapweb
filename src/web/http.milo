@@ -1,0 +1,245 @@
+// HTTP/1.1 for the one-request-per-connection server: read and parse a request
+// head once, and the gate every route sits behind.
+
+from "std/os" import {
+    recvFd
+}
+from "std/seal" import {
+    Sealed, Span, seal
+}
+
+pub struct Header {
+    name: Span,
+    value: Span,
+}
+
+// One request, parsed once from the bytes read off the socket. The bytes are
+// sealed so the query and headers can stay spans into them: a lookup scans
+// without allocating and materialises only the value it returns. method and
+// path are plain strings because every route compares them, and as spans each
+// of those compares would become a buf.eq call.
+pub struct Request {
+    buf: Sealed,
+    method: string,
+    path: string, // without the query string
+    query: Span,
+    headers: Vec<Header>,
+    bodyStart: i64, // first byte after the blank line; buf.len() if none arrived
+}
+
+fn lowerByte(c: u8): u8 {
+    if c >= 'A' && c <= 'Z' {
+        return c + 32
+    }
+    return c
+}
+
+impl Request {
+    // Value of the first header called `name` (lowercase; matched without
+    // regard to case), "" if absent.
+    fn header(self: &Self, name: &string): string {
+        for h in self.headers {
+            if h.name.len as i64 != name.len {
+                continue
+            }
+            var same = true
+            for j in 0..name.len {
+                if lowerByte(self.buf.byteAt(h.name.start + j)) != name[j] {
+                    same = false
+                    break
+                }
+            }
+            if same {
+                return self.buf.text(h.value)
+            }
+        }
+        return ""
+    }
+
+    // Value of the first `key=` pair in the query string, "" if absent. A pair
+    // with no '=' never matches. No percent-decoding: no caller has needed it.
+    fn param(self: &Self, key: &string): string {
+        let end = self.query.start + (self.query.len as i64)
+        var seg = self.query.start
+        for i in self.query.start..(end + 1) {
+            if i < end && self.buf.byteAt(i) != '&' {
+                continue
+            }
+            var eq = seg
+            while eq < i && self.buf.byteAt(eq) != '=' {
+                eq = eq + 1
+            }
+            if eq < i && self.buf.eq(self.buf.spanOf(seg, eq - seg), key) {
+                return self.buf.text(self.buf.spanOf(eq + 1, i - eq - 1))
+            }
+            seg = i + 1
+        }
+        return ""
+    }
+}
+
+// Split the request into line, headers and the start of the body. Only the
+// lines before the blank line are headers; with no blank line (the read cap was
+// hit) everything after the request line is.
+fn parseRequest(raw: string): Request {
+    var i: i64 = 0
+    while i < raw.len && raw[i] != ' ' {
+        i = i + 1
+    }
+    let method = raw.substr(0, i)
+    while i < raw.len && raw[i] == ' ' {
+        i = i + 1
+    }
+    let uriStart = i
+    while i < raw.len && raw[i] != ' ' {
+        i = i + 1
+    }
+    let uriEnd = i
+    var pathEnd = uriEnd
+    var queryStart = uriEnd
+    for q in uriStart..uriEnd {
+        if raw[q] == '?' {
+            pathEnd = q
+            queryStart = q + 1
+            break
+        }
+    }
+    let path = raw.substr(uriStart, pathEnd)
+
+    var headEnd = raw.len
+    var bodyStart = raw.len
+    if let Option.Some(blank) = raw.indexOf("\r\n\r\n") {
+        headEnd = blank
+        bodyStart = blank + 4
+    }
+    // (name start, name end, value start, value end), measured before sealing.
+    var marks: Vec<i64> = []
+    var ls: i64 = 0
+    while ls < headEnd && raw[ls] != '\n' {
+        ls = ls + 1
+    }
+    ls = ls + 1
+    while ls < headEnd {
+        var le = ls
+        while le < headEnd && raw[le] != '\n' {
+            le = le + 1
+        }
+        var colon = ls
+        while colon < le && raw[colon] != ':' {
+            colon = colon + 1
+        }
+        if colon < le {
+            var vs = colon + 1
+            while vs < le && raw[vs] == ' ' {
+                vs = vs + 1
+            }
+            var ve = vs
+            while ve < le && raw[ve] != '\r' {
+                ve = ve + 1
+            }
+            marks.push(ls)
+            marks.push(colon)
+            marks.push(vs)
+            marks.push(ve)
+        }
+        ls = le + 1
+    }
+
+    let buf = seal(raw)
+    var headers: Vec<Header> = []
+    var m: i64 = 0
+    while m < marks.len {
+        headers.push(Header {
+            name: buf.spanOf(marks[m], marks[m + 1] - marks[m]),
+            value: buf.spanOf(marks[m + 2], marks[m + 3] - marks[m + 2]),
+        })
+        m = m + 4
+    }
+    let query = buf.spanOf(queryStart, uriEnd - queryStart)
+    return Request {
+        buf: buf, method: method, path: path, query: query,
+        headers: headers, bodyStart: bodyStart,
+    }
+}
+
+// Read and parse one request head; None if the peer sent nothing.
+pub fn readRequest(fd: i32): Option<Request> {
+    var chunk: [u8; 8192] = [0; 8192]
+    let n = recvFd(fd, chunk, 8192)
+    if n <= 0 {
+        return Option.None
+    }
+    var raw: string = ""
+    for i in 0..n {
+        raw.push(chunk[i])
+    }
+    // Headers can arrive split across TCP segments. Read to the blank line
+    // before judging them: requestAllowed would otherwise refuse a request
+    // whose Host has not arrived yet. Capped so a client cannot grow it forever.
+    while !raw.contains("\r\n\r\n") && raw.len < 65536 {
+        let more = recvFd(fd, chunk, 8192)
+        if more <= 0 {
+            break
+        }
+        for i in 0..more {
+            raw.push(chunk[i])
+        }
+    }
+    return Option.Some(parseRequest(raw))
+}
+
+// The body: whatever arrived with the head, then further reads while it is
+// shorter than Content-Length. An absent or garbage length reads as 0, so the
+// body is what already arrived.
+pub fn readBody(fd: i32, req: &Request): string {
+    var body = req.buf.text(req.buf.spanOf(req.bodyStart, req.buf.len() - req.bodyStart))
+    let want = req.header("content-length").parseInt() ?? (0 as i64)
+    while body.len < want {
+        var more: [u8; 8192] = [0; 8192]
+        let n = recvFd(fd, more, 8192)
+        if n <= 0 {
+            break
+        }
+        for j in 0..n {
+            body.push(more[j])
+        }
+    }
+    return body
+}
+
+// Whether a Host header names this machine's loopback, port ignored. A
+// DNS-rebinding page reaches us under ITS hostname with a matching Origin, so
+// the Origin check alone does not keep it out; this does.
+fn hostIsLoopback(host: &string): bool {
+    var name = host.clone()
+    if name.startsWith("[") {
+        let close = name.indexOf("]") ?? (-1 as i64)
+        if close < 0 {
+            return false
+        }
+        name = name.substr(0, close + 1)
+    } else {
+        let colon = name.indexOf(":") ?? (-1 as i64)
+        if colon >= 0 {
+            name = name.substr(0, colon)
+        }
+    }
+    return name == "localhost" || name == "127.0.0.1" || name == "[::1]"
+}
+
+// The gate in front of every route. `evaluate` reaches the debugger, so a
+// request any web page could make is a shell for that page:
+//   * Host must be loopback (DNS rebinding, see hostIsLoopback).
+//   * Origin, when present, must be this server's own. Browsers send it on
+//     every cross-site POST and WebSocket upgrade, including the `text/plain`
+//     POSTs that skip CORS preflight. Absent means a non-browser client
+//     (`dapweb api`, curl), which the loopback bind already confines to this
+//     machine.
+pub fn requestAllowed(req: &Request): bool {
+    let host = req.header("host")
+    if !hostIsLoopback(host) {
+        return false
+    }
+    let origin = req.header("origin")
+    return origin.len == 0 || origin == "http://" + host
+}
