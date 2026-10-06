@@ -73,7 +73,8 @@ jobs:
         run: MILO=.milo-src/src/main.ts scripts/build.sh
 
       - name: gates
-        run: scripts/test.sh
+        # MILO for the milo-unit suite, which runs `milo test` over src.
+        run: MILO=.milo-src/src/main.ts scripts/test.sh
 
       # Best-effort: a failure before the suites run leaves no logs, and the glob
       # failing to match must not add a second, misleading error to the run.

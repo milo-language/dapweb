@@ -116,7 +116,32 @@ no_unsafe() {
     fi
 }
 
+# Pure milo functions (runtime detection, optimization parsing) tested in
+# milo, through `milo test` on every *_test.milo under src. Needs the compiler,
+# located the way build.sh locates it.
+milo_unit() {
+    case "milo-unit" in *"$filter"*) ;; *) return 0 ;; esac
+    echo ""
+    echo "── milo-unit"
+    m="${MILO:-../milo/src/main.ts}"
+    case "$m" in *.ts) mrun="bun run $m" ;; *) mrun="$m" ;; esac
+    out="/tmp/dapweb_test_out_$$_milo_unit"
+    if $mrun test src >"$out" 2>&1; then rc=0; else rc=$?; fi
+    sed 's/^/  /' "$out"
+    # `milo test` exiting 0 with nothing run would pass silently, so a passing
+    # count is required too, the same rule run_checked applies to bun suites.
+    if [ "$rc" -eq 0 ] && grep -Eq "[1-9][0-9]* pass, 0 fail" "$out"; then
+        echo "  ok milo unit tests"
+        pass=$((pass + 1))
+    else
+        echo "  FAIL milo-unit (exit $rc; MILO=$m)"
+        fail=$((fail + 1)); failed="$failed milo-unit"
+    fi
+    rm -f "$out"
+}
+
 no_unsafe
+milo_unit
 serve_suite e2e            $((base +  0)) --program /tmp/dapweb_inter --source /tmp/dapweb_inter.c
 serve_suite e2e-m8         $((base + 10)) --program /tmp/dapweb_inter --source /tmp/dapweb_inter.c
 serve_suite e2e-multifile  $((base + 20)) --program /tmp/dapweb_nested --source examples/nested/main.c

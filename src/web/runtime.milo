@@ -1,0 +1,96 @@
+// What a running process is, for picking the debugger that can attach to it.
+// Attaching lldb to a node or python process debugs the interpreter's C code,
+// not the user's program; the right adapter is the one for the language.
+
+from "std/fs" import {
+    pathExists
+}
+from "std/path" import {
+    Path
+}
+from "./binfo" import {
+    isGoBinary
+}
+
+// python, python3, python3.12, python3.13t (free-threaded), and macOS's
+// framework build, which re-execs as .../Python.app/Contents/MacOS/Python.
+fn isPythonName(base: &string): bool {
+    let b = base.toLower()
+    if !b.startsWith("python") {
+        return false
+    }
+    var i: i64 = 6
+    while i < b.len {
+        let c = b[i]
+        let digit = c >= '0' && c <= '9'
+        if !digit && c != '.' && !(c == 't' && i == b.len - 1) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn isNodeName(base: &string): bool {
+    return base == "node" || base == "nodejs" || base == "bun" || base == "deno"
+}
+
+// The interpreter a command line runs: "node", "python", or "" when argv alone
+// does not say. `env node script.js` (what a `#!/usr/bin/env node` shebang
+// becomes when run by hand) is looked through to the program env runs.
+pub fn argvRuntime(cmdline: &string): string {
+    let fields = cmdline.splitWhitespace()
+    if fields.len == 0 {
+        return ""
+    }
+    var base = Path.basename(fields[0])
+    if base == "env" {
+        var i: i64 = 1
+        while i < fields.len {
+            let t = fields[i]
+            // env's own flags and VAR=value assignments come before the program
+            if !t.startsWith("-") && !t.contains("=") {
+                base = Path.basename(t)
+                break
+            }
+            i = i + 1
+        }
+    }
+    if isNodeName(base) {
+        return "node"
+    }
+    if isPythonName(base) {
+        return "python"
+    }
+    return ""
+}
+
+// argvRuntime, then Go for an executable that carries Go build info, else
+// native. The Go check needs the executable's path, which only an absolute
+// argv[0] gives without per-platform process introspection; a relative or
+// rewritten argv[0] stays "native" (lldb still attaches, just without Go
+// awareness). System directories are skipped: they hold hundreds of the
+// listed processes and no Go programs, and each check opens the file.
+pub fn processRuntime(cmdline: &string): string {
+    let rt = argvRuntime(cmdline)
+    if rt.len > 0 {
+        return rt
+    }
+    let fields = cmdline.splitWhitespace()
+    if fields.len > 0 {
+        let exe = fields[0]
+        if exe.startsWith("/") && !exe.startsWith("/System/") && !exe.startsWith("/usr/libexec/")
+            && !exe.startsWith("/usr/sbin/") && !exe.startsWith("/sbin/") && pathExists(exe) && isGoBinary(exe) {
+            return "go"
+        }
+    }
+    return "native"
+}
+
+// The registry dialect that attaches to a runtime.
+pub fn kindForRuntime(rt: &string): string {
+    if rt == "node" || rt == "python" || rt == "go" {
+        return rt.clone()
+    }
+    return "lldb"
+}

@@ -66,6 +66,9 @@ from "../sessions" import {
 from "./binfo" import {
     binInfoJson
 }
+from "./runtime" import {
+    processRuntime, kindForRuntime
+}
 from "../journal" import {
     journalDisable, journalRows, journalSessions, journalBreakpoints, logFilter
 }
@@ -79,7 +82,7 @@ from "std/env" import {
     Env
 }
 from "std/process" import {
-    Child, Command, Stdio
+    Child, Command, Stdio, capture
 }
 from "std/fs" import {
     pathExists, splitLines
@@ -94,7 +97,7 @@ from "./state" import {
     gSession, stoppedMsg, threadsMsg, dataBpsJson
 }
 from "../dap/session" import {
-    resolveAdapterCmd
+    resolveAdapterCmd, adaptersJson, inferType
 }
 from "./peers" import {
     logEvent, broadcastLoop, wsPush
@@ -184,9 +187,12 @@ fn processListJson(): string {
                     continue
                 }
                 let full = t.substr(fields[0].len, t.len).trim()
+                let rt = processRuntime(full)
                 arr = arr.raw(Json.obj().int("pid", pid)
                     .str("name", Path.basename(fields[1]))
-                    .str("cmd", full).build())
+                    .str("cmd", full)
+                    .str("runtime", rt)
+                    .str("type", kindForRuntime(rt)).build())
                 count = count + 1
             }
         }
@@ -196,6 +202,42 @@ fn processListJson(): string {
         }
     }
     return Json.obj().arr("processes", arr).int("count", count).build()
+}
+
+// This machine's architecture in binfo's spelling, so the target dialog can
+// say a binary is built for another one before lldb fails to launch it.
+fn hostArch(): string {
+    let Result.Ok(out) = capture("uname -m") else {
+        return ""
+    }
+    let m = out.trim()
+    if m == "x86_64" || m == "amd64" {
+        return "x86-64"
+    }
+    if m == "aarch64" {
+        return "arm64"
+    }
+    return m
+}
+
+// The target dialog's "Auto" debugger and binary summary for a path the user
+// is typing. This takes a caller-supplied path, unlike /api/binfo, so what it
+// answers is bounded on purpose: the dialect inferType picks and binfo's
+// header-level report (format, arch, sizes, section-derived facts), never
+// file contents. Existence and size of a path are visible to a local caller
+// anyway, and requestAllowed already pins callers to loopback, same-origin.
+// Device and proc paths are refused outright: opening /dev/tty or a pipe blocks,
+// and a blocked open here stalls every session task on the green scheduler.
+fn inferJson(program: &string): string {
+    if program.startsWith("/dev/") || program.startsWith("/proc/") {
+        return Json.obj().str("program", program).str("type", "lldb").str("hostArch", hostArch())
+            .raw("binfo", Json.obj().str("path", program).bool("exists", false).build()).build()
+    }
+    return Json.obj().str("program", program)
+        .str("type", inferType(program))
+        .str("hostArch", hostArch())
+        .raw("binfo", binInfoJson(program))
+        .build()
 }
 
 // ── HTTP API ──
@@ -321,9 +363,14 @@ fn handleConnection(conn: TcpStream, bus: Channel<string>, pendCh: Channel<Pendi
         sendHttp(fd, 200, "application/json", apiStateJson())
         return
     }
-    // Reports on the configured target only, with no path parameter: the API
-    // port is unauthenticated, and a caller-supplied path would make this an
-    // arbitrary-file header reader.
+    if apiPath == "/api/adapters" {
+        sendHttp(fd, 200, "application/json", adaptersJson())
+        return
+    }
+    if apiPath == "/api/infer" {
+        sendHttp(fd, 200, "application/json", inferJson(req.param("program")))
+        return
+    }
     if apiPath == "/api/processes" {
         sendHttp(fd, 200, "application/json", processListJson())
         return
@@ -380,6 +427,8 @@ fn handleConnection(conn: TcpStream, bus: Channel<string>, pendCh: Channel<Pendi
         sendHttp(fd, 200, "application/json", spawnSessionJson())
         return
     }
+    // Reports on the configured target only, with no path parameter; a typed
+    // path is /api/infer's job, which carries its own limits.
     if apiPath == "/api/binfo" {
         sendHttp(fd, 200, "application/json", binInfoJson(gSession.target.spec.binPath))
         return

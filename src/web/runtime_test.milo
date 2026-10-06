@@ -1,0 +1,77 @@
+// Unit tests for process runtime detection and optimization-level parsing.
+// Run by scripts/test.sh (suite "milo-unit") through `milo test`.
+from "std/testing" import {
+    assertEq, assertTrue, assertFalse
+}
+from "./runtime" import {
+    argvRuntime, processRuntime, kindForRuntime
+}
+from "./binfo" import {
+    optLevelOf, producerOptLevel, goGcflags, goFlagsUnoptimized
+}
+
+fn testNodeInterpreters(): void {
+    assertEq(argvRuntime("node -e setInterval(()=>{},1000)"), "node")
+    assertEq(argvRuntime("/Users/me/.nvm/versions/node/v25.3.0/bin/node server.js"), "node")
+    assertEq(argvRuntime("bun run dev"), "node")
+    assertEq(argvRuntime("deno run main.ts"), "node")
+    assertEq(argvRuntime("/usr/bin/env node /usr/local/bin/tool.js"), "node")
+    assertEq(argvRuntime("env -i FOO=1 node app.js"), "node")
+}
+
+fn testPythonInterpreters(): void {
+    assertEq(argvRuntime("python3 -c import time; time.sleep(60)"), "python")
+    assertEq(argvRuntime("python app.py"), "python")
+    assertEq(argvRuntime("/usr/bin/python3.12 -m http.server"), "python")
+    assertEq(argvRuntime("python3.13t script.py"), "python")
+    assertEq(argvRuntime("/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python -c pass"), "python")
+}
+
+fn testNotInterpreters(): void {
+    // names that merely contain an interpreter's name are not one
+    assertEq(argvRuntime("/usr/libexec/nodeagent"), "")
+    assertEq(argvRuntime("pythonista"), "")
+    assertEq(argvRuntime("python3x"), "")
+    assertEq(argvRuntime("/bin/zsh -l"), "")
+    assertEq(argvRuntime("vim node.py"), "")
+    assertEq(argvRuntime(""), "")
+    assertEq(processRuntime("/bin/zsh -l"), "native")
+    assertEq(processRuntime("relative/thing --flag"), "native")
+}
+
+fn testKindForRuntime(): void {
+    assertEq(kindForRuntime("node"), "node")
+    assertEq(kindForRuntime("python"), "python")
+    assertEq(kindForRuntime("go"), "go")
+    assertEq(kindForRuntime("native"), "lldb")
+}
+
+fn testOptLevelFromCommandLine(): void {
+    assertEq(optLevelOf("clang -g -O2 main.c"), "-O2")
+    assertEq(optLevelOf("cc -O3 -g -O0 main.c"), "-O0")
+    assertEq(optLevelOf("gcc -O main.c"), "-O1")
+    assertEq(optLevelOf("clang -Os x.c"), "-Os")
+    assertEq(optLevelOf("clang -Ofast x.c"), "-Ofast")
+    assertEq(optLevelOf("clang -g x.c -o /tmp/-Oout"), "")
+    assertEq(optLevelOf("Homebrew clang version 22.1.8"), "")
+}
+
+fn testProducerStrings(): void {
+    assertEq(producerOptLevel("GNU C17 13.2.0 -mtune=generic -march=x86-64 -g -O2"), "-O2")
+    // GCC records every switch, so no -O among them means its -O0 default
+    assertEq(producerOptLevel("GNU C17 13.2.0 -mtune=generic -march=x86-64 -g"), "-O0")
+    // clang records no switches without -grecord-command-line: nothing to say
+    assertEq(producerOptLevel("Apple clang version 17.0.0 (clang-1700.0.13.5)"), "")
+    assertEq(producerOptLevel("clang version 18.1.8 /usr/bin/clang -g -O2 x.c"), "-O2")
+    assertEq(producerOptLevel("GNU C17 13.2.0"), "")
+}
+
+fn testGoGcflags(): void {
+    let info = "path\tgohello\nbuild\t-buildmode=exe\nbuild\t-gcflags=\"all=-N -l\"\nbuild\tGOOS=darwin\n"
+    assertEq(goGcflags(info), "\"all=-N -l\"")
+    assertTrue(goFlagsUnoptimized(goGcflags(info)))
+    assertTrue(goFlagsUnoptimized("-N -l"))
+    assertFalse(goFlagsUnoptimized("all=-N"))
+    assertFalse(goFlagsUnoptimized(""))
+    assertEq(goGcflags("path\tx\nbuild\t-compiler=gc\n"), "")
+}
