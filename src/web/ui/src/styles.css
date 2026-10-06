@@ -294,6 +294,8 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
 .panel-act { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
 .panel-toggle { display: inline-flex; align-items: center; gap: 6px; flex: 1; }
 .panel h2:hover .panel-toggle { color: var(--fg); }
+.panel-badge { font-size: 9px; padding: 0 5px; border-radius: 4px; letter-spacing: 0;
+               text-transform: none; background: var(--chip-bg); color: var(--chip-fg); }
 .frame { padding: 2px 4px; cursor: pointer; border-radius: 4px;
          white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .frame:hover { background: rgba(255,255,255,0.06); }

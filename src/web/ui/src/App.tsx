@@ -1459,7 +1459,10 @@ export default function App() {
               they're tall and noisy beside LOCALS, and pair with the memory view. */}
           {/* Rarely touched per-session — lives at the bottom on purpose. */}
           {excFilters.length > 0 && (
-            <Panel title="Exceptions">
+            // lldb-dap offers C++ and Objective-C filters to every program, a C
+            // one included, so the list starts folded down to its count.
+            <Panel title="Exceptions" persist="dapweb.excCollapsed" defaultCollapsed
+                   badge={`${excFilters.filter((f: any) => excSel.has(f.filter)).length} on`}>
               {excFilters.map((f: any) => (
                 <label key={f.filter} className="excrow">
                   <input type="checkbox" checked={excSel.has(f.filter)} onChange={(e) => {
@@ -1576,14 +1579,27 @@ export default function App() {
   );
 }
 
-function Panel({ title, action, children }: any) {
-  const [collapsed, setCollapsed] = useState(false);
+// `persist` names a localStorage key that remembers the collapsed state across
+// reloads; `badge` is a summary shown only while collapsed.
+function Panel({ title, action, children, persist, defaultCollapsed = false, badge }: any) {
+  const [collapsed, setCollapsedState] = useState<boolean>(() => {
+    if (!persist) return defaultCollapsed;
+    try {
+      const v = localStorage.getItem(persist);
+      return v === null ? defaultCollapsed : v === "1";
+    } catch { return defaultCollapsed; }
+  });
+  const setCollapsed = (f: (c: boolean) => boolean) => setCollapsedState((c) => {
+    const n = f(c);
+    if (persist) try { localStorage.setItem(persist, n ? "1" : "0"); } catch {}
+    return n;
+  });
   return (
     <div className={"panel" + (collapsed ? " collapsed" : "")}>
       {/* The whole heading toggles. A 10px chevron as the only hit target is a
           thing you aim at; the row is a thing you click. */}
       <h2 onClick={() => setCollapsed((c) => !c)} title={collapsed ? "expand" : "collapse"}>
-        <span className="panel-toggle">{title}</span>
+        <span className="panel-toggle">{title}{collapsed && badge != null && <span className="panel-badge">{badge}</span>}</span>
         {action && <span className="panel-act" onClick={(e) => e.stopPropagation()}>{action}</span>}
       </h2>
       {!collapsed && <div className="body">{children}</div>}
