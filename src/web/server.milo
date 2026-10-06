@@ -65,6 +65,9 @@ from "../journal" import {
 from "std/signal" import {
     ignoreSignal, SIGPIPE
 }
+from "std/term" import {
+    TermSize
+}
 from "std/pty" import {
     Pty
 }
@@ -101,7 +104,7 @@ from "../dap/client" import {
     DapClient, DapMsg
 }
 from "./state" import {
-    gSession, Bp, OutLine, cloneBp
+    gSession, Bp, OutLine, cloneBp, ChildLaunch, PendingRun
 }
 from "json-rpc/frame" import {
     writeFrame as writeFrameFd
@@ -116,54 +119,13 @@ from "../dap/session" import {
 
 // NOTE: module-scope string initializers are NYI in Milo and silently produce
 // "" — every one of these is assigned in main() before any request is served.
-// js-debug support: its DAP server only listens on TCP, so the node dialect
-// spawns it (`node dapDebugServer.js 0`), parses the printed port, and connects.
-// gSrvPid/gSrvPort are that spawned server (0 = none this run) — the pid is
-// SIGTERMed at session teardown, since closing the sockets leaves it listening.
-var gSrvPid: i64 = 0
-var gSrvPort: i64 = 0
-// pid of a LAUNCHED debuggee, from the adapter's `process` event (0 = none/attach).
-// Behind a spawned TCP adapter the debuggee is our grandchild: killing the
-// adapter server orphans it instead of ending it, so teardown checks this pid.
-var gDebuggeePid: i64 = 0
-// Write fd of the PARENT session after a js-debug child handoff (-1 = none).
-// The parent is the session that owns the launched process: a disconnect sent
-// only to the child ends the debug connection and leaves the program running.
-var gParentIn: i32 = -1
-// js-debug runs the debuggee under a CHILD session it asks us to start (the
-// startDebugging reverse request). The child's launch body arrives in that
-// request and replaces our built launch args — set at handoff, "" otherwise.
-var gChildLaunch: string = ""
-var gChildReq: string = "" // "launch" | "attach" — the child's DAP command
-// A force-run's config, applied after the old session's teardown completes
-// (D's terminated cleanup consumes it; "" = rerun the current config).
-var gPendingConfig: string = ""
-var gPendingStopAtMain: bool = false // the force-run's per-run stopAtMain
 var gHistory: string = "" // config history JSON array, newest first, cap 10 — persisted to XDG state (init "[]" in main)
-var gRestored: bool = false // booted idle and staged history[0] (banner hint)
-// Set when a forced run must kill+rerun (a new config can't ride a live
-// adapter). D's terminated cleanup honors it by re-spawning once the old
-// debuggee is gone.
-var gPendingRun: bool = false
 
 // Shared session: ONE debug session per server process, any number of WS
 // peers (browser tabs + `dapweb api` callers) all seeing identical broadcast state.
 // Green runtime = one OS thread, cooperative scheduling — plain globals are
 // race-free at yield-point granularity (same argument as the config globals).
 // All assigned in main() before any request is served (module init NYI).
-var gStarted: bool = false
-var gDapIn: i32 = -1
-// The live debuggee pty, for stdin and resize. The browser sizes its terminal on mount,
-// before any pty exists, so the last size asked for is kept and applied at spawn.
-var gPty: Option<Pty> = Option.None
-var gTermRows: i64 = 0
-var gTermCols: i64 = 0
-var gOddSeq: i64 = -1 // +2 per R send → 1, 3, 5, … (D's DapClient uses even)
-var gStdinBuf: string = "" // keystrokes typed before the pty exists
-// Recent adapter stderr, captured off the DAP stream (see startArgs). Surfaced
-// only when the adapter dies before the handshake completes — otherwise silence.
-// Bounded to the first chunk that matters (a startup traceback); reset each run.
-var gAdapterStderr: string = ""
 var gCapsMsg: string = "" // last capabilities push — replayed to late joiners
 var gStopMsg: string = "" // last stopped push while still stopped — replayed
 var gThreadsMsg: string = "" // last threads push while stopped — replayed
@@ -177,9 +139,6 @@ var gNextClient: i64 = 1
 var gBps: Vec<Bp> = [] // shared breakpoint set (was per-connection before the shared session)
 var gPeers: i64 = 0 // attached WS peers (browser tabs; `api` callers are one-shot HTTP)
 var gLastActivityMs: i64 = 0 // epochMillis of the last peer event OR api call — idle-ttl clock
-var gRunStartMs: i64 = 0 // epochMillis at adapter spawn — run duration
-var gLastExit: i64 = -1 // debuggee exitCode from the "exited" event; -1 = unknown
-
 // Breakpoints are keyed on (path, line) and lldb binds on the FULL path, so the
 // one spelling that works is the absolute one the compiler recorded. A client can
 // send either: the UI keys on `--source`/hello before the first stop and on the
@@ -602,11 +561,11 @@ fn ptyPumpLoop(master: i32, ch: Channel<string>): void {
     for chunk in fdChannel(master) {
         wsPush(ch, Json.obj().str("type", "ptyData").str("data", chunk).build())
     }
-    // The stdin command writes through gPty. Forget it before the close, or a
+    // The stdin command writes through proc.pty. Forget it before the close, or a
     // keystroke after the debuggee exits lands on whatever reuses this number.
-    if let Option.Some(p) = replace(gPty, Option.None) {
+    if let Option.Some(p) = replace(gSession.proc.pty, Option.None) {
         if p.fd() != master {
-            gPty = Option.Some(p)
+            gSession.proc.pty = Option.Some(p)
         }
     }
     close(master)
@@ -619,8 +578,8 @@ fn ptyPumpLoop(master: i32, ch: Channel<string>): void {
 fn adapterStderrPump(errFd: i32): void {
     for chunk in fdChannel(errFd) {
         eprint("[adapter] " + chunk)
-        if gAdapterStderr.len < 8192 {
-            gAdapterStderr = gAdapterStderr + chunk
+        if gSession.proc.adapterStderr.len < 8192 {
+            gSession.proc.adapterStderr = gSession.proc.adapterStderr + chunk
         }
     }
     // Owns the fd — see ptyPumpLoop for why nobody else may close it.
@@ -642,7 +601,7 @@ fn helloMsg(): string {
         .raw("config", specConfigJson(gSession.target.spec, true, 0 as i64))
     // late joiners need to know a session is live (kill-confirm on Run etc.);
     // a replayed stopped snapshot then refines running → stopped.
-    if gStarted {
+    if gSession.proc.started {
         b = b.str("phase", "running")
     }
     b = b.raw("history", gHistory)
@@ -704,10 +663,10 @@ fn sourceMsg(path: &string): string {
 
 // exitCode rides along only when the adapter reported one (-1 = unknown: killed,
 // detached, or the adapter never started), so a client never shows a made-up code.
-fn terminatedMsg(exitCode: i64): string {
+fn terminatedMsg(exitCode: Option<i64>): string {
     var b = Json.obj().str("type", "terminated")
-    if exitCode >= 0 {
-        b = b.int("exitCode", exitCode)
+    if let Option.Some(code) = exitCode {
+        b = b.int("exitCode", code)
     }
     return b.build()
 }
@@ -1155,8 +1114,8 @@ fn handleRunInTerminal(cl: &mut DapClient, raw: &string, reqSeq: i64, ch: &Chann
             // Before spawn, not after: the forked child sets the slave's size
             // from the Pty's own rows/cols, and would overwrite a parent-side
             // resize that raced it.
-            if gTermRows > 0 && gTermCols > 0 {
-                let _r = pty.resize(gTermRows as u16, gTermCols as u16)
+            if let Option.Some(t) = gSession.proc.term {
+                let _r = pty.resize(t.rows as u16, t.cols as u16)
             }
             match pty.spawn(program, args) {
                 Result.Ok(pid) => {
@@ -1164,16 +1123,16 @@ fn handleRunInTerminal(cl: &mut DapClient, raw: &string, reqSeq: i64, ch: &Chann
                     // Ours to reap: an adapter that routes the debuggee through
                     // our pty is not the process's parent and cannot be relied on
                     // to end it (js-debug's server does not).
-                    gDebuggeePid = pid as i64
+                    gSession.proc.debuggeePid = Option.Some(pid as i64)
                     cl.respond(reqSeq, "runInTerminal", Json.obj().int("processId", pid as i64).build())
                     let master = pty.masterFd
                     // direct global set (same scheduler thread) — and flush
                     // any keystrokes typed while the adapter was launching.
-                    if gStdinBuf.len > 0 {
-                        let _n = pty.writeOnce(gStdinBuf)
-                        gStdinBuf = ""
+                    if gSession.proc.stdinBuf.len > 0 {
+                        let _n = pty.writeOnce(gSession.proc.stdinBuf)
+                        gSession.proc.stdinBuf = ""
                     }
-                    gPty = Option.Some(pty)
+                    gSession.proc.pty = Option.Some(pty)
                     // Channel handles are refcounted: the pump task outlives this
                     // call, so it gets its own retained handle rather than ours.
                     let ptyCh = ch.clone()
@@ -1252,7 +1211,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
     var initOk = false // adapter answered `initialize` (handshake reached)
     // Session end is announced AFTER the globals below are re-armed, never from
     // inside the loop: a peer treats `terminated` as "you may run again", and
-    // reapDebuggee alone can hold gStarted true for 500ms after the push, so an
+    // reapDebuggee alone can hold proc.started true for 500ms after the push, so an
     // immediate `run` was refused as "already active" (every e2e kill-then-run).
     var announceEnd = false
 
@@ -1271,8 +1230,8 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 // cause — the captured stderr — as a configError instead.
                 if !initOk {
                     var em = "adapter exited before the handshake — it never started."
-                    if gAdapterStderr.len > 0 {
-                        em = em + "\n\n" + gAdapterStderr
+                    if gSession.proc.adapterStderr.len > 0 {
+                        em = em + "\n\n" + gSession.proc.adapterStderr
                     }
                     wsPush(ch, configErrMsg(em))
                 }
@@ -1370,9 +1329,9 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 var lreq = launchRequest()
                 var largs = launchArgs()
                 var lkind: string = "launch"
-                if gChildLaunch.len > 0 {
-                    lreq = gChildReq.clone()
-                    largs = gChildLaunch.clone()
+                if let Option.Some(c) = gSession.proc.child {
+                    lreq = c.request.clone()
+                    largs = c.body.clone()
                     lkind = "childLaunch"
                 }
                 let s = cl.send(lreq, largs)
@@ -1511,13 +1470,15 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     let pollPend = pendCh.clone()
                     Task.spawn(move(): void => {
                         sleepMs(300)
-                        if gStopMsg.len > 0 && gDapIn >= 0 {
-                            gOddSeq = gOddSeq + 2
-                            let _p = pollPend.trySend(Pending {
-                                seq: gOddSeq, kind: "thr", id: att, extra: ""
+                        if gStopMsg.len > 0 {
+                            if let Option.Some(dfd) = gSession.proc.dapIn {
+                                let seq = gSession.proc.nextSeq()
+                                let _p = pollPend.trySend(Pending {
+                                    seq: seq, kind: "thr", id: att, extra: ""
+                                }
+                                )
+                                sendReqFd(dfd, seq, "threads", "{}")
                             }
-                            )
-                            sendReqFd(gDapIn, gOddSeq, "threads", "{}")
                         }
                     }
                     )
@@ -1604,12 +1565,19 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 // session and has to outlive it: reaping it would turn a
                 // detach into a kill.
                 if bodyStr(msg.raw, "startMethod") == "launch" {
-                    gDebuggeePid = bodyI64(msg.raw, "systemProcessId", 0 as i64)
+                    let dpid = bodyI64(msg.raw, "systemProcessId", 0 as i64)
+                    if dpid > 0 {
+                        gSession.proc.debuggeePid = Option.Some(dpid)
+                    }
                 }
             } else if msg.event == "exited" {
                 // Not session end (restart emits it for the old process) —
                 // just remember the code for the run-exited log line.
-                gLastExit = bodyI64(msg.raw, "exitCode", -1 as i64)
+                let code = bodyI64(msg.raw, "exitCode", -1 as i64)
+                gSession.proc.lastExit = Option.None
+                if code >= 0 {
+                    gSession.proc.lastExit = Option.Some(code)
+                }
             } else if msg.event == "stopped" {
                 if gSession.server.logLevel >= 2 {
                     logEvent("stopped", $"thread {bodyI64(msg.raw, "threadId", -1 as i64)}  reason {bodyStr(msg.raw, "reason")}")
@@ -1673,20 +1641,23 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 if gSession.target.spec.port > 0 && gSession.target.spec.host.len > 0 {
                     host = gSession.target.spec.host.clone()
                 }
-                if childCfg.len == 0 || gSrvPort <= 0 {
+                let srvPort = gSession.proc.srvPort ?? (0 as i64)
+                if childCfg.len == 0 || srvPort <= 0 {
                     eprint("[srv] startDebugging without a child config/port — ignored\n")
                 } else {
-                    match DapClient.startTcp(host, gSrvPort) {
+                    match DapClient.startTcp(host, srvPort) {
                         Result.Ok(childCl) => {
-                            gChildLaunch = childCfg
-                            gChildReq = childReq
+                            gSession.proc.child = Option.Some(ChildLaunch {
+                                body: childCfg, request: childReq
+                            }
+                            )
                             var parentCl = cl
-                            gParentIn = parentCl.child.stdinFd
+                            gSession.proc.parentIn = Option.Some(parentCl.child.stdinFd)
                             cl = childCl
                             // parent pendings can never match child seqs — drop
                             // them (the drain task ignores stray responses).
                             pend = []
-                            gDapIn = cl.child.stdinFd
+                            gSession.proc.dapIn = Option.Some(cl.child.stdinFd)
                             let dch = ch.clone()
                             Task.spawn(move(): void => {
                                 parentDrainLoop(parentCl, dch)
@@ -1710,9 +1681,9 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
     }
 
     cl.close()
-    var durSecs = (epochMillis() - gRunStartMs) / 1000
-    if gLastExit >= 0 {
-        logEvent("run exited", $"code {gLastExit}  ({durSecs}s)")
+    var durSecs = (epochMillis() - gSession.proc.runStartMs) / 1000
+    if let Option.Some(code) = gSession.proc.lastExit {
+        logEvent("run exited", $"code {code}  ({durSecs}s)")
     } else {
         // No exited event: killed, detached from an attach, or adapter EOF.
         logEvent("run ended", $"({durSecs}s)")
@@ -1720,21 +1691,19 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
     // Session over: re-arm `run` directly (globals, same scheduler
     // thread). Stale pendings must not collide with the next adapter's seq
     // numbers, which restart at 1.
-    if gParentIn >= 0 {
+    if let Option.Some(pfd) = replace(gSession.proc.parentIn, Option.None) {
         // adapter EOF / a `terminated` we did not ask for: same reasoning as the
         // kill path, and it costs one write to a fd that is about to close.
-        sendReqFd(gParentIn, 999999 as i64, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
-        gParentIn = -1
+        sendReqFd(pfd, 999999 as i64, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
     }
     killAdapterSrv()
     reapDebuggee()
-    gChildLaunch = ""
-    gChildReq = ""
-    gStarted = false
-    gDapIn = -1
-    gPty = Option.None
-    gStdinBuf = ""
-    gOddSeq = -1 as i64
+    gSession.proc.child = Option.None
+    gSession.proc.started = false
+    gSession.proc.dapIn = Option.None
+    gSession.proc.pty = Option.None
+    gSession.proc.stdinBuf = ""
+    gSession.proc.oddSeq = -1 as i64
     gStopMsg = ""
     gThreadsMsg = ""
     gRegionsMsg = ""
@@ -1749,19 +1718,17 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
         }
     }
     if announceEnd {
-        wsPush(ch, terminatedMsg(gLastExit))
+        wsPush(ch, terminatedMsg(gSession.proc.lastExit))
     }
     // A forced run killed the old debuggee; auto-rerun here with its config
     // (a new config can't ride a live adapter — it caches launch args).
-    if gPendingRun {
-        gPendingRun = false
+    // replace(), not a read: taking the value out of the global is a move the
+    // checker can see, where passing the field by value would not be tracked.
+    if let Option.Some(pr) = replace(gSession.proc.pendingRun, Option.None) {
+        let runStopAtMain = pr.stopAtMain
         var err: string = ""
-        if gPendingConfig.len > 0 {
-            // .clone(): passing the global by value would move its buffer into
-            // applyConfig and the reassignment below would double-free it (the
-            // checker doesn't track moves out of globals).
-            err = applyConfig(gPendingConfig.clone(), "")
-            gPendingConfig = ""
+        if let Option.Some(cfg) = pr.config {
+            err = applyConfig(cfg.clone(), "")
             if err.len == 0 {
                 // applyConfig empties gBps (the new config may be a different
                 // program); reload the program-keyed store before the hello, or
@@ -1774,7 +1741,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
         if err.len > 0 {
             wsPush(ch, configErrMsg(err))
         } else if gSession.target.spec.binPath.len > 0 || gSession.target.spec.request == "attach" {
-            gSession.target.stopAtMain = gPendingStopAtMain
+            gSession.target.stopAtMain = runStopAtMain
             let _ok = startRun(ch, pendCh)
         }
     }
@@ -1799,11 +1766,11 @@ fn parseListenPort(s: &string): i64 {
 
 // Spawn a TCP-only adapter (js-debug's dapDebugServer) with a port argument of
 // 0, read the port the OS picked off its stdout, and leave both output streams
-// pumped. Returns the port to connect to; the server pid lands in gSrvPid for
+// pumped. Returns the port to connect to; the server pid lands in proc.srvPid for
 // teardown (closing our sockets leaves it listening forever).
 fn spawnTcpAdapter(prog: &string, args: &Vec<string>): Result<i64> {
     let child = Child.spawn(prog, args, false)?
-    gSrvPid = child.pid as i64
+    gSession.proc.srvPid = Option.Some(child.pid as i64)
     let errFd = child.stderrFd
     if errFd >= 0 {
         // same pre-handshake crash capture as stdio adapters
@@ -1852,15 +1819,15 @@ fn pidAlive(c: &mut Child): bool {
 }
 
 fn killAdapterSrv(): void {
-    if gSrvPid > 0 {
+    if let Option.Some(spid) = gSession.proc.srvPid {
         var c = Child {
-            pid: gSrvPid as i32, stdinFd: -1 as i32, stdoutFd: -1 as i32, stderrFd: -1 as i32
+            pid: spid as i32, stdinFd: -1 as i32, stdoutFd: -1 as i32, stderrFd: -1 as i32
         }
         // Let it exit on its own first: the disconnect we just sent is what makes
         // it kill the debuggee, and SIGTERMing it mid-teardown skips that.
-        // Blocking, not sleepMs: D calls this mid-teardown with gStarted, gDapIn
-        // and gSrvPid still describing the dead session, and a parked D would let
-        // a peer's step or run act on them (gDapIn names an fd cl.close() freed).
+        // Blocking, not sleepMs: D calls this mid-teardown with proc.started, proc.dapIn
+        // and proc.srvPid still describing the dead session, and a parked D would let
+        // a peer's step or run act on them (proc.dapIn names an fd cl.close() freed).
         var waited: i64 = 0
         while waited < 1000 && pidAlive(&mut c) {
             sleepBlockingMs(50)
@@ -1869,8 +1836,8 @@ fn killAdapterSrv(): void {
         let _k = c.signal(15)
         let _w = c.wait()
     }
-    gSrvPid = 0
-    gSrvPort = 0
+    gSession.proc.srvPid = Option.None
+    gSession.proc.srvPort = Option.None
 }
 
 // Make sure a launched debuggee is actually dead at session end. lldb-dap and
@@ -1880,9 +1847,9 @@ fn killAdapterSrv(): void {
 // the port/file the next run wants). Give it a moment to go on its own, then
 // SIGTERM it. Not a child of ours, so signal, never wait.
 fn reapDebuggee(): void {
-    if gDebuggeePid > 0 {
+    if let Option.Some(dpid) = gSession.proc.debuggeePid {
         var c = Child {
-            pid: gDebuggeePid as i32, stdinFd: -1 as i32, stdoutFd: -1 as i32, stderrFd: -1 as i32
+            pid: dpid as i32, stdinFd: -1 as i32, stdoutFd: -1 as i32, stderrFd: -1 as i32
         }
         // blocking for the same reason as killAdapterSrv
         var waited: i64 = 0
@@ -1892,22 +1859,22 @@ fn reapDebuggee(): void {
         }
         if pidAlive(&mut c) {
             let _k = c.signal(15)
-            logEvent("debuggee reaped", $"pid {gDebuggeePid} outlived the adapter (SIGTERM)")
+            logEvent("debuggee reaped", $"pid {dpid} outlived the adapter (SIGTERM)")
         }
     }
-    gDebuggeePid = 0
+    gSession.proc.debuggeePid = Option.None
 }
 
 // spawn the DAP adapter for the current config and drive the handshake.
 // Shared by the run command (R) and restart-with-staged auto-rerun (D). Assumes
-// binPath set and !gStarted. Broadcasts terminated and returns false if the
+// binPath set and !proc.started. Broadcasts terminated and returns false if the
 // adapter fails to spawn. bus is the broadcast channel.
 fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
-    gStarted = true
+    gSession.proc.started = true
     // reset BEFORE any spawn: the node path starts its stderr pump inside
     // spawnTcpAdapter, and a reset after it would wipe an early crash capture.
-    gAdapterStderr = ""
-    // Transport: TCP connects to a running adapter (gDapPort>0); stdio spawns
+    gSession.proc.adapterStderr = ""
+    // Transport: TCP connects to a running adapter (spec.port>0); stdio spawns
     // the resolved adapter command. Both yield a DapClient whose child.stdinFd
     // is the DAP write fd — the rest of the handshake is identical.
     var startRes: Result<DapClient> = Result.Err("uninitialized")
@@ -1918,7 +1885,7 @@ fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
         // a user-run js-debug server also hands the debuggee to a child session;
         // remember where to open that second connection (see startDebugging).
         if gSession.target.spec.adapterKind == "node" {
-            gSrvPort = gSession.target.spec.port
+            gSession.proc.srvPort = Option.Some(gSession.target.spec.port)
         }
     } else if tcpListenArgs(gSession.target.spec.adapterKind).len > 0 {
         // A socket-only adapter (js-debug, dlv): spawn it asking for port 0,
@@ -1927,8 +1894,8 @@ fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
         var argv = adapterArgvOf(gSession.target.spec.adapterCmd)
         if argv.len == 0 {
             eprint("[srv] no adapter configured\n")
-            gStarted = false
-            wsPush(bus, terminatedMsg(-1 as i64))
+            gSession.proc.started = false
+            wsPush(bus, terminatedMsg(Option.None))
             return false
         }
         var prog: string = argv[0].clone()
@@ -1944,7 +1911,7 @@ fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
         label = $"adapter {Path.basename(prog)}"
         match spawnTcpAdapter(prog, rest) {
             Result.Ok(port) => {
-                gSrvPort = port
+                gSession.proc.srvPort = Option.Some(port)
                 startRes = DapClient.startTcp("127.0.0.1", port)
             }
             Result.Err(e) => {
@@ -1956,8 +1923,8 @@ fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
         // adapterCmd is always set by config-apply before a stdio run reaches here.
         if argv.len == 0 {
             eprint("[srv] no adapter configured\n")
-            gStarted = false
-            wsPush(bus, terminatedMsg(-1 as i64))
+            gSession.proc.started = false
+            wsPush(bus, terminatedMsg(Option.None))
             return false
         }
         var prog: string = argv[0].clone()
@@ -1973,10 +1940,11 @@ fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
     match startRes {
         Result.Ok(client) => {
             var cl = client
-            gRunStartMs = epochMillis()
-            gLastExit = -1 as i64
+            gSession.proc.runStartMs = epochMillis()
+            gSession.proc.lastExit = Option.None
             logEvent("run started", $"{gSession.target.spec.binPath}  {label} pid {cl.child.pid}")
-            gDapIn = cl.child.stdinFd
+            let dfd = cl.child.stdinFd
+            gSession.proc.dapIn = Option.Some(dfd)
             // Drain + capture adapter stderr (stdio spawns only; TCP has no child
             // stderr, errFd -1). Must start before cl moves into the reader task.
             let errFd = cl.child.stderrFd
@@ -1989,12 +1957,12 @@ fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
                 }
                 )
             }
-            gOddSeq = gOddSeq + 2
+            let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: gOddSeq, kind: "initialize", id: 0, extra: buildAllBpArgs(gBps),
+                seq: seq, kind: "initialize", id: 0, extra: buildAllBpArgs(gBps),
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "initialize", initArgs())
+            sendReqFd(dfd, seq, "initialize", initArgs())
             let readerBus = bus.clone()
             let readerPend = pendCh.clone()
             Task.spawn(move(): void => {
@@ -2006,9 +1974,9 @@ fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
         Result.Err(e) => {
             eprint($"[srv] adapter spawn failed: {e}\n")
             killAdapterSrv()
-            gStarted = false
+            gSession.proc.started = false
             wsPush(bus, configErrMsg($"adapter failed to start: {e}"))
-            wsPush(bus, terminatedMsg(-1 as i64))
+            wsPush(bus, terminatedMsg(Option.None))
             return false
         }
     }
@@ -2115,16 +2083,16 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             enabled: dBool(doc, "enabled", true),
         }
         wsPush(bus, bpAckMsg(ack, c == "setBreakpoint"))
-        if gStarted && gDapIn >= 0 {
-            gOddSeq = gOddSeq + 2
+        if let Option.Some(dfd) = gSession.proc.dapIn {
+            let seq = gSession.proc.nextSeq()
             // Register before sending (here and below): D drains pendings
             // after each recv, so the entry must exist before the adapter
             // can possibly reply or the response is dropped unmatched.
             let _p = pendCh.trySend(Pending {
-                seq: gOddSeq, kind: "bpLive", id: 0, extra: ""
+                seq: seq, kind: "bpLive", id: 0, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "setBreakpoints", buildBpArgsForPath(gBps, path))
+            sendReqFd(dfd, seq, "setBreakpoints", buildBpArgsForPath(gBps, path))
         }
     } else if c == "run" {
         // The editor is the source of truth: an inline `config` object rides
@@ -2137,18 +2105,28 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
                 cfgRaw = v.rawStr()
             }
         }
-        if gStarted {
-            if dBool(doc, "force", false) && gDapIn >= 0 {
-                gPendingRun = true
-                gPendingConfig = cfgRaw
-                gPendingStopAtMain = dBool(doc, "stopAtMain", gSession.target.spec.stopAtMain)
-                logEvent("run killed", $"forced by {peerKind} peer — relaunching")
-                gOddSeq = gOddSeq + 2
-                let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "disc", id: 0, extra: ""
+        if gSession.proc.started {
+            var killFd: Option<i32> = Option.None
+            if dBool(doc, "force", false) {
+                killFd = gSession.proc.dapIn
+            }
+            if let Option.Some(dfd) = killFd {
+                var pcfg: Option<string> = Option.None
+                if cfgRaw.len > 0 {
+                    pcfg = Option.Some(cfgRaw)
+                }
+                gSession.proc.pendingRun = Option.Some(PendingRun {
+                    config: pcfg,
+                    stopAtMain: dBool(doc, "stopAtMain", gSession.target.spec.stopAtMain),
                 }
                 )
-                sendReqFd(gDapIn, gOddSeq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
+                logEvent("run killed", $"forced by {peerKind} peer — relaunching")
+                let seq = gSession.proc.nextSeq()
+                let _p = pendCh.trySend(Pending {
+                    seq: seq, kind: "disc", id: 0, extra: ""
+                }
+                )
+                sendReqFd(dfd, seq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
             } else {
                 wsPush(bus, configErrMsg("a debug session is already active — run with force:true to kill and relaunch"))
             }
@@ -2179,7 +2157,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             gThreadsMsg = ""
             gRegionsMsg = ""
         } // resumed: snapshots are stale for late joiners
-        if gDapIn >= 0 {
+        if let Option.Some(dfd) = gSession.proc.dapIn {
             var dapCmd: string = "continue"
             if c == "stepOver" {
                 dapCmd = "next"
@@ -2197,12 +2175,12 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             if c == "pause" && t < 0 {
                 // Attach flow: Pause can arrive before any stop, so
                 // there's no tid yet — ask for threads and pause the first.
-                gOddSeq = gOddSeq + 2
+                let seq = gSession.proc.nextSeq()
                 let _p = pendCh.trySend(Pending {
-                    seq: gOddSeq, kind: "thrPause", id: 0, extra: ""
+                    seq: seq, kind: "thrPause", id: 0, extra: ""
                 }
                 )
-                sendReqFd(gDapIn, gOddSeq, "threads", "{}")
+                sendReqFd(dfd, seq, "threads", "{}")
             } else {
                 var b = Json.obj().int("threadId", t)
                 // instruction-granularity stepping from the asm pane.
@@ -2210,8 +2188,8 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
                 if gran.len > 0 {
                     b = b.str("granularity", gran)
                 }
-                gOddSeq = gOddSeq + 2
-                sendReqFd(gDapIn, gOddSeq, dapCmd, b.build())
+                let seq = gSession.proc.nextSeq()
+                sendReqFd(dfd, seq, dapCmd, b.build())
             }
         }
     } else if c == "restart" {
@@ -2222,34 +2200,34 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         // config; gBps and the stop-at-main function bp persist. UI gates
         // this on supportsRestartRequest (kill+rerun is its fallback). A
         // config change is a Run (force-kills), not a restart.
-        if gDapIn >= 0 {
-            gOddSeq = gOddSeq + 2
+        if let Option.Some(dfd) = gSession.proc.dapIn {
+            let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: gOddSeq, kind: "restartR", id: 0, extra: ""
+                seq: seq, kind: "restartR", id: 0, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "restart", Json.obj().build())
+            sendReqFd(dfd, seq, "restart", Json.obj().build())
         }
     } else if c == "kill" {
         // End the session: adapter tears down the debuggee and exits; the
         // reader loop's terminated/EOF path re-arms `run` via endCh.
         logEvent("kill requested", $"(by {peerKind} peer)")
-        if gDapIn >= 0 {
-            gOddSeq = gOddSeq + 2
+        if let Option.Some(dfd) = gSession.proc.dapIn {
+            let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: gOddSeq, kind: "disc", id: 0, extra: ""
+                seq: seq, kind: "disc", id: 0, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
+            sendReqFd(dfd, seq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
         }
         // The child session debugs the process; the PARENT is what spawned it.
         // Disconnecting only the child leaves the program running with nobody
         // attached, which reads in the UI as "killed" and is not.
-        if gParentIn >= 0 {
-            sendReqFd(gParentIn, gOddSeq + 1, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
+        if let Option.Some(pfd) = gSession.proc.parentIn {
+            sendReqFd(pfd, gSession.proc.oddSeq + 1, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
         }
     } else if c == "evaluate" {
-        if gDapIn >= 0 {
+        if let Option.Some(dfd) = gSession.proc.dapIn {
             let id = dI64(doc, "id", 0 as i64)
             let frameId = dI64(doc, "frameId", -1 as i64)
             var b = Json.obj().str("expression", dStr(doc, "expr"))
@@ -2257,46 +2235,46 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             if frameId >= 0 {
                 b = b.int("frameId", frameId)
             }
-            gOddSeq = gOddSeq + 2
+            let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: gOddSeq, kind: "eval", id: id, extra: ""
+                seq: seq, kind: "eval", id: id, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "evaluate", b.build())
+            sendReqFd(dfd, seq, "evaluate", b.build())
         }
     } else if c == "expand" {
-        if gDapIn >= 0 {
+        if let Option.Some(dfd) = gSession.proc.dapIn {
             let id = dI64(doc, "id", 0 as i64)
-            gOddSeq = gOddSeq + 2
+            let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: gOddSeq, kind: "expand", id: id, extra: ""
+                seq: seq, kind: "expand", id: id, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "variables", Json.obj().int("variablesReference", dI64(doc, "ref", 0 as i64)).build())
+            sendReqFd(dfd, seq, "variables", Json.obj().int("variablesReference", dI64(doc, "ref", 0 as i64)).build())
         }
     } else if c == "threadStack" {
         // stack for a clicked thread; the UI then drives frameScopes
         // for its locals like any other frame selection.
-        if gDapIn >= 0 {
+        if let Option.Some(dfd) = gSession.proc.dapIn {
             let id = dI64(doc, "id", 0 as i64)
             let t = dI64(doc, "tid", 1 as i64)
-            gOddSeq = gOddSeq + 2
+            let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: gOddSeq, kind: "tst", id: id, extra: t.toString()
+                seq: seq, kind: "tst", id: id, extra: t.toString()
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "stackTrace", Json.obj().int("threadId", t).int("startFrame", 0).int("levels", 20).build())
+            sendReqFd(dfd, seq, "stackTrace", Json.obj().int("threadId", t).int("startFrame", 0).int("levels", 20).build())
         }
     } else if c == "frameScopes" {
         // locals for a user-selected stack frame.
-        if gDapIn >= 0 {
+        if let Option.Some(dfd) = gSession.proc.dapIn {
             let id = dI64(doc, "id", 0 as i64)
-            gOddSeq = gOddSeq + 2
+            let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: gOddSeq, kind: "fsc", id: id, extra: ""
+                seq: seq, kind: "fsc", id: id, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "scopes", Json.obj().int("frameId", dI64(doc, "frameId", 0 as i64)).build())
+            sendReqFd(dfd, seq, "scopes", Json.obj().int("frameId", dI64(doc, "frameId", 0 as i64)).build())
         }
     } else if c == "setExceptions" {
         // selected exception filter ids. Stored globally so session
@@ -2310,17 +2288,17 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             i = i + 1
         }
         gSession.target.excFilters = Option.Some(arr.build())
-        if gStarted && gDapIn >= 0 {
-            gOddSeq = gOddSeq + 2
+        if let Option.Some(dfd) = gSession.proc.dapIn {
+            let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: gOddSeq, kind: "ebLive", id: 0, extra: ""
+                seq: seq, kind: "ebLive", id: 0, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "setExceptionBreakpoints", excArgs())
+            sendReqFd(dfd, seq, "setExceptionBreakpoints", excArgs())
         }
     } else if c == "complete" {
         // debug-console completions.
-        if gDapIn >= 0 {
+        if let Option.Some(dfd) = gSession.proc.dapIn {
             let id = dI64(doc, "id", 0 as i64)
             let frameId = dI64(doc, "frameId", -1 as i64)
             var b = Json.obj().str("text", dStr(doc, "text"))
@@ -2328,48 +2306,48 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             if frameId >= 0 {
                 b = b.int("frameId", frameId)
             }
-            gOddSeq = gOddSeq + 2
+            let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: gOddSeq, kind: "cmpl", id: id, extra: ""
+                seq: seq, kind: "cmpl", id: id, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "completions", b.build())
+            sendReqFd(dfd, seq, "completions", b.build())
         }
     } else if c == "readMem" {
         // raw memory window. memoryReference is whatever the UI got
         // from a value/ipRef; lldb-dap accepts plain hex addresses.
-        if gDapIn >= 0 {
+        if let Option.Some(dfd) = gSession.proc.dapIn {
             let id = dI64(doc, "id", 0 as i64)
-            gOddSeq = gOddSeq + 2
+            let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: gOddSeq, kind: "readmem", id: id, extra: ""
+                seq: seq, kind: "readmem", id: id, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "readMemory", Json.obj().str("memoryReference", dStr(doc, "memoryReference")).int("offset", dI64(doc, "offset", 0 as i64)).int("count", dI64(doc, "count", 256 as i64)).build())
+            sendReqFd(dfd, seq, "readMemory", Json.obj().str("memoryReference", dStr(doc, "memoryReference")).int("offset", dI64(doc, "offset", 0 as i64)).int("count", dI64(doc, "count", 256 as i64)).build())
         }
     } else if c == "setVar" {
         // edit a variable. ref = parent container (scope ref for
         // top-level locals, the variable's own ref for expanded children).
-        if gDapIn >= 0 {
+        if let Option.Some(dfd) = gSession.proc.dapIn {
             let id = dI64(doc, "id", 0 as i64)
-            gOddSeq = gOddSeq + 2
+            let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: gOddSeq, kind: "setv", id: id, extra: ""
+                seq: seq, kind: "setv", id: id, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "setVariable", Json.obj().int("variablesReference", dI64(doc, "ref", 0 as i64)).str("name", dStr(doc, "name")).str("value", dStr(doc, "value")).build())
+            sendReqFd(dfd, seq, "setVariable", Json.obj().int("variablesReference", dI64(doc, "ref", 0 as i64)).str("name", dStr(doc, "name")).str("value", dStr(doc, "value")).build())
         }
     } else if c == "disassemble" {
         // window of instructions around a frame's pc (memoryReference =
         // the frame's instructionPointerReference from stackTrace).
-        if gDapIn >= 0 {
+        if let Option.Some(dfd) = gSession.proc.dapIn {
             let id = dI64(doc, "id", 0 as i64)
-            gOddSeq = gOddSeq + 2
+            let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: gOddSeq, kind: "disasm", id: id, extra: ""
+                seq: seq, kind: "disasm", id: id, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "disassemble", Json.obj().str("memoryReference", dStr(doc, "memoryReference")).int("instructionOffset", -16).int("instructionCount", 64).bool("resolveSymbols", true).build())
+            sendReqFd(dfd, seq, "disassemble", Json.obj().str("memoryReference", dStr(doc, "memoryReference")).int("instructionOffset", -16).int("instructionCount", 64).bool("resolveSymbols", true).build())
         }
     } else if c == "openSource" {
         // show the file a clicked frame lives in. sourceMsg itself
@@ -2384,23 +2362,25 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         // it until a debuggee that never reads stdin drains the pty would stall
         // every command that peer sends after it. A full pty drops input, as the
         // raw write here always did.
-        if let Option.Some(p) = replace(gPty, Option.None) {
+        if let Option.Some(p) = replace(gSession.proc.pty, Option.None) {
             let _n = p.writeOnce(data)
-            gPty = Option.Some(p)
+            gSession.proc.pty = Option.Some(p)
         } else {
-            gStdinBuf = gStdinBuf + data
+            gSession.proc.stdinBuf = gSession.proc.stdinBuf + data
         }
     } else if c == "resize" {
         let rows = dI64(doc, "rows", 0 as i64)
         let cols = dI64(doc, "cols", 0 as i64)
         // winsize fields are u16; anything outside is a bad payload, not a size.
         if rows > 0 && cols > 0 && rows < 65536 && cols < 65536 {
-            gTermRows = rows
-            gTermCols = cols
-            if let Option.Some(p) = replace(gPty, Option.None) {
+            gSession.proc.term = Option.Some(TermSize {
+                rows: rows, cols: cols
+            }
+            )
+            if let Option.Some(p) = replace(gSession.proc.pty, Option.None) {
                 var pty = p
                 let _r = pty.resize(rows as u16, cols as u16)
-                gPty = Option.Some(pty)
+                gSession.proc.pty = Option.Some(pty)
             }
         }
     } else if c == "setConfig" {
@@ -2408,7 +2388,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         // The browser applies configs inline on Run; setConfig is the
         // programmatic path (`dapweb api` callers). Idle-only — a live session must be
         // force-run to change target (setConfig never kills a debuggee).
-        if gStarted {
+        if gSession.proc.started {
             wsPush(bus, configErrMsg("a debug session is active — stop it (or Run with force) to change the target"))
         } else {
             let err = applyConfig(payload, "")
@@ -2438,13 +2418,13 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         // and the late-join replay snapshots, mint a new id, and re-hello
         // every peer — each resets its client state on the id change.
         // Target config survives; the ⚙ drawer changes it.
-        if gStarted && gDapIn >= 0 {
-            gOddSeq = gOddSeq + 2
+        if let Option.Some(dfd) = gSession.proc.dapIn {
+            let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: gOddSeq, kind: "disc", id: 0, extra: ""
+                seq: seq, kind: "disc", id: 0, extra: ""
             }
             )
-            sendReqFd(gDapIn, gOddSeq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
+            sendReqFd(dfd, seq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
         }
         gBps = []
         persistBps()
@@ -2608,7 +2588,7 @@ fn processListJson(): string {
 // always agree.
 fn apiStateJson(): string {
     var phase = "idle"
-    if gStarted {
+    if gSession.proc.started {
         phase = "running"
     }
     if gStopMsg.len > 0 {
@@ -2826,19 +2806,22 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, pendCh: &C
 fn reaperLoop(tickMs: i64, pendCh: Channel<Pending>): void {
     while true {
         sleepMs(tickMs)
-        if !gStarted || gPeers > 0 || gDapIn < 0 {
+        let Option.Some(dfd) = gSession.proc.dapIn else {
+            continue
+        }
+        if gPeers > 0 {
             continue
         }
         if epochMillis() - gLastActivityMs < gSession.server.idleTtlSecs * 1000 {
             continue
         }
         logEvent("session idle", $"no peers for {gSession.server.idleTtlSecs}s — terminating debuggee")
-        gOddSeq = gOddSeq + 2
+        let seq = gSession.proc.nextSeq()
         let _p = pendCh.trySend(Pending {
-            seq: gOddSeq, kind: "disc", id: 0, extra: ""
+            seq: seq, kind: "disc", id: 0, extra: ""
         }
         )
-        sendReqFd(gDapIn, gOddSeq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
+        sendReqFd(dfd, seq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
     }
 }
 
@@ -3449,22 +3432,14 @@ pub fn webMain(argv: Vec<string>): i32 {
     let port = args.getI64("port")
 
     // Shared session: one bus, one broadcaster, any number of peers.
-    gStarted = false
     gHistory = "[]"
     gSession.server.restored = false
-    gDapIn = -1
-    gPty = Option.None
-    gOddSeq = -1 as i64
-    gStdinBuf = ""
     gCapsMsg = ""
     gStopMsg = ""
     gThreadsMsg = ""
     gRegionsMsg = ""
     gNextClient = 1
     gBps = []
-    gPendingConfig = ""
-    gPendingStopAtMain = false
-    gPendingRun = false
     gSession.server.sessionId = newSessionName(sessionNameSeeds())
     gPeers = 0
     gLastActivityMs = epochMillis()

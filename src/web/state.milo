@@ -8,6 +8,12 @@
 from "../dap/session" import {
     LaunchSpec
 }
+from "std/pty" import {
+    Pty
+}
+from "std/term" import {
+    TermSize
+}
 
 // A browser-set breakpoint. Keyed by (path, line); empty
 // condition/hitCondition/logMessage mean a plain breakpoint — the keys are
@@ -73,8 +79,69 @@ pub struct ServerInfo {
     restored: bool, // booted idle and staged history[0] (banner hint)
 }
 
+// js-debug runs the debuggee under a CHILD session it asks us to start (the
+// startDebugging reverse request). The child's launch body arrives in that
+// request and replaces our built launch args.
+pub struct ChildLaunch {
+    body: string,
+    request: string, // "launch" | "attach": the child's DAP command
+}
+
+// A forced run must kill+rerun (a new config can't ride a live adapter). D's
+// terminated cleanup consumes this and re-spawns once the old debuggee is gone.
+pub struct PendingRun {
+    config: Option<string>, // None reruns the current config
+    stopAtMain: bool, // the force-run's per-run stopAtMain
+}
+
+// The adapter and debuggee of the current run. D's teardown re-arms all of it
+// when the run ends.
+pub struct RunState {
+    started: bool,
+    // R's write fd into the adapter; Some exactly while a run is live.
+    dapIn: Option<i32>,
+    // The live debuggee pty, for stdin and resize.
+    pty: Option<Pty>,
+    // The browser sizes its terminal on mount, before any pty exists, so the
+    // last size asked for is kept and applied at spawn.
+    term: Option<TermSize>,
+    oddSeq: i64, // +2 per R send → 1, 3, 5, … (D's DapClient uses even)
+    stdinBuf: string, // keystrokes typed before the pty exists
+    // Recent adapter stderr, captured off the DAP stream (see startArgs). Surfaced
+    // only when the adapter dies before the handshake completes — otherwise silence.
+    // Bounded to the first chunk that matters (a startup traceback); reset each run.
+    adapterStderr: string,
+    // js-debug support: its DAP server only listens on TCP, so the node dialect
+    // spawns it (`node dapDebugServer.js 0`), parses the printed port, and connects.
+    // srvPid/srvPort are that spawned server — the pid is SIGTERMed at session
+    // teardown, since closing the sockets leaves it listening.
+    srvPid: Option<i64>,
+    srvPort: Option<i64>,
+    // pid of a LAUNCHED debuggee, from the adapter's `process` event (None for attach).
+    // Behind a spawned TCP adapter the debuggee is our grandchild: killing the
+    // adapter server orphans it instead of ending it, so teardown checks this pid.
+    debuggeePid: Option<i64>,
+    // Write fd of the PARENT session after a js-debug child handoff.
+    // The parent is the session that owns the launched process: a disconnect sent
+    // only to the child ends the debug connection and leaves the program running.
+    parentIn: Option<i32>,
+    child: Option<ChildLaunch>,
+    pendingRun: Option<PendingRun>,
+    runStartMs: i64, // epochMillis at adapter spawn — run duration
+    lastExit: Option<i64>, // debuggee exitCode from the "exited" event
+}
+
+impl RunState {
+    // The seq for the next request R sends.
+    fn nextSeq(self: &mut Self): i64 {
+        self.oddSeq = self.oddSeq + 2
+        return self.oddSeq
+    }
+}
+
 pub struct Session {
     target: Target,
+    proc: RunState,
     server: ServerInfo,
 }
 
@@ -86,6 +153,12 @@ pub var gSession: Session = Session {
         },
         stopAtMain: false,
         excFilters: Option.None,
+    },
+    proc: RunState {
+        started: false, dapIn: Option.None, pty: Option.None, term: Option.None,
+        oddSeq: -1, stdinBuf: "", adapterStderr: "", srvPid: Option.None,
+        srvPort: Option.None, debuggeePid: Option.None, parentIn: Option.None,
+        child: Option.None, pendingRun: Option.None, runStartMs: 0, lastExit: Option.None,
     },
     server: ServerInfo {
         sessionId: "", listenPort: Option.None, startedAt: 0, noBrowser: false,
