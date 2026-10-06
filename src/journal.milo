@@ -73,6 +73,10 @@ fn jrnMaxBytes(): i64 {
 // window: all bounded, none deleted. `trunc` records the original length so a
 // reader knows the text is a prefix and not valid JSON.
 let PAYLOAD_MAX: i64 = 4096
+// A stop is kept whole up to this: its frames and locals are what the timeline
+// replays, and a prefix of them is not JSON. Bounded all the same (20 frames,
+// top-level locals), and one row per stop, so it is the rows worth the space.
+let STOPPED_PAYLOAD_MAX: i64 = 65536
 
 // Checking a file size on every insert is a stat() per debugger event. Every
 // this many rows OR this many bytes written, whichever comes first: rows alone
@@ -333,7 +337,16 @@ pub fn journalOut(payload: &string): void {
     if kind == "ptyData" || kind == "source" {
         return
     }
-    jrnInsert("out", kind, "", "", 0 - 1, "", payload, jrnPromote(doc))
+    // A stop's attribution (by: agent|user, who: the peer's label) goes in the
+    // peer/who columns, where an in row's sender is, so the log says who
+    // caused a stop without anyone parsing payloads.
+    var peer: string = ""
+    var who: string = ""
+    if kind == "stopped" {
+        peer = doc.str("by") ?? ""
+        who = doc.str("who") ?? ""
+    }
+    jrnInsert("out", kind, peer, who, 0 - 1, "", payload, jrnPromote(doc))
 }
 
 // JrnPromoted out of the payload because these three are what every question
@@ -361,9 +374,13 @@ fn jrnInsert(dir: string, kind: string, peer: string, who: string, okI: i64, err
     }
     var text = payload.clone()
     var trunc: i64 = 0
-    if text.len > PAYLOAD_MAX {
+    var cap = PAYLOAD_MAX
+    if dir == "out" && kind == "stopped" {
+        cap = STOPPED_PAYLOAD_MAX
+    }
+    if text.len > cap {
         trunc = text.len
-        text = text.substr(0, PAYLOAD_MAX)
+        text = text.substr(0, cap)
     }
     dbReset(gIns[0])
     let _1 = dbBindText(gIns[0], 1, gJournalSession.clone())
