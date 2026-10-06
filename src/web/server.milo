@@ -31,10 +31,7 @@
 // Run: dapweb-web --program /tmp/dapweb_demo --source /tmp/dapweb_demo.c [--port 8080]
 
 from "std/net" import {
-    TcpListener
-}
-from "std/os" import {
-    close
+    TcpListener, TcpStream
 }
 from "std/io" import {
     readFile, fdChannel
@@ -282,14 +279,16 @@ fn reaperLoop(tickMs: i64, pendCh: Channel<Pending>): void {
     }
 }
 
-fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): void {
+// `conn` owns the socket for the whole request: every return below closes it by
+// dropping the stream, except a websocket upgrade, which hands it to the WsConn.
+fn handleConnection(conn: TcpStream, bus: Channel<string>, pendCh: Channel<Pending>): void {
+    var stream = conn
+    let fd = stream.rawFd()
     let Option.Some(req) = readRequest(fd) else {
-        close(fd)
         return
     }
     if !requestAllowed(req) {
         sendHttp(fd, 403, "text/plain", "forbidden: dapweb only answers localhost, same-origin")
-        close(fd)
         return
     }
     if sealedWith(req.buf, (raw: &string): bool => isWsUpgrade(raw)) {
@@ -303,14 +302,12 @@ fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): vo
             }
             match sealedWith(req.buf, (raw: &string): Result<WsConn, string> => wsAccept(fd, raw)) {
                 Result.Ok(ws) => {
+                    // The WsConn closes the socket from here on.
+                    let _released = stream.take()
                     handleDebugWs(ws, kind, bus, pendCh)
                 }
-                Result.Err(_e) => {
-                    close(fd)
-                }
+                Result.Err(_e) => {}
             }
-        } else {
-            close(fd)
         }
         return
     }
@@ -319,7 +316,6 @@ fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): vo
     let apiPath = req.path.clone()
     if apiPath == "/api/state" {
         sendHttp(fd, 200, "application/json", apiStateJson())
-        close(fd)
         return
     }
     // Reports on the configured target only, with no path parameter: the API
@@ -327,7 +323,6 @@ fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): vo
     // arbitrary-file header reader.
     if apiPath == "/api/processes" {
         sendHttp(fd, 200, "application/json", processListJson())
-        close(fd)
         return
     }
     // Every live dapweb on this machine, for the /sessions dashboard. Reads
@@ -336,7 +331,6 @@ fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): vo
     // drives the session on rather than by reading the source.
     if apiPath == "/api/commands" {
         sendHttp(fd, 200, "application/json", commandsJson())
-        close(fd)
         return
     }
     // What this machine's sessions have done. Same rows `dapweb log` prints,
@@ -369,33 +363,27 @@ fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): vo
             rows = rows.raw(r)
         }
         sendHttp(fd, 200, "application/json", Json.obj().bool("ok", true).arr("rows", rows).build())
-        close(fd)
         return
     }
     if apiPath == "/api/sessions" {
         sendHttp(fd, 200, "application/json", sessionsJson(gSession.server.sessionId))
-        close(fd)
         return
     }
     if apiPath == "/api/spawn" {
         if req.method != "POST" {
             sendHttp(fd, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
-            close(fd)
             return
         }
         sendHttp(fd, 200, "application/json", spawnSessionJson())
-        close(fd)
         return
     }
     if apiPath == "/api/binfo" {
         sendHttp(fd, 200, "application/json", binInfoJson(gSession.target.spec.binPath))
-        close(fd)
         return
     }
     if apiPath == "/api/cmd" {
         if req.method != "POST" {
             sendHttp(fd, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
-            close(fd)
             return
         }
         let body = readBody(fd, req)
@@ -405,7 +393,6 @@ fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): vo
         }
         let reply = apiRunCmd(body, req.param("await"), timeoutMs, apiWho(req), bus, pendCh)
         sendHttp(fd, 200, "application/json", reply)
-        close(fd)
         return
     }
 
@@ -415,7 +402,6 @@ fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): vo
     } else {
         sendHttp(fd, 404, "text/plain", "not found")
     }
-    close(fd)
 }
 
 fn acceptLoop(listener: TcpListener, bus: Channel<string>, pendCh: Channel<Pending>): void {
@@ -423,12 +409,10 @@ fn acceptLoop(listener: TcpListener, bus: Channel<string>, pendCh: Channel<Pendi
     while true {
         match l.accept() {
             Result.Ok(conn) => {
-                var c = conn
-                let fd = c.take()
                 let connBus = bus.clone()
                 let connPend = pendCh.clone()
                 Task.spawn(move(): void => {
-                    handleConnection(fd, connBus, connPend)
+                    handleConnection(conn, connBus, connPend)
                 }
                 )
             }
