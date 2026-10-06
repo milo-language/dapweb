@@ -6,7 +6,7 @@
 // which port a session is on, so the screen you need is the one you can reach
 // without already being in a session.
 import React, { useCallback, useEffect, useState } from "react";
-import { Mark } from "./App";
+import { Mark } from "./Mark";
 
 type Row = {
   id: string; pid: number; port: number;
