@@ -23,6 +23,9 @@ from "std/term" import {
 from "std/sync" import {
     Channel
 }
+from "std/seal" import {
+    Shared, seal
+}
 
 // A browser-set breakpoint. Keyed by (path, line); empty
 // condition/hitCondition/logMessage mean a plain breakpoint — the keys are
@@ -122,7 +125,7 @@ pub struct RunState {
     adapterStderr: string,
     // js-debug support: its DAP server only listens on TCP, so the node dialect
     // spawns it (`node dapDebugServer.js 0`), parses the printed port, and connects.
-    // srvPid/srvPort are that spawned server — the pid is SIGTERMed at session
+    // srvPid/srvPort are that spawned server; the pid is SIGTERMed at session
     // teardown, since closing the sockets leaves it listening.
     srvPid: Option<i64>,
     srvPort: Option<i64>,
@@ -151,14 +154,14 @@ impl RunState {
 // one broadcaster fans the session bus out to every connected peer.
 pub struct Sink {
     id: i64,
-    ch: Channel<string>,
+    ch: Channel<Shared>,
 }
 
 pub struct Peers {
     // The peer registry lives here, not in a Channel<Sink>: std/sync moves a
     // payload with memcpy + memset-to-zero and lets the zeroed original drop, and
     // Channel's own Drop dereferences its handle unconditionally — so a Sink (which
-    // owns a Channel<string>) segfaults the moment it is sent through a channel.
+    // owns a Channel) segfaults the moment it is sent through a channel.
     // Every peer task and the broadcaster are green tasks on one scheduler thread
     // and none of the register/unregister/fanout sequences contain a yield
     // point, so direct mutation is exactly as atomic as the channel round-trip was.
@@ -264,31 +267,31 @@ impl Session {
     // The late-join replay, in the order a tab applies it: hello resets the
     // client, source and caps before the breakpoints that key on them, then the
     // stop and what refines it, then the terminal history.
-    fn snapshot(self: &Self): Vec<string> {
-        var out: Vec<string> = []
-        out.push(helloMsg(self))
+    fn snapshot(self: &Self): Vec<Shared> {
+        var out: Vec<Shared> = []
+        out.push(seal(helloMsg(self)).share())
         if self.target.spec.srcPath.len > 0 {
-            out.push(sourceMsg(self.target.spec.srcPath))
+            out.push(seal(sourceMsg(self.target.spec.srcPath)).share())
         }
         if let Option.Some(c) = self.stop.caps {
-            out.push(capsMsg(c))
+            out.push(seal(capsMsg(c)).share())
         }
         for bp in self.persisted.bps {
-            out.push(bpSyncMsg(bp))
+            out.push(seal(bpSyncMsg(bp)).share())
         }
         if let Option.Some(st) = self.stop.stop {
-            out.push(stoppedMsg(st))
+            out.push(seal(stoppedMsg(st)).share())
         }
         if let Option.Some(t) = self.stop.threads {
-            out.push(threadsMsg(t))
+            out.push(seal(threadsMsg(t)).share())
         }
         if let Option.Some(r) = self.stop.regions {
-            out.push(regionsMsg(r))
+            out.push(seal(regionsMsg(r)).share())
         }
         // Flagged so a same-session reconnect (which kept its scrollback) can
         // drop it; a fresh/new-session tab renders it.
         for o in self.output {
-            out.push(Json.obj().str("type", "output").str("text", o.text).str("category", o.category).bool("replay", true).build())
+            out.push(seal(Json.obj().str("type", "output").str("text", o.text).str("category", o.category).bool("replay", true).build()).share())
         }
         return out
     }

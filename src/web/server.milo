@@ -11,7 +11,7 @@
 //                    seqs for its own requests); handles runInTerminal reverse
 //                    requests by spawning the debuggee in a std/pty.
 //   WS-writer  (W) — the ONLY task that writes the socket. Fed by a
-//                    Channel<string> + self-pipe wake (Channel.recv would
+//                    Channel<Shared> + self-pipe wake (Channel.recv would
 //                    pthread_cond_wait and stall the whole green scheduler).
 //   PTY pump   (P) — pty master → WS "ptyData".
 //
@@ -41,6 +41,9 @@ from "std/runtime" import {
 }
 from "std/sync" import {
     Channel
+}
+from "std/seal" import {
+    Sealed, Shared, seal, sharedWith
 }
 from "std/json" import {
     Json
@@ -463,20 +466,27 @@ fn wsPush(ch: &Channel<string>, msg: string): void {
     }
 }
 
+// The per-peer twin of wsPush: peers are fed sealed messages, see broadcastLoop.
+fn peerPush(ch: &Channel<Shared>, msg: Shared): void {
+    if !ch.trySend(msg) {
+        eprint("[srv] ws out channel full, dropping frame\n")
+    }
+}
+
 // W: sole socket writer. Parks on its channel until sinkUnregister closes it,
 // then drains what is left. R joins this task before releasing the socket fd:
 // otherwise a frame still queued here lands on a closed fd or on whatever
 // connection reused that fd number.
-fn wsWriterLoop(fd: i32, ch: Channel<string>): void {
+fn wsWriterLoop(fd: i32, ch: Channel<Shared>): void {
     // Borrowed view of the conn: its Drop skips teardown (R owns the real one).
     var conn = WsConn.view(fd, 0, false)
     var rx = ch
     for m in rx {
-        let _r = conn.sendText(m)
+        let _r = conn.sendShared(m)
     }
 }
 
-fn sinkRegister(id: i64, ch: &Channel<string>): void {
+fn sinkRegister(id: i64, ch: &Channel<Shared>): void {
     gSession.peers.sinks.push(Sink {
         id: id, ch: ch.clone(),
     }
@@ -508,8 +518,11 @@ fn broadcastLoop(bus: Channel<string>): void {
         // replays go straight to their own channel and are deliberately not
         // recorded twice.
         journalOut(m)
+        // Sealed once, then each peer gets a refcount clone: N peers share one
+        // buffer instead of holding N copies of every frame.
+        let sh = seal(m).share()
         for sink in gSession.peers.sinks {
-            wsPush(sink.ch, m.clone())
+            peerPush(sink.ch, sh.clone())
         }
     }
 }
@@ -2588,7 +2601,7 @@ fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: 
         }
         return Json.obj().bool("ok", true).build()
     }
-    let ch = Channel<string>.new(256)!
+    let ch = Channel<Shared>.new(256)!
     let clientId = gSession.peers.nextClient
     gSession.peers.nextClient = gSession.peers.nextClient + 1
     sinkRegister(clientId, ch)
@@ -2602,7 +2615,8 @@ fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: 
     var out: string = ""
     while epochMillis() < deadline {
         match ch.tryRecv() {
-            Option.Some(m) => {
+            Option.Some(sm) => {
+                let m = sharedWith(sm, (s: &Sealed): string => s.text(s.span()))
                 let mt = jStr(m, "type")
                 if mt == awaitType {
                     out = m.clone()
@@ -2633,7 +2647,7 @@ fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: 
 fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, pendCh: &Channel<Pending>): void {
     var conn = ws
 
-    let ch = Channel<string>.new(256)!
+    let ch = Channel<Shared>.new(256)!
     let wfd = conn.fd
     // Channel handles are refcounted and @send: the writer task outlives this
     // frame, so it gets its own retained handle (as does the registry's Sink).
@@ -2653,7 +2667,7 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, pendCh: &C
     logEvent("peer connected", $"{peerKind}  {peerCountStr()}")
 
     for m in gSession.snapshot() {
-        wsPush(ch, m.clone())
+        peerPush(ch, m.clone())
     }
 
     while true {
