@@ -22,7 +22,7 @@ export function BottomPanel(p: {
   termRef: React.MutableRefObject<Terminal | null>; consoleAppend: (t: string, c?: string) => void;
   frame0Ref: React.MutableRefObject<number>; caps: Record<string, any>; stopped: boolean;
   locals: Var[]; frames: Frame[]; stopSeq: number; registersRef: number; regions: Region[];
-  setVar: SetVarFn; viewMemory: (a: string) => void;
+  setVar: SetVarFn; viewMemory: (a: string) => void; watchAddr?: (addr: string, size: number) => void;
   mem: { addr: string; bytes: Uint8Array } | null; memAddr: string; setMemAddr: (a: string) => void; memErr: string;
   sessionId: string; openFile: (path: string, line?: number) => void;
 }) {
@@ -88,7 +88,7 @@ export function BottomPanel(p: {
       <div className="tabpane" style={{ display: tab === "mem" && memLinks ? "flex" : "none" }}>
         <MemView mem={p.mem} addr={p.memAddr} setAddr={p.setMemAddr} err={p.memErr}
                  enabled={memLinks && stopped} onLoad={viewMemory} classify={classifyRegion}
-                 locals={p.locals} frames={frames} regFrame={regFrame} />
+                 locals={p.locals} frames={frames} regFrame={regFrame} onWatch={stopped ? p.watchAddr : undefined} />
       </div>
       {/* Always mounted (display-toggled): RegistersPanel reports sp/fp/lr up via
           onFrame, which the Memory and Stack views depend on regardless of tab. */}

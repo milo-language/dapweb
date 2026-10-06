@@ -278,6 +278,10 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
 .menu-item:disabled { opacity: 0.4; cursor: default; }
 .menu-hint { color: var(--muted); font-size: 10px; }
 .menu-sep { height: 1px; margin: 4px 6px; background: var(--border); }
+/* the same menu, opened at the pointer by a right-click */
+.ctxmenu { position: fixed; top: auto; right: auto; margin-top: 0; min-width: 0; }
+/* the memory word a context menu is about */
+.memsel { outline: 1px solid var(--accent); border-radius: 2px; }
 /* Session-info popover: adapter + caps — diagnostics, kept quiet */
 .info-pop { position: absolute; top: 44px; right: 14px; z-index: 40;
             width: 340px; padding: 8px 10px; background: var(--panel);
@@ -331,6 +335,8 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
 .bpdot { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--bp); }
 .bpdot.cond { background: var(--stop); }
 .bpdot.log { border-radius: 2px; transform: rotate(45deg); }
+/* a watchpoint: hollow square, breakpoint red. Not a click target (no enable toggle in DAP data bps). */
+.bpdot.watch { background: transparent; border: 2px solid var(--bp); border-radius: 2px; cursor: default; }
 .bpline { flex: none; }
 .bpsrc { color: var(--muted); font-size: 10px; flex: 1; min-width: 0;
          white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }

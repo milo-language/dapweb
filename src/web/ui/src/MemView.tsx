@@ -3,6 +3,7 @@ import type { Frame, Var } from "./session";
 import { expandRef, readMemAt } from "./rpc";
 import { RegionType, REGION_HELP } from "./regions";
 import { Val } from "./Val";
+import { CtxMenu } from "./CtxMenu";
 
 // Printable-ASCII prefix of a byte buffer, up to the first NUL. Returns "" if it
 // doesn't start with a decent (≥2 char) run — i.e. probably not a C string.
@@ -25,13 +26,16 @@ type Anno = { text: string; full?: string; cls?: string; follow?: { ref: number;
 
 // hex/dec/bin dump with ASCII column, 16 bytes per row. Slots are annotated
 // with DWARF/frame knowledge and typed pointers can be followed into their struct.
-export function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, locals, frames, regFrame }: {
+export function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, locals, frames, regFrame, onWatch }: {
   mem: { addr: string; bytes: Uint8Array } | null;
   addr: string; setAddr: (a: string) => void; err: string;
   enabled: boolean; onLoad: (a: string) => void;
   classify: ((a: string) => RegionType | null) | null;
   locals: Var[]; frames: Frame[];
   regFrame: { sp: string; fp: string; lr: string };
+  // Right-click a word: break when it changes. Absent when the adapter cannot
+  // watch a raw address or nothing is stopped.
+  onWatch?: (addr: string, size: number) => void;
 }) {
   const [radix, setRadix] = useState<16 | 10 | 2>(16);
   // Element size in bytes (8/16/32/64-bit). Bytes group into little-endian
@@ -43,6 +47,7 @@ export function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, lo
   // Peeked target previews: pointer-target hex → decoded C-string ("" = fetched,
   // no string). Const/data pointers are auto-peeked so literals show inline.
   const [peeks, setPeeks] = useState<Map<string, string>>(new Map());
+  const [menu, setMenu] = useState<{ x: number; y: number; addr: string; size: number } | null>(null);
   // Digits per element by radix×stride; dec padded to the max value's width.
   const decLen: Record<number, number> = { 1: 3, 2: 5, 4: 10, 8: 20 };
   const elemChars = radix === 16 ? 2 * stride : radix === 2 ? 8 * stride : decLen[stride];
@@ -147,13 +152,21 @@ export function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, lo
       for (let g = 0; g < chunk.length; g += 8) {
         const sub = chunk.slice(g, g + 8);
         // Render the word as `elemsPerWord` little-endian elements of `stride` bytes.
-        const els: string[] = [];
+        // Each element is its own span so a right-click knows which word (and
+        // how wide) to watch: the stride the user picked is the size they mean.
+        const els: React.ReactNode[] = [];
         for (let k = 0; k + stride <= sub.length; k += stride) {
           let v = 0n;
           for (let i = stride - 1; i >= 0; i--) v = (v << 8n) | BigInt(sub[k + i]);
-          els.push(v.toString(radix).padStart(elemChars, "0"));
+          const at = "0x" + (baseAddr + BigInt(off + g + k)).toString(16);
+          if (k > 0) els.push(" ");
+          els.push(
+            <span key={k} className={menu?.addr === at ? "memsel" : undefined}
+                  onContextMenu={onWatch ? (e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, addr: at, size: stride }); } : undefined}>
+              {v.toString(radix).padStart(elemChars, "0")}
+            </span>);
         }
-        const text = els.join(" ");
+        const text = els;
         let ptr = 0n;
         for (let i = sub.length - 1; i >= 0; i--) ptr = (ptr << 8n) | BigInt(sub[i]);
         const looksPtr = sub.length === 8 && ptr >= 0x10000n && ptr < 0x800000000000n;
@@ -239,6 +252,11 @@ export function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, lo
           : rows.length ? rows
           : <span className="hint">click ⌗ next to a variable, a 0x… address in Locals/Watch, or enter one above</span>}
       </div>
+      {menu && onWatch && (
+        <CtxMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}
+                 items={[{ label: "Break when value changes", hint: `${menu.size * 8}-bit at ${menu.addr}`,
+                           onClick: () => onWatch(menu.addr, menu.size) }]} />
+      )}
       {follow && (
         <div className="followpanel">
           <div className="follow-hd">

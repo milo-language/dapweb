@@ -91,4 +91,19 @@ ok(fresh.stop === null && fresh.phase === "idle" && !fresh.hasRegisters, "a new 
 const joinLive = fold(initialSession, [{ ...hello, phase: "running" }]);
 ok(joinLive.phase === "running", "joining a live session starts running");
 
+// ── data breakpoints: the server sends the whole list each time ──
+{
+  const w = { dataId: "100008000/4", label: "g_total", description: "4 bytes at 100008000 g_total",
+              accessType: "write", condition: "", hitCondition: "", canPersist: false, verified: true, message: "" };
+  let d = fold(initialSession, [hello, { type: "dataBreakpoints", list: [w] }]);
+  ok(d.dataBps.length === 1 && d.dataBps[0].label === "g_total" && d.dataBpsDropped === 0, "a watch list replaces the set", d.dataBps);
+  const st = sessionReducer(d, { ...stopBp, line: 18, reason: "data breakpoint", description: "data breakpoint 1",
+                                 frames: [{ ...stopBp.frames[0], line: 18 }] });
+  ok(stopStatus(st.stop!).short === "paused on watchpoint · main.c:18", "a data breakpoint stop says paused on watchpoint", stopStatus(st.stop!));
+  d = fold(d, [{ type: "dataBreakpoints", list: [], dropped: 1 }]);
+  ok(d.dataBps.length === 0 && d.dataBpsDropped === 1, "the end of a run empties it and remembers how many went", d);
+  d = fold(d, [{ type: "dataBreakpoints", list: [w] }]);
+  ok(d.dataBpsDropped === 0, "a later change clears the note");
+}
+
 console.log(`\n${pass} passed`);

@@ -13,6 +13,11 @@ import type { Phase } from "./primary";
 
 export type Frame = { id: number; name: string; line: number; path: string; ipRef: string };
 export type Thread = { id: number; name: string };
+// One data breakpoint as the server sends it (DataBp in state.milo).
+export type DataBp = {
+  dataId: string; label: string; description: string; accessType: string;
+  condition: string; hitCondition: string; canPersist: boolean; verified: boolean; message: string;
+};
 export type Var = { name: string; value: string; ref: number; mref?: string; type?: string };
 // A memory-map region from lldb's `memory region --all` (server-parsed).
 // s/e are hex address strings; p = perms "rw-"; n = segment name or "".
@@ -42,6 +47,10 @@ export type SessionState = {
   // Registers tab stays put (and says why it is empty) after the run ends.
   hasRegisters: boolean;
   bps: Map<string, BpMeta>;  // bpKey → meta
+  // Data breakpoints (watchpoints), the server's whole list as last sent.
+  dataBps: DataBp[];
+  // How many the end of the last run cleared, for the panel to say so; 0 once the list changes again.
+  dataBpsDropped: number;
   files: Map<string, string>;  // path → content, from source pushes
   phase: Phase;
   exitCode: number | undefined;
@@ -64,7 +73,7 @@ export type SessionState = {
 export const initialSession: SessionState = {
   sessionId: "", program: "", sourcePath: "", adapterCmd: "", adapterId: "debugger",
   config: {}, history: [], configError: "", caps: {}, hasRegisters: false,
-  bps: new Map(), files: new Map(),
+  bps: new Map(), dataBps: [], dataBpsDropped: 0, files: new Map(),
   phase: "idle", exitCode: undefined,
   stop: null, stopSeq: 0,
   curTid: -1, frames: [], selFrame: 0, stopLine: 0, stopPath: "",
@@ -147,6 +156,8 @@ export function sessionReducer(s: SessionState, m: SessionAction): SessionState 
       else bps.delete(bpKey(m.path, m.line));
       return { ...s, bps };
     }
+    case "dataBreakpoints":
+      return { ...s, dataBps: m.list || [], dataBpsDropped: m.dropped || 0 };
     case "bpSync":
       return { ...s, bps: new Map(s.bps).set(bpKey(m.path, m.line), bpMetaOf(m)) };
     case "historyChanged":
@@ -209,7 +220,7 @@ export function sessionReducer(s: SessionState, m: SessionAction): SessionState 
 const STOP_WHY: Record<string, string> = {
   step: "paused after step", breakpoint: "paused on breakpoint", exception: "paused on exception",
   entry: "paused on entry", goto: "paused after goto",
-  "function breakpoint": "paused on function breakpoint", "data breakpoint": "paused on data breakpoint",
+  "function breakpoint": "paused on function breakpoint", "data breakpoint": "paused on watchpoint",
   "instruction breakpoint": "paused on instruction breakpoint",
 };
 const stopWhy = (st: Stop) =>

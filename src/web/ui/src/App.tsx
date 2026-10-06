@@ -421,6 +421,12 @@ export default function App() {
 
   const removeBp = (path: string, ln: number) => send({ cmd: "clearBreakpoint", path, line: ln });
 
+  // Data breakpoints: the server answers every peer with the new list, and a
+  // refusal arrives as a cmdError in the console.
+  const watchVar = (ref: number, name: string) => send({ cmd: "setDataBreakpoint", ref, name });
+  const watchAddr = (address: string, size: number) => send({ cmd: "setDataBreakpoint", address, size });
+  const removeDataBp = (dataId: string) => send({ cmd: "clearDataBreakpoint", dataId });
+
   // Enable/disable keeps the bp in the list; the server omits disabled ones
   // from the DAP request (absent = enabled, DAP has no per-bp enable).
   const setBpEnabled = (path: string, ln: number, meta: BpMeta) => {
@@ -439,7 +445,10 @@ export default function App() {
       if ((meta.enabled !== false) === anyBpEnabled) setBpEnabled(path, line, meta);
     }
   };
-  const clearAllBps = () => { for (const { path, line } of bpEntries()) removeBp(path, line); };
+  const clearAllBps = () => {
+    for (const { path, line } of bpEntries()) removeBp(path, line);
+    for (const d of S.dataBps) removeDataBp(d.dataId);
+  };
 
   // Locals of the selected frame. Clicking frames quickly races their replies,
   // so only the latest request may land.
@@ -695,6 +704,7 @@ export default function App() {
             <VarList vars={locals} disabled={!stopped} parentRef={scopeRef}
                      empty={stopped ? "no locals in this frame" : "run to a breakpoint to see local variables"}
                      onSetVar={caps.supportsSetVariable ? setVar : undefined}
+                     onWatch={caps.supportsDataBreakpoints ? watchVar : undefined}
                      onAddr={memLinks ? viewMemory : undefined} />
           </Panel>
           <Panel title="Call Stack" persist="dapweb.stackCollapsed" badge={frames.length || null}>
@@ -709,14 +719,15 @@ export default function App() {
           </Panel>
           <WatchPanel watches={watches} setWatches={setWatches} stopped={stopped} evalWatch={evalWatch}
                       onAddr={memLinks ? viewMemory : undefined} />
-          <Panel title="Breakpoints" persist="dapweb.bpsCollapsed" badge={bps.size || null} action={bps.size > 0 && (
+          <Panel title="Breakpoints" persist="dapweb.bpsCollapsed" badge={bps.size + S.dataBps.length || null} action={bps.size + S.dataBps.length > 0 && (
             <span className="bpacts">
               <button className="addbtn" title={anyBpEnabled ? "disable all" : "enable all"}
                       onClick={toggleAllBps}>⊘</button>
               <button className="addbtn" title="remove all" onClick={clearAllBps}>✕</button>
             </span>
           )}>
-            <BpList bps={bps} files={files} onJump={(p, ln) => openFile(p, ln)} onRemove={removeBp} onToggle={setBpEnabled}
+            <BpList bps={bps} dataBps={S.dataBps} dataBpsDropped={S.dataBpsDropped} onRemoveData={removeDataBp}
+                    files={files} onJump={(p, ln) => openFile(p, ln)} onRemove={removeBp} onToggle={setBpEnabled}
                     onEdit={(path, line, x, y) => setBpEdit({ path, line, x, y })} />
           </Panel>
           <ThreadsPanel threads={threads} tlocs={tlocs} curTid={curTid} onSelect={selectThread}
@@ -742,6 +753,7 @@ export default function App() {
                    binInfo={binInfo} dbgLabel={dbgLabel} termRef={termRef} consoleAppend={consoleAppend}
                    frame0Ref={frame0Ref} caps={caps} stopped={stopped} locals={locals} frames={frames}
                    stopSeq={stopSeq} registersRef={registersRef} setVar={setVar} viewMemory={viewMemory}
+                   watchAddr={caps.supportsDataBreakpoints && caps.supportsDataBreakpointBytes ? watchAddr : undefined}
                    mem={mem} memAddr={memAddr} setMemAddr={setMemAddr} memErr={memErr} regions={regions} />
       {showConfig ? (
         <>

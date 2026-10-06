@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import type { Var } from "./session";
 import { request } from "./rpc";
 import { Val } from "./Val";
+import { CtxMenu } from "./CtxMenu";
 
 // Python adapters (debugpy) return an object's dunder members behind synthetic
 // group rows — "special variables", "function variables", "class variables" —
@@ -29,23 +30,27 @@ export type SetVarFn = (parentRef: number, name: string, value: string) => Promi
 // it survives the leaf remount on resume. Its presence enables the highlight.
 export type PrevVals = React.MutableRefObject<Map<string, string>>;
 
-export function VarList({ vars, disabled, parentRef, onSetVar, onAddr, prevVals, gen, empty = "—" }: {
+// onWatch: "break when value changes", addressed the way DAP's dataBreakpointInfo
+// wants a variable: its container's variablesReference plus its name.
+export type WatchFn = (parentRef: number, name: string) => void;
+
+export function VarList({ vars, disabled, parentRef, onSetVar, onAddr, onWatch, prevVals, gen, empty = "—" }: {
   vars: Var[]; disabled: boolean; parentRef: number; onSetVar?: SetVarFn;
-  onAddr?: (a: string) => void; prevVals?: PrevVals; gen?: number; empty?: string;
+  onAddr?: (a: string) => void; onWatch?: WatchFn; prevVals?: PrevVals; gen?: number; empty?: string;
 }) {
   if (!vars.length) return <span className="hint">{empty}</span>;
   return (
     <div className="vartree">
-      {realFirst(vars).map((v, i) => <VarNode key={i} v={v} disabled={disabled} parentRef={parentRef} onSetVar={onSetVar} onAddr={onAddr} prevVals={prevVals} gen={gen} />)}
+      {realFirst(vars).map((v, i) => <VarNode key={i} v={v} disabled={disabled} parentRef={parentRef} onSetVar={onSetVar} onAddr={onAddr} onWatch={onWatch} prevVals={prevVals} gen={gen} />)}
     </div>
   );
 }
 
 // gen (registers only): bumps each stop. Open expandable nodes refetch their
 // kids on a gen change even when the ref is stable — else nested registers freeze.
-function VarNode({ v, disabled, parentRef, onSetVar, onAddr, prevVals, gen }: {
+function VarNode({ v, disabled, parentRef, onSetVar, onAddr, onWatch, prevVals, gen }: {
   v: Var; disabled: boolean; parentRef: number; onSetVar?: SetVarFn;
-  onAddr?: (a: string) => void; prevVals?: PrevVals; gen?: number;
+  onAddr?: (a: string) => void; onWatch?: WatchFn; prevVals?: PrevVals; gen?: number;
 }) {
   const [open, setOpen] = useState(false);
   const [kids, setKids] = useState<Var[] | null>(null);
@@ -57,6 +62,7 @@ function VarNode({ v, disabled, parentRef, onSetVar, onAddr, prevVals, gen }: {
   // Changed-since-last-step highlight (registers only). Diff against the value
   // this register held at the prior stop; first appearance is never "changed".
   const [changed, setChanged] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   useEffect(() => {
     setShown(null);
     if (prevVals) {
@@ -101,7 +107,10 @@ function VarNode({ v, disabled, parentRef, onSetVar, onAddr, prevVals, gen }: {
   return (
     <div>
       <div className={"var" + (v.ref > 0 ? " expandable" : "") + (open ? " open" : "")}
-           onClick={v.ref > 0 ? expand : undefined}>
+           onClick={v.ref > 0 ? expand : undefined}
+           onContextMenu={onWatch && !disabled
+             ? (e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); }
+             : undefined}>
         <span className="tw" />
         <span className="name">{v.name}</span>
         {/* Type chip is for locals only; on registers (prevVals set) the adapter's
@@ -125,10 +134,14 @@ function VarNode({ v, disabled, parentRef, onSetVar, onAddr, prevVals, gen }: {
                 onClick={(e) => { e.stopPropagation(); onAddr(v.mref!); }}>⌗</span>
         )}
       </div>
+      {menu && onWatch && (
+        <CtxMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}
+                 items={[{ label: "Break when value changes", hint: v.name, onClick: () => onWatch(parentRef, v.name) }]} />
+      )}
       {open && (
         <div className="kids">
           {kids
-            ? <VarList vars={kids} disabled={disabled} parentRef={v.ref} onSetVar={onSetVar} onAddr={onAddr} prevVals={prevVals} gen={gen} />
+            ? <VarList vars={kids} disabled={disabled} parentRef={v.ref} onSetVar={onSetVar} onAddr={onAddr} onWatch={onWatch} prevVals={prevVals} gen={gen} />
             : <span className="hint">…</span>}
         </div>
       )}
