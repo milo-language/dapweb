@@ -264,6 +264,10 @@ pub fn sendHttp(fd: i32, status: i32, contentType: &string, body: &string): void
     var resp: string = "HTTP/1.1 " + statusText + "\r\n"
     resp = resp + "Content-Type: " + contentType + "\r\n"
     resp = resp + "Content-Length: " + body.len.toString() + "\r\n"
+    // The UI bundle lives at a fixed URL (/app.js) and changes whenever the binary
+    // does (dapweb update). Without this a browser may keep running the old UI
+    // against the new server.
+    resp = resp + "Cache-Control: no-cache\r\n"
     resp = resp + "Connection: close\r\n\r\n"
     resp = resp + body
     // Accepted fds are non-blocking under the green runtime: a single write()

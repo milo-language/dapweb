@@ -45,6 +45,27 @@ export default function App() {
   // Anything that is guidance rather than state belongs in the console, where it
   // scrolls with the session instead of holding a strip of chrome forever.
   const [status, setStatus] = useState({ text: "connecting to the session…", short: "connecting", cls: "" });
+  // A step usually stops again within a few tens of ms. Showing "running" (and
+  // dropping the stop line, locals and inline values) for that blink made the
+  // whole screen flicker on every step, so the running state is shown only if
+  // no stop has arrived after a short grace. `busy` disables the controls at once
+  // so the grace cannot be used to send a second step.
+  const resumeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [busy, setBusy] = useState(false);
+  const settle = () => {
+    if (resumeTimer.current) { clearTimeout(resumeTimer.current); resumeTimer.current = null; }
+    setBusy(false);
+  };
+  const resumeSoon = (st: { text: string; short: string; cls: string }) => {
+    settle();
+    setBusy(true);
+    resumeTimer.current = setTimeout(() => {
+      resumeTimer.current = null;
+      dispatch({ type: "local/resumed" });
+      setStatus(st);
+      setBusy(false);
+    }, 300);
+  };
   // Offline gets more than the status pill: a banner, because every control in
   // the app is a silent no-op until the socket comes back.
   const [offline, setOffline] = useState(false);
@@ -362,6 +383,7 @@ export default function App() {
           else setViewPath(sp);
           setTabs((t) => (t.includes(sp) ? t : [...t, sp]));
         }
+        settle();
         setStatus(stopStatus(stopOf(m)));
         // Keep the asm pane live across steps; auto-open it for no-source frames.
         if (f0 && (!hasSrc(f0.path) || disasmOpenRef.current) && f0.ipRef) requestDisasm(f0);
@@ -395,6 +417,7 @@ export default function App() {
         }
         const code: number | undefined = typeof m.exitCode === "number" ? m.exitCode : undefined;
         const ex = exitLabel(code);
+        settle();
         setStatus({ text: `${ex}: press Run again to start it over`, short: ex, cls: code === 0 ? "done" : "" });
         termPut(termRef.current, "repl", "\r\n\x1b[2m[dapweb] session ended, press Run again to start over\x1b[0m\r\n");
       }
@@ -588,14 +611,12 @@ export default function App() {
     send({ cmd: "restart" });
   };
   const resume = (cmd: string, granularity?: string) => {
-    dispatch({ type: "local/resumed" });
-    setStatus({ text: "running…", short: "running", cls: "running" });
+    resumeSoon({ text: "running…", short: "running", cls: "running" });
     send({ cmd, tid: tidRef.current, ...(granularity ? { granularity } : {}) });
   };
   // The editor's line actions. Stable, so the editor's action set is not rebuilt per render.
   const runToLine = useCallback((path: string, line: number) => {
-    dispatch({ type: "local/resumed" });
-    setStatus({ text: `running to line ${line}…`, short: "running", cls: "running" });
+    resumeSoon({ text: `running to line ${line}…`, short: "running", cls: "running" });
     send({ cmd: "runToCursor", path, line, tid: tidRef.current });
   }, []);
   const gotoLine = useCallback((path: string, line: number) => {
@@ -661,7 +682,7 @@ export default function App() {
         </a>
         <TargetBar cfg={cfg} history={cfgHist} adapterCmd={adapterCmd} readCfg={readCfg} writeCfg={writeCfg}
                    onEnter={() => runRef.current?.()} />
-        <Transport primary={primary} phase={phase} asm={!!disasm} inlineAsm={inlineAsm}
+        <Transport primary={busy ? { ...primary, disabled: true } : primary} phase={busy ? "running" : phase} asm={!!disasm} inlineAsm={inlineAsm}
                    canInstrStep={canInstrStep} canDisasm={stopped && !!caps.supportsDisassembleRequest}
                    onPrimary={() => {
                      if (primary.kind === "continue") resume("continue");
