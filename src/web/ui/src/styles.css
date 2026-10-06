@@ -18,7 +18,7 @@ body {
 }
 /* Everything that is program text rather than chrome. Grouped in one place so
    the rule above stays enforceable instead of decaying into per-widget taste. */
-.target-input, .target-item, .proc-pid, .bin-path, .hist-prog, .hist-src,
+.target-main, .target-args, .tm-input, .tm-main, .tm-dim, .bin-path, .hist-prog, .hist-src,
 .filetab, .cap, .info-line, .frame .tloc, .bpline, .bpsrc, .bpdetail,
 .vartree .var .name, .vartree .var .vtype, .vartree .var .val, .varedit, .addr,
 .wrow .expr, .wrow .wval, .console-input input, .console-input .prompt, .comp,
@@ -53,7 +53,7 @@ header {
 .menu-wrap [data-tip]:hover::after { left: auto; right: 0; transform: none; }
 /* A tip over an open menu or dropdown list is noise on top of the answer. */
 .menu-wrap:has(.menu-pop) [data-tip]:hover::after,
-.targetbar:has(.target-menu) [data-tip]:hover::after { display: none; }
+.targetbar:has(.tm-backdrop) [data-tip]:hover::after { display: none; }
 
 /* Icon-only debugger controls, grouped run|step|session; the tip above explains.
    Icons are VS Code codicons — the ttf ships inside monaco (build.sh copies it). */
@@ -649,18 +649,6 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
    clusters. It is also the only element allowed to absorb the row's slack. */
 .targetbar { position: relative; display: inline-flex; align-items: center; gap: 6px;
              flex: 1 1 340px; min-width: 200px; max-width: 620px; }
-.target-input { flex: 1; min-width: 0; background: var(--bg); color: var(--fg);
-                border: 1px solid var(--border); border-radius: 0 4px 4px 0; border-left: none;
-                padding: 4px 8px; font: inherit; font-size: 12px; outline: none; }
-.target-input:hover { border-color: var(--muted); }
-.target-input:focus { border-color: var(--accent); }
-.target-input::placeholder { color: var(--muted); opacity: 0.7; }
-.target-menu { position: absolute; top: 100%; left: 0; right: 0; z-index: 46; margin-top: 3px;
-               background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
-               box-shadow: 0 6px 20px rgba(0,0,0,0.55); max-height: 260px; overflow: auto; }
-.target-item { padding: 5px 10px; font-size: 11px; cursor: pointer; white-space: nowrap;
-               overflow: hidden; text-overflow: ellipsis; }
-.target-item:hover { background: rgba(255,255,255,0.08); }
 
 /* Another peer is driving. Magenta everywhere, matching the console tag, so the
    two readings of the same event are obviously the same event. */
@@ -718,21 +706,6 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
    select and a hand-edited launch.json can never disagree.
    appearance:none + our own caret — the native macOS control is light-on-light
    and ignores the panel background. */
-.mode-select { flex: none; appearance: none; -webkit-appearance: none; cursor: pointer;
-               font: inherit; font-size: 11px; padding: 4px 20px 4px 9px;
-               background: var(--surface); color: var(--fg);
-               border: 1px solid var(--border); border-radius: 4px 0 0 4px;
-               background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
-                                 linear-gradient(135deg, var(--muted) 50%, transparent 50%);
-               background-position: calc(100% - 12px) 11px, calc(100% - 8px) 11px;
-               background-size: 4px 4px, 4px 4px; background-repeat: no-repeat; }
-.mode-select:hover { border-color: var(--muted); }
-.mode-select:focus { outline: none; border-color: var(--accent); }
-.mode-select.attach { color: var(--stop); }
-/* The popup itself is drawn by the OS; only its options can be coloured. */
-.mode-select option { background: var(--panel); color: var(--fg); }
-.target-note { padding: 6px 10px; font-size: 11px; color: var(--muted); white-space: normal; }
-.proc-pid { display: inline-block; min-width: 52px; color: var(--accent); }
 
 
 /* ── /sessions dashboard ─────────────────────────────────────────────────────
@@ -804,3 +777,43 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
 .sessions-new .plus { font-size: 15px; font-weight: 400; line-height: 1; margin-top: -1px; }
 .sessions-page code { background: var(--panel); border: 1px solid var(--border);
                       border-radius: 4px; padding: 1px 5px; }
+
+/* Target chip: what is being debugged, at a glance; the dialog does the editing. */
+.target-chip { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%;
+               height: 26px; padding: 0 10px; border-radius: 6px; cursor: pointer;
+               background: var(--surface); color: var(--fg); border: 1px solid var(--border); font: inherit; }
+.target-chip:hover { background: var(--surface-hi); border-color: var(--muted); }
+.target-mode { flex: none; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.target-chip.attach .target-mode { color: var(--stop); }
+.target-main { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.target-main em { color: var(--muted); font-weight: 400; font-style: normal; }
+.target-args { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.target-caret { flex: none; color: var(--muted); font-size: 10px; }
+
+/* Target dialog, command-palette style: wide enough for whole paths. */
+.tm-backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(1,4,9,0.55);
+               display: flex; justify-content: center; align-items: flex-start; padding-top: 12vh; }
+.tm { width: min(760px, calc(100vw - 32px)); max-height: 70vh; display: flex; flex-direction: column;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+      box-shadow: 0 16px 48px rgba(0,0,0,0.6); overflow: hidden; }
+.tm-top { display: flex; align-items: center; gap: 12px; padding: 12px 14px 0; }
+.tm-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.tm-seg button { font: inherit; font-size: 12px; padding: 4px 14px; background: transparent;
+                 color: var(--muted); border: none; cursor: pointer; }
+.tm-seg button + button { border-left: 1px solid var(--border); }
+.tm-seg button.on { background: var(--surface-hi); color: var(--fg); }
+.tm-adapter { margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap;
+              overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.tm-input { margin: 12px 14px 0; padding: 10px 12px; font-size: 14px; color: var(--fg);
+            background: var(--bg); border: 1px solid var(--accent); border-radius: 6px; outline: none; }
+.tm-input::placeholder { color: var(--muted); }
+.tm-hint { padding: 8px 14px 10px; font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--border); }
+.tm-hint b { color: var(--fg); font-weight: 600; }
+.tm-list { overflow: auto; padding: 6px 0; }
+.tm-section { padding: 6px 14px 4px; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.tm-row { display: flex; align-items: baseline; gap: 10px; padding: 7px 14px; cursor: pointer; min-width: 0; }
+.tm-row.hi { background: var(--surface-hi); }
+.tm-row .hist-type { flex: none; }
+.tm-main { flex: none; font-size: 12px; font-weight: 600; color: var(--fg); }
+.tm-dim { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.tm-note { padding: 14px; font-size: 12px; color: var(--muted); }

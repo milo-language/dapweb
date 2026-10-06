@@ -84,58 +84,114 @@ export function TargetBar({ cfg, history: cfgHist, adapterCmd, readCfg, writeCfg
       .catch((e) => { setProcs([]); setProcErr(e.message || String(e)); });
   };
 
+  // The header holds only a chip; picking a target happens in a dialog wide enough
+  // to show whole paths. In the header the field had to share a row with every
+  // control and cut off the part of each path that tells entries apart.
+  const [open, setOpen] = useState(false);
+  const [hi, setHi] = useState(-1);   // highlighted list row, -1 = the typed text
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const openPicker = () => {
+    setTargetText(targetLabel);
+    setHi(-1);
+    setOpen(true);
+    if (attachMode) loadProcs();
+    setTimeout(() => inputRef.current?.select(), 0);
+  };
+  const close = () => { setOpen(false); targetFocused.current = false; setTargetText(targetLabel); };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPicker(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  const q = targetText.trim().toLowerCase();
+  const rows: { key: string; value: string; badge?: string; main: string; dim: string }[] = attachMode
+    ? (procs || [])
+        .filter((pr) => !q || String(pr.pid).startsWith(q) || (pr.cmd || pr.name || "").toLowerCase().includes(q))
+        .slice(0, 200)
+        .map((pr) => ({ key: "p" + pr.pid, value: String(pr.pid), main: String(pr.pid), dim: pr.cmd || pr.name }))
+    : cfgHist
+        .map((h) => [h.program || "", ...((h.args as string[]) || [])].join(" ").trim() + "\u0000" + (h.type || ""))
+        .map((x) => { const [label, type] = x.split("\u0000"); return { label, type }; })
+        .filter(({ label }) => !q || label.toLowerCase().includes(q) || label === targetLabel)
+        .map(({ label, type }, i) => {
+          const [prog, ...rest] = shellSplit(label);
+          const slash = (prog || "").lastIndexOf("/");
+          return { key: "h" + i, value: label, badge: type,
+                   main: slash >= 0 ? prog.slice(slash + 1) : prog,
+                   dim: [(slash >= 0 ? prog.slice(0, slash + 1) : ""), rest.join(" ")].filter(Boolean).join("  ") };
+        });
+
+  const pick = (value: string, run: boolean) => {
+    applyTarget(value);
+    setOpen(false);
+    targetFocused.current = false;
+    if (run) onEnter();
+  };
+
+  const prog = attachMode ? targetLabel : (cfg.program || "");
+  const slash = prog.lastIndexOf("/");
+  const chipMain = slash >= 0 ? prog.slice(slash + 1) : prog;
+  const chipArgs = attachMode ? "" : ((cfg.args as string[]) || []).join(" ");
+
   return (
     <span className="targetbar">
-      <select className={"mode-select" + (attachMode ? " attach" : "")} value={cfg.request || "launch"}
-              data-tip={attachMode ? "Attaching to a process that is already running"
-                                : "Launching a program from a path"}
-              onChange={(e) => setMode(e.target.value === "attach")}>
-        <option value="launch">launch</option>
-        <option value="attach">attach</option>
-      </select>
-      <input className="target-input" value={targetText} spellCheck={false}
-             placeholder={attachMode ? "pid, or a process name" : "path to a program, plus arguments"}
-             data-tip={cfg.port ? `tcp: ${cfg.host || "127.0.0.1"}:${cfg.port}` : (adapterCmd ? `adapter: ${adapterCmd}` : "")}
-             onChange={(e) => setTargetText(e.target.value)}
-             onFocus={() => { targetFocused.current = true; setTargetOpen(true); if (attachMode) loadProcs(); }}
-             onBlur={() => { targetFocused.current = false; setTimeout(() => setTargetOpen(false), 120); }}
-             onKeyDown={(e) => {
-               if (e.key === "Enter") {
-                 applyTarget(targetText); setTargetOpen(false);
-                 (e.target as HTMLInputElement).blur();
-                 onEnter();
-               } else if (e.key === "Escape") {
-                 setTargetText(targetLabel); (e.target as HTMLInputElement).blur();
-               }
-             }} />
-      {targetOpen && attachMode && (
-        <div className="target-menu">
-          {procErr && <div className="target-note">{procErr}</div>}
-          {!procs && !procErr && <div className="target-note">reading process list…</div>}
-          {(procs || [])
-            .filter((pr) => !targetText.trim() ||
-                            String(pr.pid).startsWith(targetText.trim()) ||
-                            (pr.cmd || pr.name || "").toLowerCase().includes(targetText.trim().toLowerCase()))
-            .slice(0, 200)
-            .map((pr) => (
-              <div key={pr.pid} className="target-item"
-                   onMouseDown={(e) => { e.preventDefault(); setTargetText(String(pr.pid)); applyTarget(String(pr.pid)); setTargetOpen(false); }}>
-                <span className="proc-pid">{pr.pid}</span>{pr.cmd || pr.name}
+      <button className={"target-chip" + (attachMode ? " attach" : "")} onClick={openPicker}
+              data-tip={(prog ? prog + (chipArgs ? " " + chipArgs : "") + "  ·  " : "") + "change target (⌘K)"}>
+        <span className="target-mode">{attachMode ? "attach" : "launch"}</span>
+        <span className="target-main">{chipMain || <em>choose a program</em>}</span>
+        {chipArgs && <span className="target-args">{chipArgs}</span>}
+        <span className="target-caret">▾</span>
+      </button>
+      {open && (
+        <div className="tm-backdrop" onMouseDown={close}>
+          <div className="tm" role="dialog" aria-label="Debug target" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="tm-top">
+              <div className="tm-seg">
+                <button className={!attachMode ? "on" : ""} onClick={() => { setMode(false); inputRef.current?.focus(); }}>Launch</button>
+                <button className={attachMode ? "on" : ""} onClick={() => { setMode(true); inputRef.current?.focus(); }}>Attach</button>
               </div>
-            ))}
-        </div>
-      )}
-      {targetOpen && !attachMode && cfgHist.length > 0 && (
-        <div className="target-menu">
-          {cfgHist.map((h, i) => {
-            const label = [h.program || "", ...((h.args as string[]) || [])].join(" ").trim();
-            return (
-              <div key={i} className="target-item"
-                   onMouseDown={(e) => { e.preventDefault(); setTargetText(label); applyTarget(label); setTargetOpen(false); }}>
-                {h.type && <span className={"hist-type dt-" + h.type}>{h.type}</span>}{label}
-              </div>
-            );
-          })}
+              <span className="tm-adapter">
+                {cfg.port ? `tcp ${cfg.host || "127.0.0.1"}:${cfg.port}` : adapterCmd ? `adapter: ${adapterCmd}` : ""}
+              </span>
+            </div>
+            <input ref={inputRef} className="tm-input" value={targetText} spellCheck={false} autoFocus
+                   placeholder={attachMode ? "pid, or a process name" : "path to a program, plus arguments"}
+                   onFocus={() => { targetFocused.current = true; }}
+                   onChange={(e) => { setTargetText(e.target.value); setHi(-1); }}
+                   onKeyDown={(e) => {
+                     if (e.key === "Escape") { e.preventDefault(); close(); }
+                     else if (e.key === "ArrowDown") { e.preventDefault(); setHi((i) => Math.min(rows.length - 1, i + 1)); }
+                     else if (e.key === "ArrowUp") { e.preventDefault(); setHi((i) => Math.max(-1, i - 1)); }
+                     else if (e.key === "Enter") {
+                       e.preventDefault();
+                       const v = hi >= 0 && rows[hi] ? rows[hi].value : targetText;
+                       if (v.trim()) pick(v, true);
+                     }
+                   }} />
+            <div className="tm-hint">
+              <b>Enter</b> runs it · <b>↑↓</b> pick from the list · <b>Esc</b> closes
+            </div>
+            <div className="tm-list">
+              {attachMode && procErr && <div className="tm-note">{procErr}</div>}
+              {attachMode && !procs && !procErr && <div className="tm-note">reading the process list…</div>}
+              {!attachMode && rows.length === 0 && <div className="tm-note">No recent targets yet. Type a path above.</div>}
+              {rows.length > 0 && <div className="tm-section">{attachMode ? "Running processes" : "Recent targets"}</div>}
+              {rows.map((r, i) => (
+                <div key={r.key} className={"tm-row" + (i === hi ? " hi" : "")}
+                     onMouseEnter={() => setHi(i)} onClick={() => pick(r.value, false)}
+                     onDoubleClick={() => pick(r.value, true)}>
+                  {r.badge && <span className={"hist-type dt-" + r.badge}>{r.badge}</span>}
+                  <span className="tm-main">{r.main}</span>
+                  <span className="tm-dim">{r.dim}</span>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       )}
     </span>
