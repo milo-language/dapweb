@@ -3,6 +3,6 @@
 dapweb
 .DS_Store
 dapweb-web
-node_modules/
+node_modules
 src/web/ui/dist/
 docs/shots/
