@@ -1,11 +1,17 @@
 // HTTP/1.1 for the one-request-per-connection server: read and parse a request
-// head once, and the gate every route sits behind.
+// head once, the gate every route sits behind, and the UI bundle.
 
 from "std/os" import {
-    recvFd
+    close, sendFd, recvFd
 }
 from "std/seal" import {
-    Sealed, Span, seal
+    Sealed, seal, Span
+}
+from "./state" import {
+    gSession
+}
+from "std/io" import {
+    readFile
 }
 
 pub struct Header {
@@ -242,4 +248,173 @@ pub fn requestAllowed(req: &Request): bool {
     }
     let origin = req.header("origin")
     return origin.len == 0 || origin == "http://" + host
+}
+
+// ── HTTP plumbing ──
+
+pub fn sendHttp(fd: i32, status: i32, contentType: &string, body: &string): void {
+    var statusText: string = "200 OK"
+    if status == 403 {
+        statusText = "403 Forbidden"
+    } else if status == 404 {
+        statusText = "404 Not Found"
+    } else if status == 405 {
+        statusText = "405 Method Not Allowed"
+    }
+    var resp: string = "HTTP/1.1 " + statusText + "\r\n"
+    resp = resp + "Content-Type: " + contentType + "\r\n"
+    resp = resp + "Content-Length: " + body.len.toString() + "\r\n"
+    resp = resp + "Connection: close\r\n\r\n"
+    resp = resp + body
+    // Accepted fds are non-blocking under the green runtime: a single write()
+    // stops at the socket buffer (~half a MB of app.js got dropped this way).
+    // sendFd parks until the whole response is out.
+    let _n = sendFd(fd, resp, resp.len)
+}
+
+// UI assets are embedded, so the binary is self-contained: a downloaded release
+// runs from any cwd with nothing next to it. Embedding the whole ~5.8MB bundle
+// costs ~0.4s of build time — the old "byte-array emission dominates compile
+// time" concern (papercut #7) no longer holds. --webroot still overrides for UI
+// iteration: rebuild the bundle, refresh the page, no server rebuild.
+//
+// A renamed build.sh output breaks the build here rather than at runtime, which
+// is the point: a missing asset is a compile error, not a 404 in the browser.
+fn embeddedAsset(p: &string): Option<string> {
+    if p == "/index.html" {
+        return Option.Some(@embedFile("ui/dist/index.html"))
+    }
+    if p == "/app.js" {
+        return Option.Some(@embedFile("ui/dist/app.js"))
+    }
+    if p == "/app.css" {
+        return Option.Some(@embedFile("ui/dist/app.css"))
+    }
+    if p == "/editor.worker.js" {
+        return Option.Some(@embedFile("ui/dist/editor.worker.js"))
+    }
+    if p == "/json.worker.js" {
+        return Option.Some(@embedFile("ui/dist/json.worker.js"))
+    }
+    if p == "/favicon.svg" {
+        return Option.Some(@embedFile("ui/dist/favicon.svg"))
+    }
+    if p == "/og.png" {
+        return Option.Some(@embedFile("ui/dist/og.png"))
+    }
+    return Option.None
+}
+
+fn mimeFor(path: &string): string {
+    var ext: string = ""
+    var i: i64 = path.len - 1
+    while i >= 0 && path[i] != '/' {
+        if path[i] == '.' {
+            ext = path.substr(i, path.len)
+            break
+        }
+        i = i - 1
+    }
+    if ext == ".html" {
+        return "text/html; charset=utf-8"
+    }
+    if ext == ".js" {
+        return "application/javascript"
+    }
+    if ext == ".css" {
+        return "text/css"
+    }
+    if ext == ".map" || ext == ".json" {
+        return "application/json"
+    }
+    if ext == ".svg" {
+        return "image/svg+xml"
+    }
+    if ext == ".png" {
+        return "image/png"
+    }
+    if ext == ".wasm" {
+        return "application/wasm"
+    }
+    if ext == ".ttf" {
+        return "font/ttf"
+    }
+    return "application/octet-stream"
+}
+
+fn replaceAll(s: &string, needle: &string, repl: &string): string {
+    var out: string = ""
+    var i: i64 = 0
+    while i < s.len {
+        var m = false
+        if i + needle.len <= s.len {
+            m = true
+            var j: i64 = 0
+            while j < needle.len {
+                if s[i + j] != needle[j] {
+                    m = false break
+                }
+                j = j + 1
+            }
+        }
+        if m {
+            out = out + repl
+            i = i + needle.len
+        } else {
+            out.push(s[i])
+            i = i + 1
+        }
+    }
+    return out
+}
+
+pub fn serveStatic(fd: i32, reqPath: &string, origin: &string): void {
+    var p = reqPath.clone()
+    // The dashboard is a route of the same single-page bundle, so it resolves to
+    // index.html and App.tsx branches on the pathname. A second HTML entry point
+    // would mean a second bundle to keep in sync for one extra screen.
+    if p == "/" || p == "/sessions" {
+        p = "/index.html"
+    }
+    // No parent traversal out of the webroot.
+    var di: i64 = 0
+    while di + 1 < p.len {
+        if p[di] == '.' && p[di + 1] == '.' {
+            sendHttp(fd, 404, "text/plain", "not found")
+            return
+        }
+        di = di + 1
+    }
+    // --webroot wins when set, so UI work does not need a server rebuild;
+    // otherwise serve the copy compiled into this binary.
+    var body: string = ""
+    if let Option.Some(w) = gSession.server.webroot {
+        match readFile(w + p) {
+            Result.Ok(disk) => {
+                body = disk
+            }
+            Result.Err(_e) => {
+                sendHttp(fd, 404, "text/plain", "not found")
+                return
+            }
+        }
+    } else {
+        match embeddedAsset(p) {
+            Option.Some(embedded) => {
+                body = embedded
+            }
+            Option.None => {
+                sendHttp(fd, 404, "text/plain", "not found")
+                return
+            }
+        }
+    }
+    if p == "/index.html" {
+        // og:image/og:url need absolute URLs (unfurlers reject
+        // relative) but the host varies (localhost/LAN/tunnel):
+        // inject the request's own origin.
+        sendHttp(fd, 200, mimeFor(p), replaceAll(body, "__ORIGIN__", origin))
+    } else {
+        sendHttp(fd, 200, mimeFor(p), body)
+    }
 }

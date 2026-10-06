@@ -52,7 +52,10 @@ for (const f of files) {
 // Everything the server can serve must be compiled in, or a release run from
 // another directory 404s on its own UI.
 {
-  const server = await Bun.file(import.meta.dir + "/../src/web/server.milo").text();
+  // Every web module, so moving embeddedAsset between files cannot empty the list.
+  const web = import.meta.dir + "/../src/web";
+  const server = (await Promise.all([...new Bun.Glob("*.milo").scanSync(web)]
+    .map((f) => Bun.file(`${web}/${f}`).text()))).join("\n");
   const embedded = [...server.matchAll(/@embedFile\("ui\/dist\/([^"]+)"\)/g)].map((m) => m[1]);
   const onDisk = [...new Bun.Glob("*").scanSync(dist)].filter((f) => !f.startsWith("."));
   const missing = onDisk.filter((f) => !embedded.includes(f));

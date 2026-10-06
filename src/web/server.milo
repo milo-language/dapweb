@@ -25,16 +25,16 @@
 // Run: dapweb-web --program /tmp/dapweb_demo --source /tmp/dapweb_demo.c [--port 8080]
 
 from "std/net" import {
-    TcpListener, TcpStream
+    TcpListener
 }
 from "std/os" import {
-    close, getpid, sendFd
+    close, getpid
 }
 from "std/io" import {
     readFile, fdChannel
 }
 from "std/ws" import {
-    WsConn, WsMessage, wsAccept, isWsUpgrade
+    WsConn, wsAccept, isWsUpgrade
 }
 from "std/runtime" import {
     Task, schedulerYield, schedulerRunToCompletion
@@ -46,7 +46,7 @@ from "std/seal" import {
     Sealed, Shared, seal, sharedWith, sealedWith
 }
 from "./http" import {
-    Request, readRequest, readBody, requestAllowed
+    Request, readRequest, readBody, requestAllowed, sendHttp, serveStatic
 }
 from "std/json" import {
     Json
@@ -58,15 +58,13 @@ from "../commands" import {
     isKnownCmd, cmdVerb, cmdNames, commandsJson
 }
 from "../sessions" import {
-    stateDir, writeSession, removeSession, sessionsJson, newSessionName,
-    freePortFrom, spawnSessionOn, listenLocal
+    stateDir, writeSession, removeSession, sessionsJson, newSessionName, freePortFrom, spawnSessionOn, listenLocal
 }
 from "./binfo" import {
     binInfoJson
 }
 from "../journal" import {
-    journalDisable, journalSession, journalCmd, journalOut, journalEnd,
-    journalRows, journalSessions, journalBreakpoints, logFilter
+    journalDisable, journalSession, journalCmd, journalOut, journalEnd, journalRows, journalSessions, journalBreakpoints, logFilter
 }
 from "std/signal" import {
     ignoreSignal, SIGPIPE
@@ -78,26 +76,22 @@ from "std/pty" import {
     Pty
 }
 from "std/argparse" import {
-    ArgParser, ParsedArgs
+    ArgParser
 }
 from "std/env" import {
     Env
 }
 from "std/process" import {
-    Child,
-    Command, Stdio
+    Child, Command, Stdio
 }
 from "std/fs" import {
-    pathExists, makeDir, writeFile, removeFile, currentDir, splitLines
+    pathExists, makeDir, writeFile, currentDir, splitLines
 }
 from "std/uuid" import {
     Uuid
 }
 from "std/time" import {
-    epochMillis
-}
-from "std/time" import {
-    sleepMs, sleepBlockingMs
+    epochMillis, sleepMs, sleepBlockingMs
 }
 from "std/datetime" import {
     DateTime
@@ -105,23 +99,17 @@ from "std/datetime" import {
 from "std/path" import {
     Path
 }
-
 from "../dap/client" import {
-    DapClient, DapMsg
+    DapClient
 }
 from "./state" import {
-    gSession, Bp, OutLine, cloneBp, ChildLaunch, PendingRun, Sink, StopInfo, ThreadList,
-    helloMsg, sourceMsg, bpSyncMsg, capsMsg, stoppedMsg, threadsMsg, regionsMsg
+    gSession, Bp, OutLine, cloneBp, ChildLaunch, PendingRun, Sink, StopInfo, ThreadList, helloMsg, sourceMsg, bpSyncMsg, capsMsg, stoppedMsg, threadsMsg, regionsMsg
 }
 from "json-rpc/frame" import {
     writeFrame as writeFrameFd
 }
 from "../dap/session" import {
-    histLastRunAt,
-    LaunchSpec, AdapterSel, resolveConfig, resolveAdapterCmd,
-    adapterIdForKind, initArgsFor, launchRequestOf, adapterArgvOf, launchArgsFor,
-    tcpListenArgs,
-    mainSymbolFor, histEntryFor, histInsert, histMergeMany, specConfigJson,
+    histLastRunAt, resolveConfig, resolveAdapterCmd, adapterIdForKind, initArgsFor, launchRequestOf, adapterArgvOf, launchArgsFor, tcpListenArgs, mainSymbolFor, histEntryFor, histInsert, histMergeMany
 }
 
 let OUTLOG_MAX: i64 = 400
@@ -2569,174 +2557,6 @@ fn reaperLoop(tickMs: i64, pendCh: Channel<Pending>): void {
     }
 }
 
-// ── HTTP plumbing ──
-
-fn sendHttp(fd: i32, status: i32, contentType: &string, body: &string): void {
-    var statusText: string = "200 OK"
-    if status == 403 {
-        statusText = "403 Forbidden"
-    } else if status == 404 {
-        statusText = "404 Not Found"
-    } else if status == 405 {
-        statusText = "405 Method Not Allowed"
-    }
-    var resp: string = "HTTP/1.1 " + statusText + "\r\n"
-    resp = resp + "Content-Type: " + contentType + "\r\n"
-    resp = resp + "Content-Length: " + body.len.toString() + "\r\n"
-    resp = resp + "Connection: close\r\n\r\n"
-    resp = resp + body
-    // Accepted fds are non-blocking under the green runtime: a single write()
-    // stops at the socket buffer (~half a MB of app.js got dropped this way).
-    // sendFd parks until the whole response is out.
-    let _n = sendFd(fd, resp, resp.len)
-}
-
-// UI assets are embedded, so the binary is self-contained: a downloaded release
-// runs from any cwd with nothing next to it. Embedding the whole ~5.8MB bundle
-// costs ~0.4s of build time — the old "byte-array emission dominates compile
-// time" concern (papercut #7) no longer holds. --webroot still overrides for UI
-// iteration: rebuild the bundle, refresh the page, no server rebuild.
-//
-// A renamed build.sh output breaks the build here rather than at runtime, which
-// is the point: a missing asset is a compile error, not a 404 in the browser.
-fn embeddedAsset(p: &string): Option<string> {
-    if p == "/index.html" {
-        return Option.Some(@embedFile("ui/dist/index.html"))
-    }
-    if p == "/app.js" {
-        return Option.Some(@embedFile("ui/dist/app.js"))
-    }
-    if p == "/app.css" {
-        return Option.Some(@embedFile("ui/dist/app.css"))
-    }
-    if p == "/editor.worker.js" {
-        return Option.Some(@embedFile("ui/dist/editor.worker.js"))
-    }
-    if p == "/json.worker.js" {
-        return Option.Some(@embedFile("ui/dist/json.worker.js"))
-    }
-    if p == "/favicon.svg" {
-        return Option.Some(@embedFile("ui/dist/favicon.svg"))
-    }
-    if p == "/og.png" {
-        return Option.Some(@embedFile("ui/dist/og.png"))
-    }
-    return Option.None
-}
-fn mimeFor(path: &string): string {
-    var ext: string = ""
-    var i: i64 = path.len - 1
-    while i >= 0 && path[i] != '/' {
-        if path[i] == '.' {
-            ext = path.substr(i, path.len)
-            break
-        }
-        i = i - 1
-    }
-    if ext == ".html" {
-        return "text/html; charset=utf-8"
-    }
-    if ext == ".js" {
-        return "application/javascript"
-    }
-    if ext == ".css" {
-        return "text/css"
-    }
-    if ext == ".map" || ext == ".json" {
-        return "application/json"
-    }
-    if ext == ".svg" {
-        return "image/svg+xml"
-    }
-    if ext == ".png" {
-        return "image/png"
-    }
-    if ext == ".wasm" {
-        return "application/wasm"
-    }
-    if ext == ".ttf" {
-        return "font/ttf"
-    }
-    return "application/octet-stream"
-}
-
-fn replaceAll(s: &string, needle: &string, repl: &string): string {
-    var out: string = ""
-    var i: i64 = 0
-    while i < s.len {
-        var m = false
-        if i + needle.len <= s.len {
-            m = true
-            var j: i64 = 0
-            while j < needle.len {
-                if s[i + j] != needle[j] {
-                    m = false break
-                }
-                j = j + 1
-            }
-        }
-        if m {
-            out = out + repl
-            i = i + needle.len
-        } else {
-            out.push(s[i])
-            i = i + 1
-        }
-    }
-    return out
-}
-
-fn serveStatic(fd: i32, reqPath: &string, origin: &string): void {
-    var p = reqPath.clone()
-    // The dashboard is a route of the same single-page bundle, so it resolves to
-    // index.html and App.tsx branches on the pathname. A second HTML entry point
-    // would mean a second bundle to keep in sync for one extra screen.
-    if p == "/" || p == "/sessions" {
-        p = "/index.html"
-    }
-    // No parent traversal out of the webroot.
-    var di: i64 = 0
-    while di + 1 < p.len {
-        if p[di] == '.' && p[di + 1] == '.' {
-            sendHttp(fd, 404, "text/plain", "not found")
-            return
-        }
-        di = di + 1
-    }
-    // --webroot wins when set, so UI work does not need a server rebuild;
-    // otherwise serve the copy compiled into this binary.
-    var body: string = ""
-    if let Option.Some(w) = gSession.server.webroot {
-        match readFile(w + p) {
-            Result.Ok(disk) => {
-                body = disk
-            }
-            Result.Err(_e) => {
-                sendHttp(fd, 404, "text/plain", "not found")
-                return
-            }
-        }
-    } else {
-        match embeddedAsset(p) {
-            Option.Some(embedded) => {
-                body = embedded
-            }
-            Option.None => {
-                sendHttp(fd, 404, "text/plain", "not found")
-                return
-            }
-        }
-    }
-    if p == "/index.html" {
-        // og:image/og:url need absolute URLs (unfurlers reject
-        // relative) but the host varies (localhost/LAN/tunnel):
-        // inject the request's own origin.
-        sendHttp(fd, 200, mimeFor(p), replaceAll(body, "__ORIGIN__", origin))
-    } else {
-        sendHttp(fd, 200, mimeFor(p), body)
-    }
-}
-
 fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): void {
     let Option.Some(req) = readRequest(fd) else {
         close(fd)
@@ -2910,7 +2730,6 @@ fn openBrowser(url: &string): void {
         let _ = child.wait()
     }
 }
-
 
 // Subcommand entrypoint: dispatched from src/main.milo as `dapweb web ...`.
 // argv[0] is the display name (skipped by parseFrom); the rest are the web flags.
