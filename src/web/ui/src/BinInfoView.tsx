@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useCallback, useEffect, useState } from "react";
 
 // Binary details for the current target: format, architecture, and above all
 // whether it carries debug info. A binary built without -g (or stripped) is the
@@ -40,4 +40,35 @@ export function BinInfoView({ info }: { info: any | null }) {
       )}
     </div>
   );
+}
+
+// The target's binary report, re-read whenever the target changes.
+export function useBinInfo(program: string) {
+  const [binInfo, setBinInfo] = useState<any | null>(null);
+  const loadBinInfo = useCallback(() => {
+    setBinInfo(null);
+    // A server too old for this endpoint answers a plain-text 404, so check the
+    // status before parsing: a raw SyntaxError in the pane explains nothing.
+    fetch("/api/binfo").then(async (r) => {
+      if (!r.ok) throw new Error(r.status === 404
+        ? "this server does not support binary inspection (built before /api/binfo)"
+        : `server returned ${r.status}`);
+      return r.json();
+    }).then(setBinInfo).catch((e) => setBinInfo({ error: e.message || String(e) }));
+  }, []);
+
+  // Read whenever the target changes, not when the tab is opened: the answer
+  // decides whether the tab is offered at all, and a rebuild between two runs is
+  // exactly when "no debug info" starts or stops being true.
+  useEffect(() => {
+    if (program) loadBinInfo();
+    else setBinInfo(null);
+  }, [program, loadBinInfo]);
+
+  // A python script or a jar is a file, not a native binary: binfo can only
+  // answer "unknown format", and a permanent tab saying "rebuild with -g" about
+  // a .py is worse than no tab. A file that is missing or unreadable still gets
+  // one — that IS the diagnosis.
+  const binTab = !!binInfo && (!!binInfo.error || binInfo.exists === false || binInfo.format !== "unknown");
+  return { binInfo, binTab };
 }

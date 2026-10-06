@@ -1,33 +1,27 @@
 // Dapweb web UI — React + xterm.js. Talks WS protocol v2 (see docs/design.md).
-import React, { useEffect, useMemo, useReducer, useRef, useState, useCallback } from "react";
+import React, { useEffect, useReducer, useRef, useState, useCallback } from "react";
 import { Terminal } from "@xterm/xterm";
-import SourceView, { langFor, BpMeta, BpPopover, HoverVar } from "./SourceView";
+import { BpMeta, BpPopover, HoverVar } from "./SourceView";
 import ConfigDrawer, { stripJsonc } from "./ConfigDrawer";
-import { tabLabels } from "./tabLabels";
 import { primaryAction, exitLabel } from "./primary";
-import { threadLabel } from "./threadLabel";
-import {
-  Frame, Thread, Var, sessionReducer, initialSession, base, hasSrc, bpKey, stopOf, stopStatus,
-} from "./session";
+import { Frame, Thread, Var, sessionReducer, initialSession, hasSrc, bpKey, stopOf, stopStatus } from "./session";
 import { send, request, requestWithin, pending, routeReply, memBytes, setSocket, setOnSendWhileDead, expandRef } from "./rpc";
-import { buildRegionClassifier } from "./regions";
-import {
-  TermKind, termHidden, termPut, termRedraw, termClear, writeTagged, writeOutput, setDbgTag, SGR, XTermView,
-} from "./terminal";
+import { termPut, termClear, writeTagged, writeOutput, setDbgTag, SGR } from "./terminal";
 import { Mark } from "./Mark";
 import { Panel } from "./Panel";
-import { Val } from "./Val";
 import { VarList, isSpecialVar } from "./VarList";
-import { RegistersPanel } from "./RegistersPanel";
 import { BpList } from "./BpList";
-import { DebugConsole } from "./DebugConsole";
-import { StackView } from "./StackView";
-import { MemView } from "./MemView";
-import { BinInfoView } from "./BinInfoView";
-import { DragBar, AsideDrag } from "./Drag";
+import { useBinInfo } from "./BinInfoView";
+import { AsideDrag } from "./Drag";
+import { TargetBar } from "./TargetBar";
+import { Transport } from "./Transport";
+import { SessionMenu } from "./SessionMenu";
+import { EditorPane, Disasm } from "./EditorPane";
+import { WatchPanel, Watch } from "./WatchPanel";
+import { ThreadsPanel } from "./ThreadsPanel";
+import { ExceptionsPanel } from "./ExceptionsPanel";
+import { BottomPanel, BottomTab } from "./BottomPanel";
 
-type Insn = { addr: string; text: string; sym: string; line: number };
-type Watch = { expr: string; value: string | null };
 // Enriched hover payload: the evaluated value plus, for aggregates/pointers,
 // one level of expanded members (name/type/value) rendered in the tooltip.
 type HoverInfo = { value: string; children?: HoverVar[] };
@@ -41,57 +35,6 @@ function hasTarget(c: any, program?: string): boolean {
   return c.request === "attach"
     ? (c.pid != null || c.processId != null || c.connect != null || (!!c.waitFor && !!c.program))
     : !!(program ?? c.program);
-}
-
-const EMPTY_BPS = new Map<number, any>();
-const noop = () => {};
-
-// Split a target bar's text into argv the way a shell would for the cases that
-// actually come up here: quoted paths and quoted arguments. Not a shell parser
-// (no expansion, no escapes beyond the quote pair) and deliberately so, since
-// anything more elaborate belongs in the launch config's own "args" array.
-function shellSplit(s: string): string[] {
-  const out: string[] = [];
-  let cur = "", q = "";
-  for (const ch of s.trim()) {
-    if (q) { if (ch === q) q = ""; else cur += ch; }
-    else if (ch === '"' || ch === "'") q = ch;
-    else if (ch === " " || ch === "\t") { if (cur) { out.push(cur); cur = ""; } }
-    else cur += ch;
-  }
-  if (cur) out.push(cur);
-  return out;
-}
-
-// VS Code codicon glyphs (font ships inside monaco; build.sh copies the ttf).
-// Codepoints from monaco's codiconsLibrary.js — stable public API of the font.
-// Only the transport controls are glyphs now: they are the buttons you press
-// constantly and they have universally-understood shapes. Everything else in the
-// header is a word (add/gear/info went with the three-glyph cluster they named).
-const CI = {
-  run: 0xead3, cont: 0xeacf, pause: 0xead1,
-  stepOver: 0xead6, stepInto: 0xead4, stepOut: 0xead5,
-  restart: 0xead2, stop: 0xead7, chip: 0xec19,
-};
-const Ico = ({ g, sub }: { g: number; sub?: string }) => (
-  <>
-    <span className="ci">{String.fromCodePoint(g)}</span>
-    {sub && <span className="ci-sub">{sub}</span>}
-  </>
-);
-
-// Disassembly pane text: one line per instruction, pc line for the arrow.
-// Addresses compare via BigInt — lldb pads instructionPointerReference wider
-// than the per-instruction address strings.
-function buildAsm(d: { lines: Insn[]; pc: string }): { text: string; pcLine: number } {
-  const norm = (a: string) => { try { return BigInt(a).toString(16); } catch { return a; } };
-  const pcN = norm(d.pc);
-  let pcLine = 0;
-  const text = d.lines.map((ins, i) => {
-    if (norm(ins.addr) === pcN) pcLine = i + 1;
-    return `${ins.addr}  ${ins.text}${ins.sym ? `    ; ${ins.sym}` : ""}`;
-  }).join("\n");
-  return { text, pcLine };
 }
 
 export default function App() {
@@ -111,47 +54,19 @@ export default function App() {
   const registersRef = S.stop?.registersRef ?? 0;
   const [viewPath, setViewPath] = useState(""); // file currently displayed
   const [tabs, setTabs] = useState<string[]>([]);
-  const tabLabel = useMemo(() => tabLabels(tabs), [tabs]);
   const [watches, setWatches] = useState<Watch[]>([]);
-  const [tab, setTab] = useState<"term" | "mem" | "stack" | "regs" | "bin">("term");
-  const [termShown, setTermShown] = useState<Set<TermKind>>(() => new Set<TermKind>(["prog", "repl"]));
-  const toggleTerm = (k: TermKind) => {
-    if (termHidden.has(k)) termHidden.delete(k); else termHidden.add(k);
-    termRedraw(termRef.current);
-    setTermShown(new Set<TermKind>((["prog", "adapter", "repl"] as TermKind[]).filter((x) => !termHidden.has(x))));
-  };
-  const [bottomH, setBottomH] = useState(240);
+  const [tab, setTab] = useState<BottomTab>("term");
   const [asideW, setAsideW] = useState(340);
   // Opens only when there is nothing to run; a resolvable target goes straight to
   // the debug view. The gear reopens it.
   const [showConfig, setShowConfig] = useState(false);
   // Last thing another peer said it was doing, shown briefly in the toolbar.
   const [agentNote, setAgentNote] = useState<{ text: string; at: number } | null>(null);
-  // Target bar: the toolbar's editable projection of config.program + config.args.
-  const [targetText, setTargetText] = useState("");
-  const [targetOpen, setTargetOpen] = useState(false);
-  const targetFocused = useRef(false);
-  const [binInfo, setBinInfo] = useState<any | null>(null);
-  const [procs, setProcs] = useState<{ pid: number; name: string; cmd: string }[] | null>(null);
-  const [procErr, setProcErr] = useState("");
-  const [showInfo, setShowInfo] = useState(false);    // adapter + capabilities popover
-  const [showMenu, setShowMenu] = useState(false);     // the header's "session ▾" menu
   const [stopMain, setStopMain] = useState(() => localStorage.getItem("dapweb.stopAtMain") !== "0");
   // Monotonic counters so re-clicking the same line still reveals it.
   const [jump, setJump] = useState({ line: 0, n: 0 });
-  const [disasm, setDisasm] = useState<{ lines: Insn[]; pc: string } | null>(null);
-  // Frame registers reported up from RegistersPanel — sp drives stack detection,
-  // fp/lr let the memory view annotate saved-frame / return-address slots.
-  const [regFrame, setRegFrame] = useState<{ sp: string; fp: string; lr: string }>({ sp: "", fp: "", lr: "" });
-  const regSp = regFrame.sp;
-  // Shared region classifier — one map+sp, used by both Registers and Memory so
-  // a value's hue means the same thing in both. null until a map arrives.
-  const classifyRegion = useMemo(
-    () => (regions.length ? buildRegionClassifier(regions, regSp) : null),
-    [regions, regSp]);
+  const [disasm, setDisasm] = useState<Disasm | null>(null);
   const [bpEdit, setBpEdit] = useState<{ path: string; line: number; x: number; y: number } | null>(null);  // panel ✎ editor
-  const [excSel, setExcSel] = useState<Set<string>>(new Set());
-  const [excInit, setExcInit] = useState(false);
   const [mem, setMem] = useState<{ addr: string; bytes: Uint8Array } | null>(null);
   const [memAddr, setMemAddr] = useState("");
   const [memErr, setMemErr] = useState("");   // shown in the Memory pane, not the terminal
@@ -478,17 +393,6 @@ export default function App() {
     return () => { gone = true; clearTimeout(timer); setOnSendWhileDead(null); ws?.close(); };
   }, []);
 
-  // Default exception filters on once when capabilities first arrive.
-  useEffect(() => {
-    const filters = caps.exceptionBreakpointFilters;
-    if (!excInit && Array.isArray(filters) && filters.length) {
-      const def = new Set<string>(filters.filter((f: any) => f.default).map((f: any) => f.filter));
-      setExcSel(def);
-      setExcInit(true);
-      send({ cmd: "setExceptions", filters: [...def] });
-    }
-  }, [caps, excInit]);
-
   // None of these touch `bps` — the server's echo is the only writer. It
   // canonicalises the path (cwd-relative → absolute, "." / ".." collapsed) and
   // every peer keys on that spelling, so an optimistic insert under the path we
@@ -579,15 +483,6 @@ export default function App() {
   // `request` key is the state, so flipping the chip and editing the JSON by hand
   // can never disagree.
   const attachMode = cfg.request === "attach";
-  // lldb spells it `pid`, debugpy and delve spell it `processId`. The UI writes
-  // the dialect's own key rather than having the server translate, because the
-  // config is meant to be a verbatim launch.json: what you read in the sheet has
-  // to be exactly what goes to the adapter.
-  const pidKeyFor = (t?: string) => (t === "python" || t === "go" || t === "node") ? "processId" : "pid";
-  const targetLabel = attachMode
-    ? String(cfg[pidKeyFor(cfg.type)] ?? cfg.program ?? "")
-    : [cfg.program || "", ...((cfg.args as string[]) || [])].join(" ").trim();
-  useEffect(() => { if (!targetFocused.current) setTargetText(targetLabel); }, [targetLabel]);
 
   // Editing the bar edits program+args inside the launch config; every other key
   // the user set in the Advanced sheet survives untouched.
@@ -610,50 +505,6 @@ export default function App() {
   };
   const writeCfg = (c: any) => { cfgTextRef.current = JSON.stringify(c, null, 2); dispatch({ type: "local/config", config: c }); pushCfg(c); };
 
-  const applyTarget = (text: string) => {
-    const c = readCfg();
-    if (attachMode) {
-      const t = text.trim();
-      if (!t) return;
-      // Drop every spelling first: switching `type` must not leave a stale pid
-      // key behind for the adapter to trip over.
-      delete c.pid; delete c.processId;
-      if (/^[0-9]+$/.test(t)) c[pidKeyFor(c.type)] = Number(t);
-      else c.program = t;   // lldb attaches to a running process by name
-      writeCfg(c);
-      return;
-    }
-    const parts = shellSplit(text);
-    if (!parts.length) return;
-    c.program = parts[0];
-    if (parts.length > 1) c.args = parts.slice(1); else delete c.args;
-    writeCfg(c);
-  };
-
-  const setMode = (attach: boolean) => {
-    const c = readCfg();
-    if (attach) { c.request = "attach"; delete c.args; }
-    else { delete c.request; delete c.pid; delete c.processId; }
-    writeCfg(c);
-    setTargetText("");
-    // The chip preventDefaults mousedown so the input keeps focus, which means
-    // focus never fires again and the picker would sit on its placeholder
-    // forever. Kick the load from here instead of relying on onFocus.
-    if (attach) { setProcs(null); loadProcs(); setTargetOpen(true); }
-    else { setProcs(null); setProcErr(""); setTargetOpen(false); }
-  };
-
-  const loadProcs = () => {
-    setProcErr("");
-    fetch("/api/processes").then(async (r) => {
-      if (!r.ok) throw new Error(r.status === 404
-        ? "this server cannot list processes (built before /api/processes) — type a pid"
-        : `server returned ${r.status}`);
-      return r.json();
-    }).then((d) => setProcs(d.processes || []))
-      .catch((e) => { setProcs([]); setProcErr(e.message || String(e)); });
-  };
-
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -670,31 +521,7 @@ export default function App() {
     return () => clearTimeout(t);
   }, [agentNote]);
 
-  const loadBinInfo = useCallback(() => {
-    setBinInfo(null);
-    // A server too old for this endpoint answers a plain-text 404, so check the
-    // status before parsing: a raw SyntaxError in the pane explains nothing.
-    fetch("/api/binfo").then(async (r) => {
-      if (!r.ok) throw new Error(r.status === 404
-        ? "this server does not support binary inspection (built before /api/binfo)"
-        : `server returned ${r.status}`);
-      return r.json();
-    }).then(setBinInfo).catch((e) => setBinInfo({ error: e.message || String(e) }));
-  }, []);
-
-  // Read whenever the target changes, not when the tab is opened: the answer
-  // decides whether the tab is offered at all, and a rebuild between two runs is
-  // exactly when "no debug info" starts or stops being true.
-  useEffect(() => {
-    if (program) loadBinInfo();
-    else setBinInfo(null);
-  }, [program, loadBinInfo]);
-
-  // A python script or a jar is a file, not a native binary: binfo can only
-  // answer "unknown format", and a permanent tab saying "rebuild with -g" about
-  // a .py is worse than no tab. A file that is missing or unreadable still gets
-  // one — that IS the diagnosis.
-  const binTab = !!binInfo && (!!binInfo.error || binInfo.exists === false || binInfo.format !== "unknown");
+  const { binInfo, binTab } = useBinInfo(program);
 
   // A tab whose adapter can no longer serve it must not leave the pane blank:
   // retargeting from lldb to debugpy takes readMemory away mid-session.
@@ -769,51 +596,20 @@ export default function App() {
   }, []);
 
   const stopped = phase === "stopped";
-  const asm = useMemo(() => (disasm ? buildAsm(disasm) : null), [disasm]);
   // Inline-asm mode: render each source line's instructions under it (view zones
   // in the main SourceView) instead of the side-by-side pane.
   const [inlineAsm, setInlineAsm] = useState(false);
-  // Group the current disasm window's instructions by source line for the inline
-  // view. Only statement-boundary instructions carry a line; the rest come back
-  // as line 0, so carry the last line forward (objdump -S style) — otherwise the
-  // add/str that finish a statement silently vanish.
-  const asmByLine = useMemo(() => {
-    const m = new Map<number, { addr: string; text: string }[]>();
-    if (!disasm) return m;
-    let cur = 0;
-    for (const ins of disasm.lines) {
-      if (ins.line > 0) cur = ins.line;
-      if (cur > 0) (m.get(cur) ?? m.set(cur, []).get(cur)!).push({ addr: ins.addr, text: ins.text });
-    }
-    return m;
-  }, [disasm]);
-  // Which asm line to reveal, bumped to re-trigger. A fresh disasm window reveals
-  // its pc; an in-window address click reveals the branch target instead.
-  const [asmJump, setAsmJump] = useState({ line: 0, n: 0 });
-  useEffect(() => { if (asm) setAsmJump((j) => ({ line: asm.pcLine, n: j.n + 1 })); }, [asm]);
-  // Follow a clicked address: reveal it if it's in the current window, else
-  // disassemble a fresh window around it (chase a branch/call target).
-  const followAddr = (addr: string) => {
-    const norm = (a: string) => { try { return BigInt(a).toString(16); } catch { return a; } };
-    const t = norm(addr);
-    const idx = disasm ? disasm.lines.findIndex((i) => norm(i.addr) === t) : -1;
-    if (idx >= 0) { setAsmJump((j) => ({ line: idx + 1, n: j.n + 1 })); return; }
-    // Out of window: only chase things that look like code addresses, not the
-    // small immediates/stack offsets (#0x8, [sp, #0x40]) that share 0x… syntax.
-    try { if (BigInt(addr) < 0x1000n) return; } catch { return; }
-    fetchDisasm(addr);
+  // Selected frame's pc, or the nearest frame that has one.
+  const asmFrame = () => (frames[selFrame]?.ipRef ? frames[selFrame] : frames.find((x) => x.ipRef));
+  const toggleDisasm = () => {
+    if (disasm) { setDisasm(null); setInlineAsm(false); }
+    else { const f = asmFrame(); if (f) requestDisasm(f); }
   };
-  const excFilters: any[] = Array.isArray(caps.exceptionBreakpointFilters) ? caps.exceptionBreakpointFilters : [];
-  const srcText = files.get(viewPath) ?? "";
-  const viewBps = useMemo(() => {
-    const out = new Map<number, BpMeta>();
-    bps.forEach((meta, k) => {
-      const [p, ln] = [k.slice(0, k.indexOf("\n")), Number(k.slice(k.indexOf("\n") + 1))];
-      if (p === viewPath) out.set(ln, meta);
-    });
-    return out;
-  }, [bps, viewPath]);
-  const canInstrStep = stopped && !!caps.supportsSteppingGranularity && !!asm;
+  const toggleInlineAsm = () => {
+    if (inlineAsm) { setInlineAsm(false); setDisasm(null); }
+    else { setInlineAsm(true); const f = asmFrame(); if (f) requestDisasm(f); }
+  };
+  const canInstrStep = stopped && !!caps.supportsSteppingGranularity && !!disasm;
   const targetSet = hasTarget(cfg, program || undefined);
   const primary = primaryAction({ phase, hasTarget: targetSet, attach: attachMode });
 
@@ -826,109 +622,16 @@ export default function App() {
         <a className="logo" href="/sessions" data-tip="All live dapweb sessions">
           <Mark /><span>dapweb</span>
         </a>
-        <span className="targetbar">
-          <select className={"mode-select" + (attachMode ? " attach" : "")} value={cfg.request || "launch"}
-                  data-tip={attachMode ? "Attaching to a process that is already running"
-                                    : "Launching a program from a path"}
-                  onChange={(e) => setMode(e.target.value === "attach")}>
-            <option value="launch">launch</option>
-            <option value="attach">attach</option>
-          </select>
-          <input className="target-input" value={targetText} spellCheck={false}
-                 placeholder={attachMode ? "pid, or a process name" : "path to a program, plus arguments"}
-                 data-tip={cfg.port ? `tcp: ${cfg.host || "127.0.0.1"}:${cfg.port}` : (adapterCmd ? `adapter: ${adapterCmd}` : "")}
-                 onChange={(e) => setTargetText(e.target.value)}
-                 onFocus={() => { targetFocused.current = true; setTargetOpen(true); if (attachMode) loadProcs(); }}
-                 onBlur={() => { targetFocused.current = false; setTimeout(() => setTargetOpen(false), 120); }}
-                 onKeyDown={(e) => {
-                   if (e.key === "Enter") {
-                     applyTarget(targetText); setTargetOpen(false);
-                     (e.target as HTMLInputElement).blur();
-                     runRef.current?.();
-                   } else if (e.key === "Escape") {
-                     setTargetText(targetLabel); (e.target as HTMLInputElement).blur();
-                   }
-                 }} />
-          {targetOpen && attachMode && (
-            <div className="target-menu">
-              {procErr && <div className="target-note">{procErr}</div>}
-              {!procs && !procErr && <div className="target-note">reading process list…</div>}
-              {(procs || [])
-                .filter((pr) => !targetText.trim() ||
-                                String(pr.pid).startsWith(targetText.trim()) ||
-                                (pr.cmd || pr.name || "").toLowerCase().includes(targetText.trim().toLowerCase()))
-                .slice(0, 200)
-                .map((pr) => (
-                  <div key={pr.pid} className="target-item"
-                       onMouseDown={(e) => { e.preventDefault(); setTargetText(String(pr.pid)); applyTarget(String(pr.pid)); setTargetOpen(false); }}>
-                    <span className="proc-pid">{pr.pid}</span>{pr.cmd || pr.name}
-                  </div>
-                ))}
-            </div>
-          )}
-          {targetOpen && !attachMode && cfgHist.length > 0 && (
-            <div className="target-menu">
-              {cfgHist.map((h, i) => {
-                const label = [h.program || "", ...((h.args as string[]) || [])].join(" ").trim();
-                return (
-                  <div key={i} className="target-item"
-                       onMouseDown={(e) => { e.preventDefault(); setTargetText(label); applyTarget(label); setTargetOpen(false); }}>
-                    {h.type && <span className={"hist-type dt-" + h.type}>{h.type}</span>}{label}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </span>
-        <span className="toolbar">
-          <button className="primary" disabled={primary.disabled} data-tip={primary.tip}
-                  onClick={() => {
-                    if (primary.kind === "continue") resume("continue");
-                    else if (primary.kind === "pause") send({ cmd: "pause", tid: tidRef.current });
-                    else run();
-                  }}>
-            <Ico g={primary.kind === "continue" ? CI.cont : primary.kind === "pause" ? CI.pause : CI.run} />
-            {primary.label}
-          </button>
-        </span>
-        <span className="toolbar">
-          <button disabled={!stopped} data-tip="Step over (F10)" onClick={() => resume("stepOver")}><Ico g={CI.stepOver} /></button>
-          <button disabled={!stopped} data-tip="Step into (F11)" onClick={() => resume("stepIn")}><Ico g={CI.stepInto} /></button>
-          <button disabled={!stopped} data-tip="Step out (Shift+F11)" onClick={() => resume("stepOut")}><Ico g={CI.stepOut} /></button>
-          {asm && <button disabled={!canInstrStep} data-tip="Step one instruction, over calls"
-                          onClick={() => resume("stepOver", "instruction")}><Ico g={CI.stepOver} sub="i" /></button>}
-          {asm && <button disabled={!canInstrStep} data-tip="Step one instruction, into calls"
-                          onClick={() => resume("stepIn", "instruction")}><Ico g={CI.stepInto} sub="i" /></button>}
-        </span>
-        <span className="toolbar">
-          <button disabled={phase !== "running" && phase !== "stopped"}
-                  data-tip="Restart: same target, from the top, breakpoints persist (Ctrl+Shift+F5)" onClick={restart}><Ico g={CI.restart} /></button>
-          <button disabled={phase !== "running" && phase !== "stopped"}
-                  data-tip="Stop: terminate the program (Shift+F5)" onClick={() => send({ cmd: "kill" })}><Ico g={CI.stop} /></button>
-          <button disabled={!stopped || !caps.supportsDisassembleRequest}
-                  className={asm && !inlineAsm ? "asm-on" : ""}
-                  data-tip={stopped ? "Disassembly: show machine code beside the source"
-                                 : "Disassembly (available while stopped, adapter must support it)"}
-                  onClick={() => {
-                    if (disasm) { setDisasm(null); setInlineAsm(false); }
-                    else {
-                      // Selected frame's pc, or the nearest frame that has one.
-                      const f = frames[selFrame]?.ipRef ? frames[selFrame] : frames.find((x) => x.ipRef);
-                      if (f) requestDisasm(f);
-                    }
-                  }}><Ico g={CI.chip} /></button>
-          <button disabled={!stopped || !caps.supportsDisassembleRequest}
-                  className={inlineAsm ? "asm-on" : ""}
-                  data-tip="Inline disassembly: show each source line's machine code under it"
-                  onClick={() => {
-                    if (inlineAsm) { setInlineAsm(false); setDisasm(null); }
-                    else {
-                      setInlineAsm(true);
-                      const f = frames[selFrame]?.ipRef ? frames[selFrame] : frames.find((x) => x.ipRef);
-                      if (f) requestDisasm(f);
-                    }
-                  }}><Ico g={CI.chip} sub="s" /></button>
-        </span>
+        <TargetBar cfg={cfg} history={cfgHist} adapterCmd={adapterCmd} readCfg={readCfg} writeCfg={writeCfg}
+                   onEnter={() => runRef.current?.()} />
+        <Transport primary={primary} phase={phase} asm={!!disasm} inlineAsm={inlineAsm}
+                   canInstrStep={canInstrStep} canDisasm={stopped && !!caps.supportsDisassembleRequest}
+                   onPrimary={() => {
+                     if (primary.kind === "continue") resume("continue");
+                     else if (primary.kind === "pause") send({ cmd: "pause", tid: tidRef.current });
+                     else run();
+                   }}
+                   resume={resume} restart={restart} onDisasm={toggleDisasm} onInlineAsm={toggleInlineAsm} />
         {/* One toggle, two honest names: attaching to a process that is already
             running cannot stop at main, so there it means "hold it where it is". */}
         <label className="stopmain" data-tip={attachMode
@@ -944,50 +647,8 @@ export default function App() {
         {/* Three unlabelled glyphs (ⓘ, +, ⚙) asked the reader to remember which
             was which. One labelled menu says what it opens, and has room for the
             things that had nowhere to live — like the list of other sessions. */}
-        <span className="menu-wrap">
-          <button className="menu-btn" onClick={() => setShowMenu((v) => !v)}>
-            session <span className="menu-caret">▾</span>
-          </button>
-          {showMenu && (
-            <>
-              <div className="menu-backdrop" onClick={() => setShowMenu(false)} />
-              <div className="menu-pop">
-                <button className="menu-item" onClick={() => { setShowMenu(false); setShowConfig(true); }}>
-                  Configure target… <span className="menu-hint">launch.json</span>
-                </button>
-                <button className="menu-item" onClick={() => { setShowMenu(false); setShowInfo(true); }}
-                        disabled={Object.keys(caps).length === 0}>
-                  Session info <span className="menu-hint">{dbgLabel || "—"}</span>
-                </button>
-                <div className="menu-sep" />
-                <button className="menu-item" onClick={() => {
-                  setShowMenu(false);
-                  if ((phase === "running" || phase === "stopped") && !confirm("End the current debug session and start a new one?")) return;
-                  send({ cmd: "newSession" });
-                }}>New session <span className="menu-hint">keeps the target</span></button>
-                <a className="menu-item" href="/sessions" onClick={() => setShowMenu(false)}>
-                  All sessions… <span className="menu-hint">every live server</span>
-                </a>
-              </div>
-            </>
-          )}
-        </span>
-        {showInfo && (
-          <>
-            <div className="menu-backdrop" onClick={() => setShowInfo(false)} />
-            <div className="info-pop">
-              <div className="info-line"><span className="info-k">adapter</span> {dbgLabel}{adapterCmd ? ` — ${adapterCmd}` : ""}</div>
-              <div className="info-line"><span className="info-k">session</span> {sidRef.current || "—"}</div>
-              <details>
-                <summary>capabilities</summary>
-                <div className="caps-list">
-                  {Object.keys(caps).filter((k) => caps[k] === true).sort()
-                    .map((k) => <span key={k} className="cap">{k.replace(/^supports/, "")}</span>)}
-                </div>
-              </details>
-            </div>
-          </>
-        )}
+        <SessionMenu caps={caps} dbgLabel={dbgLabel} adapterCmd={adapterCmd} sessionId={S.sessionId}
+                     live={phase === "running" || phase === "stopped"} onConfigure={() => setShowConfig(true)} />
       </header>
       {offline && <div className="offline-banner">disconnected from the dapweb server: nothing you click will reach the session until it reconnects</div>}
       {/* main + the terminal are one workspace, and the target sheet overlays the
@@ -996,67 +657,15 @@ export default function App() {
           scrollbar. */}
       <div className="workspace">
       <main>
-        <div className="editor-col">
-          {/* One file still gets its tab: it names what you are looking at, and a
-              bar that appears only on the second file makes the first stop look
-              like a different app than every stop after it. */}
-          {tabs.length > 0 && (
-            <div className="filetabs">
-              {tabs.map((p) => (
-                <div key={p} className={"filetab" + (p === viewPath ? " active" : "")}
-                     title={p} onClick={() => openFile(p)}>{tabLabel.get(p) ?? base(p)}</div>
-              ))}
-            </div>
-          )}
-          <div className="source-wrap">
-            {(() => {
-              const asmPane = asm ? (
-                <SourceView text={asm.text} lang="asm" bps={EMPTY_BPS} stopLine={asm.pcLine}
-                            onToggle={noop} onSetMeta={noop} caps={caps}
-                            jump={asmJump}
-                            onLineClick={(ln, word) => {
-                              // Hex address (branch/call target or the addr column) → follow it.
-                              if (word && /^0x[0-9a-fA-F]+$/.test(word)) { followAddr(word); return; }
-                              // Otherwise asm → source: jump to the instruction's source line.
-                              const ins = disasm!.lines[ln - 1];
-                              if (ins?.line && stopPath) openFile(stopPath, ins.line);
-                            }} />
-              ) : null;
-              // No-debug-info frame (dyld/libc etc.): show the disassembly in place
-              // of the source — not a placeholder telling the user to run a command.
-              if (!hasSrc(viewPath)) {
-                if (asmPane) return asmPane;
-                // Nothing configured: a blank editor gives no clue what comes first.
-                if (!targetSet) return (
-                  <div className="src-empty">
-                    <div className="src-empty-title">Nothing to debug yet</div>
-                    <div>Type a program path in the target bar above and press Enter,</div>
-                    <div>or start dapweb with one: <code>dapweb /path/to/binary</code></div>
-                  </div>
-                );
-                return (
-                  <div className="src-hint">
-                    {stopped ? (caps.supportsDisassembleRequest ? "disassembling…" : "no source available for this frame")
+        <EditorPane tabs={tabs} viewPath={viewPath} openFile={openFile} files={files} bps={bps}
+                    stopPath={stopPath} stopLine={stopLine} caps={caps} jump={jump}
+                    disasm={disasm} inlineAsm={inlineAsm} fetchDisasm={fetchDisasm}
+                    onToggleBp={toggleBp} onSetBpMeta={setBpMeta} onHoverEval={evalHover}
+                    emptyHint={!targetSet ? "none"
+                      : stopped ? (caps.supportsDisassembleRequest ? "disassembling…" : "no source available for this frame")
                       : attachMode ? "Run attaches and opens the source where the process stops"
                       : stopMain ? "Run stops at main and opens its source here"
-                      : "no source configured: tick stop at main and Run to open it here"}
-                  </div>
-                );
-              }
-              return (
-                <>
-                  <SourceView text={srcText} lang={langFor(viewPath)} bps={viewBps}
-                              stopLine={viewPath === stopPath ? stopLine : 0}
-                              onToggle={toggleBp} onSetMeta={setBpMeta} onHoverEval={evalHover}
-                              caps={caps} jump={jump}
-                              asmByLine={inlineAsm && viewPath === stopPath ? asmByLine : undefined}
-                              asmPc={disasm?.pc} />
-                  {asm && !inlineAsm && asmPane}
-                </>
-              );
-            })()}
-          </div>
-        </div>
+                      : "no source configured: tick stop at main and Run to open it here"} />
         <AsideDrag onResize={(w) => setAsideW(w)} />
         <div className="aside" style={{ width: asideW }}>
           {/* Ordered by how often a stop sends you there: the values first, then
@@ -1077,22 +686,8 @@ export default function App() {
                 ))
               : <span className="hint">{stopped ? "no frames" : "run to a breakpoint to see the call stack"}</span>}
           </Panel>
-          <Panel title="Watch" persist="dapweb.watchCollapsed" badge={watches.length || null} action={<button className="addbtn" onClick={() => {
-            const expr = prompt("watch expression:");
-            if (!expr) return;
-            setWatches((w) => [...w, { expr, value: null }]);
-            if (stopped) setTimeout(() => evalWatch(expr));
-          }}>+</button>}>
-            {watches.length
-              ? watches.map((w, i) => (
-                  <div key={i} className="wrow">
-                    <span className="expr">{w.expr}</span>
-                    <span className="wval"><Val text={w.value ?? "—"} onAddr={memLinks ? viewMemory : undefined} /></span>
-                    <span className="rm" onClick={() => setWatches((x) => x.filter((_, j) => j !== i))}>✕</span>
-                  </div>
-                ))
-              : <span className="hint">no expressions: + adds one, evaluated at every stop</span>}
-          </Panel>
+          <WatchPanel watches={watches} setWatches={setWatches} stopped={stopped} evalWatch={evalWatch}
+                      onAddr={memLinks ? viewMemory : undefined} />
           <Panel title="Breakpoints" persist="dapweb.bpsCollapsed" badge={bps.size || null} action={bps.size > 0 && (
             <span className="bpacts">
               <button className="addbtn" title={anyBpEnabled ? "disable all" : "enable all"}
@@ -1103,51 +698,12 @@ export default function App() {
             <BpList bps={bps} files={files} onJump={(p, ln) => openFile(p, ln)} onRemove={removeBp} onToggle={setBpEnabled}
                     onEdit={(path, line, x, y) => setBpEdit({ path, line, x, y })} />
           </Panel>
-          {threads.length > 0 && (
-            // One thread has nothing to choose between, so it starts folded to its
-            // count; Panel reads the default only on mount, which is each new stop
-            // after a run ends (threads empties on terminate).
-            <Panel title="Threads" persist="dapweb.threadsCollapsed"
-                   defaultCollapsed={threads.length === 1} badge={threads.length}>
-              {threads.map((t) => {
-                const loc = tlocs.get(t.id);
-                const tl = threadLabel(t.name, t.id);
-                return (
-                  <div key={t.id} className={"frame" + (t.id === curTid ? " top" : "")}
-                       title={tl.tip} onClick={() => selectThread(t)}>
-                    <span className="tname">{tl.label}</span>
-                    {loc && <span className="tloc">
-                      {loc.label}
-                      {loc.pc && memLinks && (
-                        <span className="addr" title="view memory at pc"
-                              onClick={(e) => { e.stopPropagation(); viewMemory(loc.pc); }}> {loc.pc}</span>
-                      )}
-                    </span>}
-                  </div>
-                );
-              })}
-            </Panel>
-          )}
+          <ThreadsPanel threads={threads} tlocs={tlocs} curTid={curTid} onSelect={selectThread}
+                        onAddr={memLinks ? viewMemory : undefined} />
           {/* Registers moved to their own bottom-panel tab (next to Memory) —
               they're tall and noisy beside LOCALS, and pair with the memory view. */}
           {/* Rarely touched per-session — lives at the bottom on purpose. */}
-          {excFilters.length > 0 && (
-            // lldb-dap offers C++ and Objective-C filters to every program, a C
-            // one included, so the list starts folded down to its count.
-            <Panel title="Exceptions" persist="dapweb.excCollapsed" defaultCollapsed
-                   badge={`${excFilters.filter((f: any) => excSel.has(f.filter)).length} on`}>
-              {excFilters.map((f: any) => (
-                <label key={f.filter} className="excrow">
-                  <input type="checkbox" checked={excSel.has(f.filter)} onChange={(e) => {
-                    const next = new Set(excSel);
-                    e.target.checked ? next.add(f.filter) : next.delete(f.filter);
-                    setExcSel(next);
-                    send({ cmd: "setExceptions", filters: [...next] });
-                  }} /> {f.label || f.filter}
-                </label>
-              ))}
-            </Panel>
-          )}
+          <ExceptionsPanel caps={caps} />
         </div>
         {bpEdit && (
           <BpPopover
@@ -1161,78 +717,11 @@ export default function App() {
           />
         )}
       </main>
-      <div className="bottom" style={{ height: bottomH }}>
-        <DragBar onResize={(h) => setBottomH(h)} />
-        <div className="tabs">
-          <div className={"tab" + (tab === "term" ? " active" : "")} onClick={() => setTab("term")}>Terminal</div>
-          {/* Both views are pure readMemory consumers — the hex window IS a
-              readMemory, and the stack drawing walks the fp chain with one per
-              frame. An adapter without it (debugpy, most language adapters)
-              gave two tabs that could only ever say "unavailable", so they are
-              offered where they work, the way Registers already is. */}
-          {memLinks && (
-            <div className={"tab" + (tab === "mem" ? " active" : "")} onClick={() => setTab("mem")}>Memory</div>
-          )}
-          {S.hasRegisters && (
-            <div className={"tab" + (tab === "regs" ? " active" : "")} onClick={() => setTab("regs")}>Registers</div>
-          )}
-          {memLinks && (
-            <div className={"tab" + (tab === "stack" ? " active" : "")} onClick={() => setTab("stack")}>Stack</div>
-          )}
-          {binTab && (
-            <div className={"tab" + (tab === "bin" ? " active" : "")} onClick={() => setTab("bin")}>Binary</div>
-          )}
-          {tab === "term" && (
-            <span className="termlegend">
-              <span className={"termchip" + (termShown.has("prog") ? " on" : "")} onClick={() => toggleTerm("prog")}
-                    data-tip="program output, plain. Click to show or hide">
-                <span className="sw prog" /> program</span>
-              <span className={"termchip" + (termShown.has("adapter") ? " on" : "")} onClick={() => toggleTerm("adapter")}
-                    data-tip={`${dbgLabel}'s own console output, tagged. Hidden by default; click to show or hide`}>
-                <span className="sw dbg" /> {dbgLabel}</span>
-            </span>
-          )}
-        </div>
-        {/* Merged terminal (VS Code-style): the debuggee's tty and the debugger's
-            own output share one scrollback; the REPL input drives evaluate. */}
-        <div className="tabpane termpane" style={{ display: tab === "term" ? "flex" : "none" }}>
-          <XTermView termRef={termRef} />
-          <DebugConsole append={consoleAppend} frame0Ref={frame0Ref}
-                        canComplete={!!caps.supportsCompletionsRequest} />
-        </div>
-        <div className="tabpane" style={{ display: tab === "mem" && memLinks ? "flex" : "none" }}>
-          <MemView mem={mem} addr={memAddr} setAddr={setMemAddr} err={memErr}
-                   enabled={memLinks && stopped} onLoad={viewMemory} classify={classifyRegion}
-                   locals={locals} frames={frames} regFrame={regFrame} />
-        </div>
-        {/* Always mounted (display-toggled): RegistersPanel reports sp/fp/lr up via
-            onFrame, which the Memory and Stack views depend on regardless of tab. */}
-        {S.hasRegisters && (
-          <div className="tabpane regpane" style={{ display: tab === "regs" ? "flex" : "none" }}>
-            <RegistersPanel regRef={registersRef} stopSeq={stopSeq} disabled={!stopped}
-                            classify={classifyRegion} onFrame={setRegFrame}
-                            onSetVar={caps.supportsSetVariable ? setVar : undefined}
-                            onAddr={memLinks ? viewMemory : undefined} bare />
-          </div>
-        )}
-        {/* Mounted only when visible: the drawing walks the fp chain with a
-            readMemory round-trip per frame on every stop. */}
-        {tab === "stack" && memLinks && (
-          <div className="tabpane">
-            <StackView enabled={memLinks && stopped} regFrame={regFrame} frames={frames}
-                       stopSeq={stopSeq} onAddr={viewMemory} />
-          </div>
-        )}
-        {/* Was a modal behind an unlabelled chip beside the target input, in a
-            toolbar with no room to say what it was. It is a report about the
-            thing being debugged, so it belongs where the other reports are —
-            and here it has the width to print a path without wrapping. */}
-        {tab === "bin" && binTab && (
-          <div className="tabpane binpane">
-            <BinInfoView info={binInfo} />
-          </div>
-        )}
-      </div>
+      <BottomPanel tab={tab} setTab={setTab} memLinks={memLinks} hasRegisters={S.hasRegisters} binTab={binTab}
+                   binInfo={binInfo} dbgLabel={dbgLabel} termRef={termRef} consoleAppend={consoleAppend}
+                   frame0Ref={frame0Ref} caps={caps} stopped={stopped} locals={locals} frames={frames}
+                   stopSeq={stopSeq} registersRef={registersRef} setVar={setVar} viewMemory={viewMemory}
+                   mem={mem} memAddr={memAddr} setMemAddr={setMemAddr} memErr={memErr} regions={regions} />
       {showConfig ? (
         <>
           <div className="drawer-backdrop" onClick={() => setShowConfig(false)} />
