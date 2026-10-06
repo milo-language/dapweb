@@ -151,6 +151,15 @@ struct BinInfo {
     hasDebugInfo: bool,
     stripped: bool,
     dsym: string,
+    // Go's linker embeds build info (module path, Go version) in its own
+    // section, so its presence identifies a Go program without reading code.
+    goBuildInfo: bool,
+    // How the code was optimized, from what the binary records (see the
+    // optimization section below): "-O0", "-O2", "optimized", "not optimized",
+    // "-N -l", or "unknown"; optSource names the record it came from.
+    opt: string,
+    optimized: bool,
+    optSource: string,
     notes: Vec<string>,
 }
 
@@ -158,7 +167,7 @@ fn newBinInfo(): BinInfo {
     return BinInfo {
         format: "unknown", cls: "", endian: "", arch: "", fileType: "",
         debugInfo: "none", hasDebugInfo: false, stripped: false, dsym: "",
-        notes: Vec.new(),
+        goBuildInfo: false, opt: "unknown", optimized: false, optSource: "", notes: Vec.new(),
     }
 }
 
@@ -229,95 +238,20 @@ fn inspectElf(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64): v
         info.note("unrecognised e_machine")
     }
 
-    // Section-table locators live at different offsets in the two classes; the
-    // section headers themselves are 64 bytes (ELF64) vs 40 (ELF32).
-    var shoff: i64 = 0
-    var shentsize: i64 = 0
-    var shnum: i64 = 0
-    var shstrndx: i64 = 0
-    if is64 {
-        shoff = u64At(head, 40, little)
-        shentsize = u16At(head, 58, little)
-        shnum = u16At(head, 60, little)
-        shstrndx = u16At(head, 62, little)
-    } else {
-        shoff = u32At(head, 32, little)
-        shentsize = u16At(head, 46, little)
-        shnum = u16At(head, 48, little)
-        shstrndx = u16At(head, 50, little)
-    }
-    if shoff <= 0 || shentsize <= 0 || shoff >= fileSize {
-        info.note("no section table; debug info cannot be determined")
-        return
-    }
-
-    // Extended numbering: an object with >= 0xFF00 sections stores the real
-    // count in section 0's sh_size, and an out-of-range string-table index in
-    // its sh_link. Section 0 is otherwise all zeroes.
-    if shnum == 0 || shstrndx == 65535 {
-        let sh0 = readAt(&mut f, shoff, shentsize)
-        if sh0.len < shentsize {
-            info.note("truncated section table")
-            return
-        }
-        if shnum == 0 {
-            if is64 {
-                shnum = u64At(sh0, 32, little)
-            } else {
-                shnum = u32At(sh0, 20, little)
-            }
-        }
-        if shstrndx == 65535 {
-            if is64 {
-                shstrndx = u32At(sh0, 40, little)
-            } else {
-                shstrndx = u32At(sh0, 24, little)
-            }
-        }
-    }
-    if shnum <= 0 || shstrndx < 0 || shstrndx >= shnum {
-        info.note("section table locators out of range")
-        return
-    }
-    let tableBytes = shnum * shentsize
-    if tableBytes > MAX_TABLE_BYTES || shoff + tableBytes > fileSize {
-        info.note("section table extends past end of file")
-        return
-    }
-    let table = readAt(&mut f, shoff, tableBytes)
-    if table.len < tableBytes {
-        info.note("truncated section table")
-        return
-    }
-
-    // The names of every section live in one string table, itself a section.
-    var strOff: i64 = 0
-    var strSize: i64 = 0
-    let strHdr = shstrndx * shentsize
-    if is64 {
-        strOff = u64At(table, strHdr + 24, little)
-        strSize = u64At(table, strHdr + 32, little)
-    } else {
-        strOff = u32At(table, strHdr + 16, little)
-        strSize = u32At(table, strHdr + 20, little)
-    }
-    if strOff <= 0 || strSize <= 0 || strSize > MAX_TABLE_BYTES || strOff + strSize > fileSize {
-        info.note("unreadable section-header string table")
-        return
-    }
-    let strtab = readAt(&mut f, strOff, strSize)
-
+    let sects = elfSections(&mut info, &mut f, head, fileSize, is64, little)
     var hasSymtab = false
     var hasDynsym = false
     var hasInterp = false
     var debugLink = false
     var compressed = false
-    var i: i64 = 0
-    while i < shnum {
-        let nameOff = u32At(table, i * shentsize, little)
-        let name = cstrAt(strtab, nameOff, 128)
+    for s in sects {
+        let name = s.name.clone()
         if name == ".debug_info" {
             info.hasDebugInfo = true
+            // SHF_COMPRESSED: zlib/zstd payload behind an Elf_Chdr.
+            if (s.flags & 2048) != 0 {
+                compressed = true
+            }
         } else if name == ".zdebug_info" {
             info.hasDebugInfo = true
             compressed = true
@@ -329,8 +263,17 @@ fn inspectElf(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64): v
             debugLink = true
         } else if name == ".interp" {
             hasInterp = true
+        } else if name == ".go.buildinfo" {
+            info.goBuildInfo = true
         }
-        i = i + 1
+    }
+    if sects.len == 0 {
+        return
+    }
+    if info.goBuildInfo {
+        goOpt(&mut info, &mut f, sects)
+    } else if info.hasDebugInfo && !compressed {
+        dwarfOpt(&mut info, &mut f, sects, false)
     }
 
     // Every modern toolchain links executables position-independent, which makes
@@ -516,6 +459,7 @@ fn inspectMachO(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64, 
     let sizeofcmds = u32At(head, 20, little)
 
     var inBinaryDwarf = false
+    var msects: Vec<Sect> = Vec.new()
     var hasSymtab = false
     var symoff: i64 = 0
     var nsyms: i64 = 0
@@ -557,12 +501,32 @@ fn inspectMachO(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64, 
             off = off + cmdsize
             seen = seen + 1
         }
+        msects = machoSections(cmds, ncmds, little)
     }
 
     if inBinaryDwarf {
         info.hasDebugInfo = true
     }
     findDsym(&mut info, path)
+    info.goBuildInfo = sectIndex(msects, ".go.buildinfo") >= 0
+    if info.goBuildInfo {
+        goOpt(&mut info, &mut f, msects)
+    } else if inBinaryDwarf {
+        dwarfOpt(&mut info, &mut f, msects, true)
+    } else if info.dsym.len > 0 {
+        // A linked Mach-O keeps only a debug map; the DWARF itself is in the
+        // dSYM's own Mach-O, which has the same section layout.
+        let inner = info.dsym.clone() + "/Contents/Resources/DWARF/" + Path.basename(path)
+        if let Result.Ok(dfh) = File.openRead(inner) {
+            var df = dfh
+            let dsize = df.size()
+            let dhead = readAt(&mut df, 0, 64)
+            if dhead.len >= 32 {
+                let dsects = machoFileSections(&mut df, dhead, dsize)
+                dwarfOpt(&mut info, &mut df, dsects, true)
+            }
+        }
+    }
 
     if inBinaryDwarf && info.dsym.len > 0 {
         info.debugInfo = "DWARF (in binary + .dSYM)"
@@ -776,6 +740,10 @@ pub fn binInfoJson(path: &string): string {
         .bool("hasDebugInfo", info.hasDebugInfo)
         .bool("stripped", info.stripped)
         .str("dsym", info.dsym)
+        .bool("goBuildInfo", info.goBuildInfo)
+        .str("opt", info.opt)
+        .bool("optimized", info.optimized)
+        .str("optSource", info.optSource)
         .arr("notes", notes)
         .build()
 }
@@ -793,4 +761,723 @@ fn fatInfo(info: &mut BinInfo, head: &string, bigEndian: bool): void {
         info.note("universal binary with an unreadable architecture count")
     }
     info.note("per-architecture debug info was not inspected")
+}
+
+// Whether `path` is a Go program, from its embedded build info section. This is
+// the debugger picker's question, asked per keystroke and per listed process, so
+// it reads only what that needs: the ELF section table, or the Mach-O load
+// commands, never the symbol table binInfoJson walks. Anything else (PE, fat,
+// unreadable) is "not Go", since the answer only upgrades lldb to delve.
+pub fn isGoBinary(path: &string): bool {
+    if path.len == 0 || !pathExists(path) || isDir(path) {
+        return false
+    }
+    let Result.Ok(fh) = File.openRead(path) else {
+        return false
+    }
+    var f = fh
+    let size = f.size()
+    let head = readAt(&mut f, 0, 64)
+    if head.len < 32 {
+        return false
+    }
+    if head[0] == 127 && head[1] == 'E' && head[2] == 'L' && head[3] == 'F' && head.len >= 64 {
+        var scratch = newBinInfo()
+        let sects = elfSections(&mut scratch, &mut f, head, size, head[4] == 2, head[5] != 2)
+        return sectIndex(sects, ".go.buildinfo") >= 0
+    }
+    return sectIndex(machoFileSections(&mut f, head, size), ".go.buildinfo") >= 0
+}
+
+// ── section tables ──
+//
+// Both formats reduced to one list so the DWARF and Go readers below do not
+// care which container they are in. Mach-O names are normalised to the ELF
+// spelling ("__debug_info" is ".debug_info"); Mach-O truncates names to 16
+// bytes, so the two that overflow are mapped back by hand.
+
+struct Sect {
+    name: string,
+    off: i64,
+    size: i64,
+    flags: i64,
+}
+
+fn sectIndex(sects: &Vec<Sect>, name: &string): i64 {
+    var i: i64 = 0
+    while i < sects.len {
+        if sects[i].name == name {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Every section header of an ELF file, or an empty list after noting why not.
+fn elfSections(info: &mut BinInfo, f: &mut File, head: &string, fileSize: i64, is64: bool, little: bool): Vec<Sect> {
+    var out: Vec<Sect> = Vec.new()
+    // Section-table locators live at different offsets in the two classes; the
+    // section headers themselves are 64 bytes (ELF64) vs 40 (ELF32).
+    var shoff: i64 = 0
+    var shentsize: i64 = 0
+    var shnum: i64 = 0
+    var shstrndx: i64 = 0
+    if is64 {
+        shoff = u64At(head, 40, little)
+        shentsize = u16At(head, 58, little)
+        shnum = u16At(head, 60, little)
+        shstrndx = u16At(head, 62, little)
+    } else {
+        shoff = u32At(head, 32, little)
+        shentsize = u16At(head, 46, little)
+        shnum = u16At(head, 48, little)
+        shstrndx = u16At(head, 50, little)
+    }
+    if shoff <= 0 || shentsize <= 0 || shoff >= fileSize {
+        info.note("no section table; debug info cannot be determined")
+        return out
+    }
+
+    // Extended numbering: an object with >= 0xFF00 sections stores the real
+    // count in section 0's sh_size, and an out-of-range string-table index in
+    // its sh_link. Section 0 is otherwise all zeroes.
+    if shnum == 0 || shstrndx == 65535 {
+        let sh0 = readAt(&mut f, shoff, shentsize)
+        if sh0.len < shentsize {
+            info.note("truncated section table")
+            return out
+        }
+        if shnum == 0 {
+            if is64 {
+                shnum = u64At(sh0, 32, little)
+            } else {
+                shnum = u32At(sh0, 20, little)
+            }
+        }
+        if shstrndx == 65535 {
+            if is64 {
+                shstrndx = u32At(sh0, 40, little)
+            } else {
+                shstrndx = u32At(sh0, 24, little)
+            }
+        }
+    }
+    if shnum <= 0 || shstrndx < 0 || shstrndx >= shnum {
+        info.note("section table locators out of range")
+        return out
+    }
+    let tableBytes = shnum * shentsize
+    if tableBytes > MAX_TABLE_BYTES || shoff + tableBytes > fileSize {
+        info.note("section table extends past end of file")
+        return out
+    }
+    let table = readAt(&mut f, shoff, tableBytes)
+    if table.len < tableBytes {
+        info.note("truncated section table")
+        return out
+    }
+
+    // The names of every section live in one string table, itself a section.
+    var strOff: i64 = 0
+    var strSize: i64 = 0
+    let strHdr = shstrndx * shentsize
+    if is64 {
+        strOff = u64At(table, strHdr + 24, little)
+        strSize = u64At(table, strHdr + 32, little)
+    } else {
+        strOff = u32At(table, strHdr + 16, little)
+        strSize = u32At(table, strHdr + 20, little)
+    }
+    if strOff <= 0 || strSize <= 0 || strSize > MAX_TABLE_BYTES || strOff + strSize > fileSize {
+        info.note("unreadable section-header string table")
+        return out
+    }
+    let strtab = readAt(&mut f, strOff, strSize)
+    var i: i64 = 0
+    while i < shnum {
+        let h = i * shentsize
+        var s = Sect { name: cstrAt(strtab, u32At(table, h, little), 128), off: 0, size: 0, flags: 0 }
+        s.flags = u32At(table, h + 8, little)
+        if is64 {
+            s.off = u64At(table, h + 24, little)
+            s.size = u64At(table, h + 32, little)
+        } else {
+            s.off = u32At(table, h + 16, little)
+            s.size = u32At(table, h + 20, little)
+        }
+        out.push(s)
+        i = i + 1
+    }
+    return out
+}
+
+// Every section of every segment in an already-read Mach-O load-command block.
+// The section headers follow each segment header inline: 72 + 80*n bytes for
+// LC_SEGMENT_64, 56 + 68*n for LC_SEGMENT, sectname first in each.
+fn machoSections(cmds: &string, ncmds: i64, little: bool): Vec<Sect> {
+    var out: Vec<Sect> = Vec.new()
+    var off: i64 = 0
+    var seen: i64 = 0
+    while seen < ncmds {
+        let cmd = u32At(cmds, off, little)
+        let cmdsize = u32At(cmds, off + 4, little)
+        if cmd < 0 || cmdsize < 8 || off + cmdsize > cmds.len {
+            break
+        }
+        if cmd == 25 || cmd == 1 {
+            let is64 = cmd == 25
+            var hdr: i64 = 56
+            var each: i64 = 68
+            var nsects = u32At(cmds, off + 48, little)
+            if is64 {
+                hdr = 72
+                each = 80
+                nsects = u32At(cmds, off + 64, little)
+            }
+            if nsects > 0 && hdr + nsects * each <= cmdsize {
+                var i: i64 = 0
+                while i < nsects {
+                    let at = off + hdr + i * each
+                    var name = cstrAt(cmds, at, 16)
+                    if name.startsWith("__") {
+                        name = "." + name.substr(2, name.len)
+                    }
+                    if name == ".debug_str_offs" {
+                        name = ".debug_str_offsets"
+                    } else if name == ".go_buildinfo" {
+                        name = ".go.buildinfo"
+                    }
+                    var s = Sect { name: name, off: 0, size: 0, flags: 0 }
+                    if is64 {
+                        s.size = u64At(cmds, at + 40, little)
+                        s.off = u32At(cmds, at + 48, little)
+                    } else {
+                        s.size = u32At(cmds, at + 36, little)
+                        s.off = u32At(cmds, at + 40, little)
+                    }
+                    out.push(s)
+                    i = i + 1
+                }
+            }
+        }
+        off = off + cmdsize
+        seen = seen + 1
+    }
+    return out
+}
+
+// The sections of a thin little-endian Mach-O, or none if `head` is not one.
+// No Go or DWARF producer this reads for targets big-endian Mach-O.
+fn machoFileSections(f: &mut File, head: &string, fileSize: i64): Vec<Sect> {
+    let is64 = head[0] == 207 && head[1] == 250 && head[2] == 237 && head[3] == 254
+    let is32 = head[0] == 206 && head[1] == 250 && head[2] == 237 && head[3] == 254
+    if !is64 && !is32 {
+        return Vec.new()
+    }
+    var hdrSize: i64 = 28
+    if is64 {
+        hdrSize = 32
+    }
+    let ncmds = u32At(head, 16, true)
+    let sizeofcmds = u32At(head, 20, true)
+    if ncmds <= 0 || sizeofcmds <= 0 || sizeofcmds > MAX_TABLE_BYTES || hdrSize + sizeofcmds > fileSize {
+        return Vec.new()
+    }
+    let cmds = readAt(&mut f, hdrSize, sizeofcmds)
+    return machoSections(cmds, ncmds, true)
+}
+
+// ── optimization level ──
+//
+// "Why are my locals <optimized out>?" is the second most common debugging
+// surprise after missing -g, so the summary says how the code was compiled.
+// Only what the binary records is reported, in this order of precision:
+//   1. -O switches in a compile unit's DW_AT_producer (GCC records its switches
+//      there by default) or DW_AT_APPLE_flags (clang's -grecord-command-line on
+//      Darwin). Exact level.
+//   2. DW_AT_APPLE_optimized on any subprogram: clang marks every optimized
+//      function with it under Apple tuning (lldb's "compiled with optimization"
+//      warning reads the same flag). Optimized, level unknown. Under that same
+//      tuning its ABSENCE across clang units that have subprograms is a fact
+//      too: LLVM emits it for every subprogram of an optimized unit.
+//   3. Go build info's -gcflags: -N -l disables optimization and inlining.
+// Anything else stays "unknown".
+
+// A forward-only reader over a byte buffer. `bad` latches on any read past the
+// end, so callers check once after a run of reads instead of after each.
+struct Cur {
+    pos: i64,
+    bad: bool,
+}
+
+impl Cur {
+    fn u8(self: &mut Self, b: &string): i64 {
+        if self.pos >= b.len {
+            self.bad = true
+            return 0
+        }
+        let v = b[self.pos] as i64
+        self.pos = self.pos + 1
+        return v
+    }
+
+    fn fixed(self: &mut Self, b: &string, width: i64, little: bool): i64 {
+        var v: i64 = 0
+        if width == 8 {
+            v = u64At(b, self.pos, little)
+        } else {
+            v = uintAt(b, self.pos, width, little)
+        }
+        if v < 0 {
+            self.bad = true
+            return 0
+        }
+        self.pos = self.pos + width
+        return v
+    }
+
+    fn skip(self: &mut Self, b: &string, n: i64): void {
+        if n < 0 || self.pos + n > b.len {
+            self.bad = true
+            return
+        }
+        self.pos = self.pos + n
+    }
+
+    // ULEB128. SLEB128 has the same length, and every value read through this
+    // is a code, form, length or index, so the sign is never needed. Bits past
+    // 56 are dropped rather than shifted: arithmetic is checked and would trap.
+    fn leb(self: &mut Self, b: &string): i64 {
+        var v: i64 = 0
+        var shift: i64 = 0
+        while true {
+            let byte = self.u8(b)
+            if self.bad {
+                return 0
+            }
+            if shift < 56 {
+                v = v | ((byte & 127) << shift)
+            }
+            shift = shift + 7
+            if (byte & 128) == 0 {
+                break
+            }
+        }
+        return v
+    }
+
+    fn cstr(self: &mut Self, b: &string): string {
+        let s = cstrAt(b, self.pos, 4096)
+        self.skip(b, s.len + 1)
+        return s
+    }
+}
+
+// One attribute value of a compile-unit DIE, as far as strings need it:
+// kind 1 = inline text, 2 = .debug_str offset, 3 = .debug_line_str offset,
+// 4 = .debug_str_offsets index; 0 = anything else (num holds a constant).
+struct FormVal {
+    kind: i64,
+    num: i64,
+    text: string,
+}
+
+// Read one value of `form` (DWARF 2-5 plus the GNU split-DWARF forms),
+// advancing past it. Unknown forms latch `bad`: the size of what follows is
+// then unknowable and the rest of the DIE is noise.
+fn readForm(c: &mut Cur, b: &string, form: i64, os: i64, asz: i64, little: bool): FormVal {
+    var v = FormVal { kind: 0, num: 0, text: "" }
+    if form == 8 {
+        v.kind = 1
+        v.text = c.cstr(b)
+    } else if form == 14 {
+        v.kind = 2
+        v.num = c.fixed(b, os, little)
+    } else if form == 31 {
+        v.kind = 3
+        v.num = c.fixed(b, os, little)
+    } else if form == 26 || form == 7938 {
+        v.kind = 4
+        v.num = c.leb(b)
+    } else if form >= 37 && form <= 40 {
+        v.kind = 4
+        v.num = c.fixed(b, form - 36, little)
+    } else if form == 1 {
+        c.skip(b, asz)
+    } else if form == 11 || form == 12 || form == 17 {
+        v.num = c.fixed(b, 1, little)
+    } else if form == 5 || form == 18 {
+        v.num = c.fixed(b, 2, little)
+    } else if form == 6 || form == 19 || form == 28 {
+        v.num = c.fixed(b, 4, little)
+    } else if form == 7 || form == 20 || form == 32 || form == 36 {
+        v.num = c.fixed(b, 8, little)
+    } else if form == 16 || form == 23 || form == 29 || form == 7968 || form == 7969 {
+        v.num = c.fixed(b, os, little)
+    } else if form == 13 || form == 15 || form == 21 || form == 27 || form == 34 || form == 35 || form == 7937 {
+        v.num = c.leb(b)
+    } else if form >= 41 && form <= 44 {
+        c.skip(b, form - 40)
+    } else if form == 30 {
+        c.skip(b, 16)
+    } else if form == 25 || form == 33 {
+        // flag_present / implicit_const: no bytes in the DIE
+    } else if form == 9 || form == 24 {
+        let n = c.leb(b)
+        c.skip(b, n)
+    } else if form == 10 {
+        let n = c.fixed(b, 1, little)
+        c.skip(b, n)
+    } else if form == 3 {
+        let n = c.fixed(b, 2, little)
+        c.skip(b, n)
+    } else if form == 4 {
+        let n = c.fixed(b, 4, little)
+        c.skip(b, n)
+    } else if form == 22 {
+        let inner = c.leb(b)
+        if inner == 22 {
+            c.bad = true
+            return v
+        }
+        return readForm(&mut c, b, inner, os, asz, little)
+    } else {
+        c.bad = true
+    }
+    return v
+}
+
+// The -O level a compiler command line asks for, or "" if it names none. The
+// last switch wins, as it does for the compiler; a bare "-O" is -O1.
+pub fn optLevelOf(cmdline: &string): string {
+    var level: string = ""
+    for tok in cmdline.splitWhitespace() {
+        if !tok.startsWith("-O") {
+            continue
+        }
+        let rest = tok.substr(2, tok.len)
+        if rest.len == 0 {
+            level = "-O1"
+        } else if rest == "0" || rest == "1" || rest == "2" || rest == "3" || rest == "s"
+            || rest == "z" || rest == "g" || rest == "fast" {
+            level = tok.clone()
+        }
+    }
+    return level
+}
+
+// The level a producer string pins down: its own -O switch, or -O0 for a GCC
+// producer that recorded switches but no -O (GCC's default is -O0 and it
+// records every switch it was given, so a missing -O is the default, not a gap).
+pub fn producerOptLevel(producer: &string): string {
+    let lvl = optLevelOf(producer)
+    if lvl.len > 0 {
+        return lvl
+    }
+    if producer.startsWith("GNU ") && producer.contains(" -") {
+        return "-O0"
+    }
+    return ""
+}
+
+fn dwarfString(f: &mut File, sects: &Vec<Sect>, v: &FormVal, strOffBase: i64, os: i64, little: bool): string {
+    if v.kind == 1 {
+        return v.text.clone()
+    }
+    var sectName = ".debug_str"
+    var strOff = v.num
+    if v.kind == 3 {
+        sectName = ".debug_line_str"
+    } else if v.kind == 4 {
+        let so = sectIndex(sects, ".debug_str_offsets")
+        if so < 0 {
+            return ""
+        }
+        let at = strOffBase + v.num * os
+        if at < 0 || at + os > sects[so].size {
+            return ""
+        }
+        let raw = readAt(&mut f, sects[so].off + at, os)
+        if os == 8 {
+            strOff = u64At(raw, 0, little)
+        } else {
+            strOff = u32At(raw, 0, little)
+        }
+    } else if v.kind != 2 {
+        return ""
+    }
+    let si = sectIndex(sects, sectName)
+    if si < 0 || strOff < 0 || strOff >= sects[si].size {
+        return ""
+    }
+    var want = sects[si].size - strOff
+    if want > 4096 {
+        want = 4096
+    }
+    return cstrAt(readAt(&mut f, sects[si].off + strOff, want), 0, 4096)
+}
+
+// Find abbreviation declaration `code` in the table at `tableOff`, leaving `c`
+// on its first attribute spec; false if the table does not have it.
+fn seekAbbrev(c: &mut Cur, abbrev: &string, tableOff: i64, code: i64): bool {
+    c.pos = tableOff
+    c.bad = false
+    while !c.bad {
+        let k = c.leb(abbrev)
+        if k == 0 || c.bad {
+            return false
+        }
+        let _tag = c.leb(abbrev)
+        c.skip(abbrev, 1)
+        if k == code {
+            return !c.bad
+        }
+        skipAttrSpecs(&mut c, abbrev)
+    }
+    return false
+}
+
+// Past one declaration's (attribute, form[, implicit const]) list.
+fn skipAttrSpecs(c: &mut Cur, abbrev: &string): void {
+    while !c.bad {
+        let at = c.leb(abbrev)
+        let fm = c.leb(abbrev)
+        if fm == 33 {
+            let _ic = c.leb(abbrev)
+        }
+        if at == 0 && fm == 0 {
+            return
+        }
+    }
+}
+
+// Fill info.opt* from the DWARF in `sects` (this file, or its dSYM's).
+fn dwarfOpt(info: &mut BinInfo, f: &mut File, sects: &Vec<Sect>, appleTuning: bool): void {
+    let ii = sectIndex(sects, ".debug_info")
+    let ai = sectIndex(sects, ".debug_abbrev")
+    if ii < 0 || ai < 0 || sects[ai].size <= 0 {
+        return
+    }
+    var abbrevSize = sects[ai].size
+    if abbrevSize > MAX_TABLE_BYTES {
+        abbrevSize = MAX_TABLE_BYTES
+    }
+    let abbrev = readAt(&mut f, sects[ai].off, abbrevSize)
+    let little = info.endian != "big"
+
+    // Pass 1: the abbreviation tables alone say whether any subprogram can carry
+    // DW_AT_APPLE_optimized (0x3fe1): a producer only declares what it uses.
+    var hasSubprogram = false
+    var hasAppleOpt = false
+    var c = Cur { pos: 0, bad: false }
+    while c.pos < abbrev.len && !c.bad {
+        let code = c.leb(abbrev)
+        if code == 0 {
+            continue // end of one unit's table; the next follows
+        }
+        let tag = c.leb(abbrev)
+        c.skip(abbrev, 1)
+        if tag == 46 {
+            hasSubprogram = true
+        }
+        while !c.bad {
+            let at = c.leb(abbrev)
+            let fm = c.leb(abbrev)
+            if fm == 33 {
+                let _ic = c.leb(abbrev)
+            }
+            if at == 0 && fm == 0 {
+                break
+            }
+            if at == 16353 && tag == 46 {
+                hasAppleOpt = true
+            }
+        }
+    }
+
+    // Pass 2: the first DIE of each compile unit, for its producer and flags.
+    // Bounded: a few hundred units say everything the summary needs.
+    var level: string = ""
+    var producer: string = ""
+    var fromFlags = false
+    var units: i64 = 0
+    var off: i64 = 0
+    let infoSize = sects[ii].size
+    while off + 11 < infoSize && units < 256 {
+        let hdr = readAt(&mut f, sects[ii].off + off, 32)
+        let len32 = u32At(hdr, 0, little)
+        var os: i64 = 4
+        var hlen: i64 = 4
+        var ulen = len32
+        if len32 == 4294967295 {
+            os = 8
+            hlen = 12
+            ulen = u64At(hdr, 4, little)
+        } else if len32 >= 4294967280 {
+            break
+        }
+        if ulen <= 0 {
+            break
+        }
+        let ver = u16At(hdr, hlen, little)
+        var hc = Cur { pos: hlen + 2, bad: false }
+        var abbrOff: i64 = 0
+        var asz: i64 = 8
+        if ver >= 5 {
+            let utype = hc.u8(hdr)
+            asz = hc.u8(hdr)
+            abbrOff = hc.fixed(hdr, os, little)
+            // skeleton/split units carry a dwo_id, type units a signature and offset
+            if utype == 4 || utype == 5 {
+                hc.skip(hdr, 8)
+            } else if utype == 2 || utype == 6 {
+                hc.skip(hdr, 8 + os)
+            }
+        } else if ver >= 2 {
+            abbrOff = hc.fixed(hdr, os, little)
+            asz = hc.u8(hdr)
+        } else {
+            break
+        }
+        if hc.bad {
+            break
+        }
+        let unitEnd = off + hlen + ulen
+        var dieLen = unitEnd - off - hc.pos
+        if dieLen > 4096 {
+            dieLen = 4096
+        }
+        let die = readAt(&mut f, sects[ii].off + off + hc.pos, dieLen)
+        var dc = Cur { pos: 0, bad: false }
+        let code = dc.leb(die)
+        var ac = Cur { pos: 0, bad: false }
+        if code > 0 && seekAbbrev(&mut ac, abbrev, abbrOff, code) {
+            var prod = FormVal { kind: 0, num: 0, text: "" }
+            var flags = FormVal { kind: 0, num: 0, text: "" }
+            var strOffBase: i64 = 8
+            while !ac.bad && !dc.bad {
+                let at = ac.leb(abbrev)
+                let fm = ac.leb(abbrev)
+                if fm == 33 {
+                    let _ic = ac.leb(abbrev)
+                }
+                if at == 0 && fm == 0 {
+                    break
+                }
+                let v = readForm(&mut dc, die, fm, os, asz, little)
+                if at == 37 {
+                    prod = v
+                } else if at == 16354 {
+                    flags = v
+                } else if at == 114 {
+                    strOffBase = v.num
+                }
+            }
+            let ptext = dwarfString(&mut f, sects, prod, strOffBase, os, little)
+            let ftext = dwarfString(&mut f, sects, flags, strOffBase, os, little)
+            if producer.len == 0 {
+                producer = ptext.clone()
+            }
+            var lvl = producerOptLevel(ptext)
+            let flvl = optLevelOf(ftext)
+            if flvl.len > 0 {
+                lvl = flvl
+                fromFlags = true
+            }
+            // One optimized unit is what the warning is about: it wins over -O0s.
+            if lvl.len > 0 && (level.len == 0 || (level == "-O0" && lvl != "-O0")) {
+                level = lvl
+            }
+        }
+        units = units + 1
+        off = unitEnd
+    }
+
+    if level.len > 0 {
+        info.optimized = level != "-O0"
+        info.opt = level
+        info.optSource = "DW_AT_producer"
+        if fromFlags {
+            info.optSource = "DW_AT_APPLE_flags"
+        }
+    } else if hasAppleOpt {
+        info.opt = "optimized"
+        info.optimized = true
+        info.optSource = "DW_AT_APPLE_optimized"
+    } else if appleTuning && hasSubprogram && producer.contains("clang") {
+        info.opt = "not optimized"
+        info.optimized = false
+        info.optSource = "no DW_AT_APPLE_optimized"
+    }
+}
+
+// Go's -gcflags in the embedded module info decide: -N (no optimization) and
+// -l (no inlining) together are what delve asks for. Without them Go optimized,
+// which is its compiler's default, not a guess.
+fn goOpt(info: &mut BinInfo, f: &mut File, sects: &Vec<Sect>): void {
+    let gi = sectIndex(sects, ".go.buildinfo")
+    if gi < 0 {
+        return
+    }
+    var want = sects[gi].size
+    if want > 65536 {
+        want = 65536
+    }
+    let blob = readAt(&mut f, sects[gi].off, want)
+    // Header: 14-byte magic "\xff Go buildinf:", pointer size, flags. Flag bit
+    // 2 means the version and module strings follow inline (Go 1.18+); older
+    // binaries point at them through the data segment, which this does not chase.
+    if blob.len < 32 || blob[0] != 255 || blob.substr(1, 14) != " Go buildinf:" || (blob[15] & 2) == 0 {
+        return
+    }
+    info.optSource = "Go build info"
+    if goFlagsUnoptimized(goGcflags(blob)) {
+        info.opt = "-N -l"
+        info.optimized = false
+    } else {
+        info.opt = "optimized"
+        info.optimized = true
+    }
+}
+
+// The value of the "build\t-gcflags=..." line in Go module info text, or "".
+pub fn goGcflags(modinfo: &string): string {
+    let parts = modinfo.split("build\t-gcflags=")
+    if parts.len < 2 {
+        return ""
+    }
+    var out: string = ""
+    for ch in parts[1] {
+        if ch == '\n' {
+            break
+        }
+        out.push(ch)
+    }
+    return out
+}
+
+// -gcflags values carry an optional package pattern and, when they hold a
+// space, the quotes `go build` recorded them with ("all=-N -l" arrives as
+// `"all=-N -l"`); the switch is what follows the '='. Both -N and -l are what
+// makes Go code steppable.
+pub fn goFlagsUnoptimized(flags: &string): bool {
+    var n = false
+    var l = false
+    var unquoted: string = ""
+    for ch in flags {
+        if ch != '"' {
+            unquoted.push(ch)
+        }
+    }
+    for tok in unquoted.splitWhitespace() {
+        let eq = tok.split("=")
+        let t = eq[eq.len - 1].clone()
+        if t == "-N" {
+            n = true
+        } else if t == "-l" {
+            l = true
+        }
+    }
+    return n && l
 }

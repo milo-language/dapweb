@@ -17,6 +17,11 @@ from "std/env" import {
 from "std/process" import {
     capture
 }
+// binfo is a pure, std-only file reader; it lives under web/ because the BINARY
+// tab was its first user, not because it depends on the server.
+from "../web/binfo" import {
+    isGoBinary
+}
 
 // The canonical, driver-independent result of applying a config: what to spawn
 // and how to launch. binPath/srcPath are the debuggee + main source; adapterCmd
@@ -72,6 +77,7 @@ fn isMetaKey(k: &string): bool {
 // launch is blocked with a clear error (node slot reserved for M10).
 struct Dialect {
     kind: string,
+    label: string,
     types: Vec<string>,
     probes: Vec<string>,
     adapterId: string,
@@ -80,9 +86,9 @@ struct Dialect {
 
 // build a Dialect, taking `types`/`probes` as `|`-joined strings (inline array
 // literals in struct-literal fields lower to empty Vecs, so split explicitly).
-fn mkDialect(kind: string, types: string, probes: string, adapterId: string, supported: bool): Dialect {
+fn mkDialect(kind: string, label: string, types: string, probes: string, adapterId: string, supported: bool): Dialect {
     return Dialect {
-        kind: kind, types: types.split("|"),
+        kind: kind, label: label, types: types.split("|"),
         probes: pipeSplit(probes), adapterId: adapterId, supported: supported
     }
 }
@@ -98,8 +104,8 @@ fn pipeSplit(s: string): Vec<string> {
 // The registry. Keyed by `type` substring-free — exact type match picks a family.
 fn dialects(): Vec<Dialect> {
     var out: Vec<Dialect> = []
-    out.push(mkDialect("lldb", "lldb|cppdbg|lldb-dap", "lldb-dap|xcrun -f lldb-dap", "lldb", true))
-    out.push(mkDialect("python", "python|debugpy", "python3 -m debugpy.adapter", "debugpy", true))
+    out.push(mkDialect("lldb", "LLDB (lldb-dap)", "lldb|cppdbg|lldb-dap", "lldb-dap|xcrun -f lldb-dap", "lldb", true))
+    out.push(mkDialect("python", "Python (debugpy)", "python|debugpy", "python3 -m debugpy.adapter", "debugpy", true))
     // vscode-js-debug's DAP server. It only listens on TCP (no stdio mode), so
     // the probe result is spawned with a port argument and connected to — see
     // startRun's node path. `js-debug-adapter` is the name mason and npm wrappers
@@ -107,16 +113,16 @@ fn dialects(): Vec<Dialect> {
     // user to download. adapterId "js-debug" so an explicit dapPath containing
     // "js-debug" reverse-maps here.
     let jsDebug = Env.getOr("HOME", "") + "/.local/share/dapweb/js-debug/src/dapDebugServer.js"
-    out.push(mkDialect("node", "node|pwa-node|js|javascript|typescript", "js-debug-adapter|node " + jsDebug, "js-debug", true))
+    out.push(mkDialect("node", "Node.js (js-debug)", "node|pwa-node|js|javascript|typescript", "js-debug-adapter|node " + jsDebug, "js-debug", true))
     // delve's DAP mode reads like a stdio subcommand and is not one: `dlv dap`
     // always starts a TCP server (see tcpListenArgs), so it is spawned with a
     // listen address and connected to. adapterId "dlv" so an explicit adapter
     // cmd reverse-maps to go via kindForAdapterCmd.
-    out.push(mkDialect("go", "go", "dlv dap", "dlv", true))
+    out.push(mkDialect("go", "Go (Delve)", "go", "dlv dap", "dlv", true))
     // java-dap ships with the milo compiler (milo's examples/tools/java-dap, not
     // this repo) — a DAP↔JDWP translator. Probe finds it on PATH; otherwise set
     // "dapPath" to the binary.
-    out.push(mkDialect("java", "java|java-dap", "java-dap", "java-dap", true))
+    out.push(mkDialect("java", "Java (java-dap)", "java|java-dap", "java-dap", "java-dap", true))
     return out
 }
 
@@ -147,7 +153,7 @@ fn cloneDialect(d: &Dialect): Dialect {
         pr.push(probe.clone())
     }
     return Dialect {
-        kind: d.kind.clone(), types: ty, probes: pr,
+        kind: d.kind.clone(), label: d.label.clone(), types: ty, probes: pr,
         adapterId: d.adapterId.clone(), supported: d.supported
     }
 }
@@ -190,22 +196,30 @@ fn dialectFor(t: &string): Dialect {
         Option.None => {
         }
     }
-    return mkDialect("lldb", "lldb", "lldb-dap", "lldb", true) // unreachable: lldb always registered
+    return mkDialect("lldb", "LLDB (lldb-dap)", "lldb", "lldb-dap", "lldb", true) // unreachable: lldb always registered
 }
 
-// `type` unset → guess the dialect from the program's extension (§3).
-fn inferType(prog: &string): string {
+// `type` unset: guess the dialect from the program (§3). The extension decides
+// for scripts and sources; a built binary carries no extension, so a Go one is
+// recognised by its embedded build info (delve understands goroutines and Go
+// types, lldb on the same binary shows runtime internals). Everything else is
+// native. The target dialog's "Auto" asks this same function via /api/infer,
+// so what the picker promises is what a run does.
+pub fn inferType(prog: &string): string {
     if prog.endsWith(".py") {
         return "python"
     }
-    if prog.endsWith(".js") || prog.endsWith(".ts") {
+    if prog.endsWith(".js") || prog.endsWith(".ts") || prog.endsWith(".mjs") || prog.endsWith(".cjs") {
         return "node"
     }
     if prog.endsWith(".go") {
         return "go"
     }
-    if prog.endsWith(".java") {
+    if prog.endsWith(".java") || prog.endsWith(".jar") {
         return "java"
+    }
+    if isGoBinary(prog) {
+        return "go"
     }
     return "lldb"
 }
@@ -327,24 +341,30 @@ fn resolveDialectAdapter(d: &Dialect): Option<string> {
     return Option.None
 }
 
-// actionable failure when no probe resolved — name the adapter + how to get it.
-fn probeErr(d: &Dialect): string {
+// How to get a dialect's adapter, for both the not-found error and the target
+// dialog's debugger list (which shows it next to an uninstalled entry).
+fn installHint(d: &Dialect): string {
     if d.kind == "lldb" {
-        return "lldb-dap not found — brew install llvm (or install Xcode), or set \"dapPath\" to its path"
+        return "brew install llvm (or install Xcode), or set \"dapPath\" to its path"
     }
     if d.kind == "python" {
-        return "debugpy not found — pip install debugpy, or set \"dapPath\" to its command"
+        return "pip install debugpy, or set \"dapPath\" to its command"
     }
     if d.kind == "node" {
-        return "js-debug not found — download vscode-js-debug's DAP server:\n  mkdir -p ~/.local/share/dapweb && curl -sL https://github.com/microsoft/vscode-js-debug/releases/download/v1.117.0/js-debug-dap-v1.117.0.tar.gz | tar xz -C ~/.local/share/dapweb\nor install `js-debug-adapter` on PATH, or set \"dapPath\" to its command"
+        return "download vscode-js-debug's DAP server:\n  mkdir -p ~/.local/share/dapweb && curl -sL https://github.com/microsoft/vscode-js-debug/releases/download/v1.117.0/js-debug-dap-v1.117.0.tar.gz | tar xz -C ~/.local/share/dapweb\nor install `js-debug-adapter` on PATH, or set \"dapPath\" to its command"
     }
     if d.kind == "go" {
-        return "dlv (delve) not found — go install github.com/go-delve/delve/cmd/dlv@latest, or set \"dapPath\" to its command"
+        return "go install github.com/go-delve/delve/cmd/dlv@latest, or set \"dapPath\" to its command"
     }
     if d.kind == "java" {
-        return "java-dap not found — build it from the milo repo (milo build examples/tools/java-dap/src/main.milo -o ~/bin/java-dap), or set \"dapPath\" to the binary"
+        return "build it from the milo repo (milo build examples/tools/java-dap/src/main.milo -o ~/bin/java-dap), or set \"dapPath\" to the binary"
     }
-    return d.kind + " adapter not found — install it or set \"dapPath\" to its command"
+    return "install it or set \"dapPath\" to its command"
+}
+
+// actionable failure when no probe resolved: name the adapter + how to get it.
+fn probeErr(d: &Dialect): string {
+    return d.label + " not found: " + installHint(d)
 }
 
 // Reverse-map an explicit adapter command to a dialect kind — used when a user
@@ -445,6 +465,11 @@ fn selectAdapter(typ: &string, adapter: &string, prog: &string): Result<AdapterS
     }
     match resolveDialectAdapter(d) {
         Option.Some(cmd) => {
+            // python3 resolves on PATH whether or not debugpy is importable, and
+            // a missing module dies mid-handshake as a bare "terminated".
+            if let Option.Some(e) = adapterRunnableErr(d.kind, cmd) {
+                return Result.Err(e)
+            }
             return Result.Ok(AdapterSel {
                 kind: d.kind.clone(), cmd: cmd
             }
@@ -454,6 +479,26 @@ fn selectAdapter(typ: &string, adapter: &string, prog: &string): Result<AdapterS
             return Result.Err(probeErr(d))
         }
     }
+}
+
+// The registry for the target dialog's debugger list: every dialect, the
+// command a run would spawn (empty when nothing resolved), whether it is
+// runnable, and how to install it when not. Probing runs `xcrun` and, for
+// debugpy, an import check, so this is per dialog open, not per keystroke.
+pub fn adaptersJson(): string {
+    var arr = Json.arr()
+    for d in dialects() {
+        var cmd: string = ""
+        var installed = false
+        if let Option.Some(c) = resolveDialectAdapter(d) {
+            installed = adapterRunnableErr(d.kind, c).isNone()
+            cmd = c
+        }
+        arr = arr.raw(Json.obj().str("kind", d.kind).str("label", d.label)
+            .str("command", cmd).bool("installed", installed)
+            .str("installHint", installHint(d)).build())
+    }
+    return Json.obj().arr("adapters", arr).build()
 }
 
 // Split an adapter command line on spaces: first token is the executable
