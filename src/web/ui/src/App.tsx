@@ -5,6 +5,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import SourceView, { langFor, BpMeta, BpPopover, HoverVar } from "./SourceView";
 import ConfigDrawer, { DebugConfig, stripJsonc } from "./ConfigDrawer";
 import { tabLabels } from "./tabLabels";
+import { primaryAction, exitLabel, Phase } from "./primary";
+import { threadLabel } from "./threadLabel";
 
 type Frame = { id: number; name: string; line: number; path: string; ipRef: string };
 type Thread = { id: number; name: string };
@@ -308,7 +310,8 @@ export default function App() {
   const [curTid, setCurTid] = useState(-1);               // thread frames/stepping follow
   const [locals, setLocals] = useState<Var[]>([]);
   const [watches, setWatches] = useState<Watch[]>([]);
-  const [phase, setPhase] = useState<"idle" | "running" | "stopped" | "done">("idle");
+  // "done" = a run ended in this session; Run then reads "Run again".
+  const [phase, setPhase] = useState<Phase>("idle");
   // The server's canonical launch-config object (hello.config) — seeds the
   // drawer editor. The editor is the source of truth once the user types; this
   // only re-seeds it on load / history restore (see cfgTextRef for the live text).
@@ -785,7 +788,7 @@ export default function App() {
         send({ cmd: "kill" });
       }
       else if (m.type === "terminated") {
-        setPhase("idle");
+        setPhase("done");
         setStopLine(0);
         setFrames([]);
         setThreads([]);
@@ -794,14 +797,18 @@ export default function App() {
         // return the pane to the program's source; leaving a dead no-source
         // (dyld/libc) frame in viewPath strands the "disassembling…" placeholder.
         setStopPath("");
-        setViewPath(srcPathRef.current);
+        // With no configured source (a bare `dapweb ./prog`), the file the run
+        // stopped in is the best thing to show; a pseudo-path is not.
+        setViewPath(srcPathRef.current || (hasSrc(viewPathRef.current) ? viewPathRef.current : ""));
         if (pendingRestart.current) {
           pendingRestart.current = false;
           runRef.current();
           return;
         }
-        setStatus({ text: "the program exited — press Run to start it again", short: "exited", cls: "done" });
-        termPut(termRef.current, "repl", "\r\n\x1b[2m[dapweb] session ended — press ▶ Run to start again\x1b[0m\r\n");
+        const code: number | undefined = typeof m.exitCode === "number" ? m.exitCode : undefined;
+        const ex = exitLabel(code);
+        setStatus({ text: `${ex}: press Run again to start it over`, short: ex, cls: code === 0 ? "done" : "" });
+        termPut(termRef.current, "repl", "\r\n\x1b[2m[dapweb] session ended, press Run again to start over\x1b[0m\r\n");
       }
     };
     };
@@ -1161,6 +1168,8 @@ export default function App() {
     return out;
   }, [bps, viewPath]);
   const canInstrStep = stopped && !!caps.supportsSteppingGranularity && !!asm;
+  const targetSet = hasTarget(cfg, program || undefined);
+  const primary = primaryAction({ phase, hasTarget: targetSet, attach: attachMode });
 
   return (
     <div className="app">
@@ -1226,13 +1235,15 @@ export default function App() {
           )}
         </span>
         <span className="toolbar">
-          <button className={phase === "idle" ? "run" : "run live"}
-                  data-tip={phase === "idle" ? "Run: start the program (F5)"
-                                            : "Run: relaunch with whatever the target bar says now"} onClick={run}><Ico g={CI.run} /></button>
-          <button disabled={!stopped} data-tip={stopped ? "Continue (F5)" : "Continue (F5, needs a stopped program)"}
-                  onClick={() => resume("continue")}><Ico g={CI.cont} /></button>
-          <button disabled={phase !== "running"} data-tip="Pause (F6)"
-                  onClick={() => send({ cmd: "pause", tid: tidRef.current })}><Ico g={CI.pause} /></button>
+          <button className="primary" disabled={primary.disabled} data-tip={primary.tip}
+                  onClick={() => {
+                    if (primary.kind === "continue") resume("continue");
+                    else if (primary.kind === "pause") send({ cmd: "pause", tid: tidRef.current });
+                    else run();
+                  }}>
+            <Ico g={primary.kind === "continue" ? CI.cont : primary.kind === "pause" ? CI.pause : CI.run} />
+            {primary.label}
+          </button>
         </span>
         <span className="toolbar">
           <button disabled={!stopped} data-tip="Step over (F10)" onClick={() => resume("stepOver")}><Ico g={CI.stepOver} /></button>
@@ -1305,7 +1316,7 @@ export default function App() {
                 <div className="menu-sep" />
                 <button className="menu-item" onClick={() => {
                   setShowMenu(false);
-                  if (phase !== "idle" && !confirm("End the current debug session and start a new one?")) return;
+                  if ((phase === "running" || phase === "stopped") && !confirm("End the current debug session and start a new one?")) return;
                   send({ cmd: "newSession" });
                 }}>New session <span className="menu-hint">keeps the target</span></button>
                 <a className="menu-item" href="/sessions" onClick={() => setShowMenu(false)}>
@@ -1368,9 +1379,21 @@ export default function App() {
               // No-debug-info frame (dyld/libc etc.): show the disassembly in place
               // of the source — not a placeholder telling the user to run a command.
               if (!hasSrc(viewPath)) {
-                return asmPane ?? (
+                if (asmPane) return asmPane;
+                // Nothing configured: a blank editor gives no clue what comes first.
+                if (!targetSet) return (
+                  <div className="src-empty">
+                    <div className="src-empty-title">Nothing to debug yet</div>
+                    <div>Type a program path in the target bar above and press Enter,</div>
+                    <div>or start dapweb with one: <code>dapweb /path/to/binary</code></div>
+                  </div>
+                );
+                return (
                   <div className="src-hint">
-                    {stopped && caps.supportsDisassembleRequest ? "disassembling…" : "no source available for this frame"}
+                    {stopped ? (caps.supportsDisassembleRequest ? "disassembling…" : "no source available for this frame")
+                      : attachMode ? "Run attaches and opens the source where the process stops"
+                      : stopMain ? "Run stops at main and opens its source here"
+                      : "no source configured: tick stop at main and Run to open it here"}
                   </div>
                 );
               }
@@ -1390,27 +1413,15 @@ export default function App() {
         </div>
         <AsideDrag onResize={(w) => setAsideW(w)} />
         <div className="aside" style={{ width: asideW }}>
-          {threads.length > 0 && (
-            <Panel title="Threads">
-              {threads.map((t) => {
-                const loc = tlocs.get(t.id);
-                return (
-                  <div key={t.id} className={"frame" + (t.id === curTid ? " top" : "")}
-                       title={`thread id ${t.id}`} onClick={() => selectThread(t)}>
-                    <span className="tname">{t.name || `thread ${t.id}`}</span>
-                    {loc && <span className="tloc">
-                      {loc.label}
-                      {loc.pc && memLinks && (
-                        <span className="addr" title="view memory at pc"
-                              onClick={(e) => { e.stopPropagation(); viewMemory(loc.pc); }}> {loc.pc}</span>
-                      )}
-                    </span>}
-                  </div>
-                );
-              })}
-            </Panel>
-          )}
-          <Panel title="Call Stack">
+          {/* Ordered by how often a stop sends you there: the values first, then
+              where you are, then what you asked to see. */}
+          <Panel title="Locals" persist="dapweb.localsCollapsed">
+            <VarList vars={locals} disabled={!stopped} parentRef={scopeRef}
+                     empty={stopped ? "no locals in this frame" : "run to a breakpoint to see local variables"}
+                     onSetVar={caps.supportsSetVariable ? setVar : undefined}
+                     onAddr={memLinks ? viewMemory : undefined} />
+          </Panel>
+          <Panel title="Call Stack" persist="dapweb.stackCollapsed" badge={frames.length || null}>
             {frames.length
               ? frames.map((f, i) => (
                   <div key={i} className={"frame" + (i === selFrame ? " top" : "")}
@@ -1418,24 +1429,9 @@ export default function App() {
                     #{i} {f.name}:{f.line}
                   </div>
                 ))
-              : <span className="hint">—</span>}
+              : <span className="hint">{stopped ? "no frames" : "run to a breakpoint to see the call stack"}</span>}
           </Panel>
-          <Panel title="Breakpoints" action={bps.size > 0 && (
-            <span className="bpacts">
-              <button className="addbtn" title={anyBpEnabled ? "disable all" : "enable all"}
-                      onClick={toggleAllBps}>⊘</button>
-              <button className="addbtn" title="remove all" onClick={clearAllBps}>✕</button>
-            </span>
-          )}>
-            <BpList bps={bps} files={files} onJump={(p, ln) => openFile(p, ln)} onRemove={removeBp} onToggle={setBpEnabled}
-                    onEdit={(path, line, x, y) => setBpEdit({ path, line, x, y })} />
-          </Panel>
-          <Panel title="Locals">
-            <VarList vars={locals} disabled={!stopped} parentRef={scopeRef}
-                     onSetVar={caps.supportsSetVariable ? setVar : undefined}
-                     onAddr={memLinks ? viewMemory : undefined} />
-          </Panel>
-          <Panel title="Watch" action={<button className="addbtn" onClick={() => {
+          <Panel title="Watch" persist="dapweb.watchCollapsed" badge={watches.length || null} action={<button className="addbtn" onClick={() => {
             const expr = prompt("watch expression:");
             if (!expr) return;
             setWatches((w) => [...w, { expr, value: null }]);
@@ -1453,8 +1449,43 @@ export default function App() {
                     <span className="rm" onClick={() => setWatches((x) => x.filter((_, j) => j !== i))}>✕</span>
                   </div>
                 ))
-              : <span className="hint">no expressions</span>}
+              : <span className="hint">no expressions: + adds one, evaluated at every stop</span>}
           </Panel>
+          <Panel title="Breakpoints" persist="dapweb.bpsCollapsed" badge={bps.size || null} action={bps.size > 0 && (
+            <span className="bpacts">
+              <button className="addbtn" title={anyBpEnabled ? "disable all" : "enable all"}
+                      onClick={toggleAllBps}>⊘</button>
+              <button className="addbtn" title="remove all" onClick={clearAllBps}>✕</button>
+            </span>
+          )}>
+            <BpList bps={bps} files={files} onJump={(p, ln) => openFile(p, ln)} onRemove={removeBp} onToggle={setBpEnabled}
+                    onEdit={(path, line, x, y) => setBpEdit({ path, line, x, y })} />
+          </Panel>
+          {threads.length > 0 && (
+            // One thread has nothing to choose between, so it starts folded to its
+            // count; Panel reads the default only on mount, which is each new stop
+            // after a run ends (threads empties on terminate).
+            <Panel title="Threads" persist="dapweb.threadsCollapsed"
+                   defaultCollapsed={threads.length === 1} badge={threads.length}>
+              {threads.map((t) => {
+                const loc = tlocs.get(t.id);
+                const tl = threadLabel(t.name, t.id);
+                return (
+                  <div key={t.id} className={"frame" + (t.id === curTid ? " top" : "")}
+                       title={tl.tip} onClick={() => selectThread(t)}>
+                    <span className="tname">{tl.label}</span>
+                    {loc && <span className="tloc">
+                      {loc.label}
+                      {loc.pc && memLinks && (
+                        <span className="addr" title="view memory at pc"
+                              onClick={(e) => { e.stopPropagation(); viewMemory(loc.pc); }}> {loc.pc}</span>
+                      )}
+                    </span>}
+                  </div>
+                );
+              })}
+            </Panel>
+          )}
           {/* Registers moved to their own bottom-panel tab (next to Memory) —
               they're tall and noisy beside LOCALS, and pair with the memory view. */}
           {/* Rarely touched per-session — lives at the bottom on purpose. */}
@@ -1737,7 +1768,7 @@ function RegistersPanel({ regRef, stopSeq, disabled, classify, onFrame, onSetVar
   // Region-color each register by what its value points into (classify comes
   // from App; null until a `regions` message arrives — python/go send none).
   const content = gp.rows.length === 0 && otherGroups.length === 0
-    ? <span className="hint">—</span>
+    ? <span className="hint">{disabled ? "stop the program to read the registers" : "no registers"}</span>
     : <>
         <div className="regctl">
           {([16, 10, 8, 2] as const).map((r) => (
@@ -1914,11 +1945,11 @@ type SetVarFn = (parentRef: number, name: string, value: string) => Promise<any>
 // it survives the leaf remount on resume. Its presence enables the highlight.
 type PrevVals = React.MutableRefObject<Map<string, string>>;
 
-function VarList({ vars, disabled, parentRef, onSetVar, onAddr, prevVals, gen }: {
+function VarList({ vars, disabled, parentRef, onSetVar, onAddr, prevVals, gen, empty = "—" }: {
   vars: Var[]; disabled: boolean; parentRef: number; onSetVar?: SetVarFn;
-  onAddr?: (a: string) => void; prevVals?: PrevVals; gen?: number;
+  onAddr?: (a: string) => void; prevVals?: PrevVals; gen?: number; empty?: string;
 }) {
-  if (!vars.length) return <span className="hint">—</span>;
+  if (!vars.length) return <span className="hint">{empty}</span>;
   return (
     <div className="vartree">
       {realFirst(vars).map((v, i) => <VarNode key={i} v={v} disabled={disabled} parentRef={parentRef} onSetVar={onSetVar} onAddr={onAddr} prevVals={prevVals} gen={gen} />)}
@@ -2374,7 +2405,7 @@ function StackView({ enabled, regFrame, frames, stopSeq, onAddr }: {
   );
 }
 
-// A per-slot annotation under an 8-byte group: what this word *is* — a typed
+// A per-slot annotation for an 8-byte group: what this word *is* — a typed
 // local (from DWARF), a saved frame pointer / return address, or a pointer into
 // a named region. `follow` (present on typed pointers) opens the struct view.
 type Anno = { text: string; full?: string; cls?: string; follow?: { ref: number; name: string; type: string; target: string } };
@@ -2490,7 +2521,6 @@ function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, locals, f
   };
 
   const rows: React.ReactNode[] = [];
-  const wordW = elemsPerWord * (elemChars + 1) - 1;   // char width of an 8-byte word
   if (mem) {
     let baseAddr = 0n;
     try { baseAddr = BigInt(mem.addr); } catch {}
@@ -2526,29 +2556,22 @@ function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, locals, f
         annos.push(sub.length === 8 ? annotate(baseAddr + BigInt(off + g), ptr, looksPtr) : null);
       }
       const ascii = [...chunk].map((b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : "·")).join("");
+      // Annotations sit in a fixed-width column at the end of the row, one cell
+      // per 8-byte word in word order, each clipped with the full text on hover.
+      // Lines under the dump made rows two or one lines tall, and the dump
+      // stopped reading as a grid.
       rows.push(
         <div key={off} className="memrow">
           <span className="memaddr">0x{(baseAddr + BigInt(off)).toString(16).padStart(12, "0")}</span>
           <span className="membytes">{groups}</span>
           <span className="memascii">{ascii}</span>
-        </div>
-      );
-      // Exactly one annotation line per dump row, always — every row is two
-      // lines tall whether or not it holds pointers, so the address column and
-      // the scroll position keep a fixed rhythm instead of jumping by how many
-      // slots happened to be annotated. Each label is clipped to its own word
-      // column (full text on hover), so labels can never collide or widen the
-      // dump into a horizontal scroll.
-      rows.push(
-        <div key={`a${off}`} className="memannot">
-          <span className="memaddr annospacer">0x000000000000</span>
-          <span className="membytes">
+          <span className="memannos">
             {annos.map((a, wi) => (
-              <span key={wi} className="annocell" style={{ width: `${wordW + 2}ch` }}>
+              <span key={wi} className="annocell"
+                    title={a ? (a.follow ? `follow ${a.follow.name} → ${a.follow.target}  (typed as ${a.follow.type})` : (a.full || a.text)) : undefined}>
                 {a && (
                   <span className={"anno" + (a.cls ? " " + a.cls : "") + (a.follow ? " annofollow" : "")}
-                        title={a.follow ? `follow ${a.follow.name} → ${a.follow.target}  (typed as ${a.follow.type})` : (a.full || a.text)}
-                        onClick={a.follow ? () => doFollow(a.follow!) : undefined}>↑ {a.text}</span>
+                        onClick={a.follow ? () => doFollow(a.follow!) : undefined}>{a.text}</span>
                 )}
               </span>
             ))}
@@ -2579,7 +2602,7 @@ function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, locals, f
                     onClick={() => setStride(s)}>{bits}</button>
           );
         })}
-        {!enabled && <span className="hint">stop the program (and adapter must support readMemory)</span>}
+        {!enabled && <span className="hint">stop the program to read memory</span>}
       </div>
       {mem && (() => {
         // The window's own region is shown by lighting up its legend entry — no

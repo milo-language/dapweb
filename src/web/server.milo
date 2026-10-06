@@ -816,8 +816,14 @@ fn sourceMsg(path: &string): string {
         .build()
 }
 
-fn terminatedMsg(): string {
-    return Json.obj().str("type", "terminated").build()
+// exitCode rides along only when the adapter reported one (-1 = unknown: killed,
+// detached, or the adapter never started), so a client never shows a made-up code.
+fn terminatedMsg(exitCode: i64): string {
+    var b = Json.obj().str("type", "terminated")
+    if exitCode >= 0 {
+        b = b.int("exitCode", exitCode)
+    }
+    return b.build()
 }
 
 // Carries the canonical path and the full metadata, not just the line: every
@@ -1879,7 +1885,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
         }
     }
     if announceEnd {
-        wsPush(ch, wakeWr, terminatedMsg())
+        wsPush(ch, wakeWr, terminatedMsg(gLastExit))
     }
     // A forced run killed the old debuggee; auto-rerun here with its config
     // (a new config can't ride a live adapter — it caches launch args).
@@ -2060,7 +2066,7 @@ fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): b
         if argv.len == 0 {
             eprint("[srv] no adapter configured\n")
             gStarted = false
-            wsPush(bus, busWakeWr, terminatedMsg())
+            wsPush(bus, busWakeWr, terminatedMsg(-1 as i64))
             return false
         }
         var prog: string = argv[0].clone()
@@ -2089,7 +2095,7 @@ fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): b
         if argv.len == 0 {
             eprint("[srv] no adapter configured\n")
             gStarted = false
-            wsPush(bus, busWakeWr, terminatedMsg())
+            wsPush(bus, busWakeWr, terminatedMsg(-1 as i64))
             return false
         }
         var prog: string = argv[0].clone()
@@ -2140,7 +2146,7 @@ fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): b
             killAdapterSrv()
             gStarted = false
             wsPush(bus, busWakeWr, configErrMsg($"adapter failed to start: {e}"))
-            wsPush(bus, busWakeWr, terminatedMsg())
+            wsPush(bus, busWakeWr, terminatedMsg(-1 as i64))
             return false
         }
     }

@@ -111,11 +111,23 @@ button {
    on — and a blue-on-hover rule made every button in the bar say all three. */
 button:hover:not(:disabled) { background: var(--surface-hi); border-color: var(--muted); }
 button:disabled { opacity: 0.4; cursor: default; }
-button.run { border-color: var(--ok); color: var(--ok); }
-button.run:hover:not(:disabled) { border-color: var(--ok); background: rgba(63,185,80,0.16); }
-/* Same button, live program under it: pressing it now kills and relaunches. */
-button.run.live { border-color: var(--stop); color: var(--stop); }
-button.run.live:hover:not(:disabled) { border-color: var(--stop); background: var(--stop-bg); }
+/* The primary action: Run, Pause or Continue, whichever is next. The only filled
+   button on the debugger screen, so the next step is never one icon among eight.
+   min-width keeps the bar from shifting as the label changes. */
+.toolbar button.primary {
+  gap: 6px; padding: 0 12px; min-width: 104px; font-size: 14px; font-weight: 600;
+  color: var(--on-go); background: var(--go); border-color: rgba(240,246,252,0.1);
+  box-shadow: 0 1px 0 rgba(1,4,9,0.2);
+}
+.toolbar button.primary:hover:not(:disabled) { background: var(--go-hi); border-color: rgba(240,246,252,0.2); }
+.toolbar button.primary:active:not(:disabled) { background: var(--go-lo); }
+.toolbar button.primary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* No target: a filled green that cannot be pressed would still read as "go". */
+.toolbar button.primary:disabled { color: var(--muted); background: var(--surface);
+                                   border-color: var(--border); box-shadow: none; opacity: 0.7; }
+/* Step and session icons are only meaningful while stopped or live; fainter
+   than the default disabled so they recede behind the primary button. */
+.toolbar button:not(.primary):disabled { opacity: 0.3; }
 main { flex: 1; display: flex; min-height: 0; position: relative; }
 /* main + the terminal. The target sheet is positioned against this rather than
    against <main> so it is as tall as the window, not as tall as whatever the
@@ -414,8 +426,8 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
   /* A tooltip floats above every surface, so it gets its own, darker than any
      of them. --dbg is the adapter's own chatter, distinct from the program's. */
   --tooltip-bg: #1c2128; --dbg: #5fd7d7;
-  /* The one filled button in the app (New session). Filled green is a stronger
-     claim than the outlined run button and is spent on exactly one control. */
+  /* The primary action, one per screen: Run / Pause / Continue in the debugger,
+     New session on the sessions page. Filled green is spent on nothing else. */
   --go: #238636; --go-hi: #2ea043; --go-lo: #1f7a32; --on-go: #ffffff;
 }
 .rdot { display: inline-block; width: 7px; height: 7px; border-radius: 2px;
@@ -485,6 +497,12 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
 /* Fallback shown briefly for a no-debug-info frame before its disasm arrives. */
 .src-hint { flex: 1; display: flex; align-items: center; justify-content: center;
             color: var(--muted); font-size: 12px; }
+/* No target at all: the editor area says what to do first. */
+.src-empty { flex: 1; display: flex; flex-direction: column; align-items: center;
+             justify-content: center; gap: 4px; color: var(--muted); font-size: 12px; }
+.src-empty-title { color: var(--fg); font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.src-empty code { font-family: var(--mono); color: var(--fg); background: var(--panel);
+                  border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
 /* Inline disassembly (Monaco view zone under a source line). */
 .asm-zone { padding: 1px 0 1px 5.5ch; font: 11px/1.5 var(--mono, monospace);
             border-left: 2px solid var(--r-code); background: rgba(121,192,255,0.05); }
@@ -514,13 +532,14 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
 /* Muted, not orange — orange is the data-region hue; ascii shouldn't share it. */
 .memascii { color: var(--muted); }
 .mem-err { color: var(--bp); font-size: 12px; }
-/* Annotation line under every dump row (empty ones included, so the grid keeps
-   a fixed 2-line pitch). Same font-size as the row above: `ch` is font-relative,
-   and a smaller one would put the columns on a different axis. */
-.memannot { display: flex; gap: 16px; white-space: pre; line-height: 1.45; }
-.memannot .annospacer { visibility: hidden; }
-.annocell { display: inline-block; overflow: hidden; text-overflow: ellipsis;
-            white-space: nowrap; vertical-align: top; }
+/* Annotation column: one cell per 8-byte word, fixed width so every row keeps
+   one line and the columns line up; a cell shrinks (ellipsis) rather than
+   push the dump into a horizontal scroll. */
+.memannos { display: flex; gap: 2ch; min-width: 0; flex: 1; }
+/* The fixed height is what keeps rows equal: the italic face has a taller line
+   box than the upright one, and an annotated row came out half a pixel taller. */
+.annocell { flex: 0 1 22ch; min-width: 0; height: 1.45em; overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap; }
 .anno { color: var(--muted); font-style: italic; white-space: nowrap; }
 .anno.annofollow { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 .anno.annofollow:hover { color: var(--accent); }

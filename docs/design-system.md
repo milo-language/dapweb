@@ -14,7 +14,7 @@ palette change cannot leave the docs images behind.
 | `--agent` | `#ff7bd5` | an agent did this. Nothing else is ever this colour |
 | `--bp` | `#f85149` | a breakpoint |
 | `--r-heap` `--r-const` `--r-data` | `#f778ba` `#56d4dd` `#ff9e64` | the region an address lands in, in the dump and on the register that points there |
-| `--go` | `#238636` | the one filled button in the app (New session) |
+| `--go` | `#238636` | the primary action, the one filled button on a screen: Run / Pause / Continue in the debugger, New session on the sessions page |
 | `--chip-bg` / `--chip-fg` | `#21262d` `#c9d1d9` | a label that carries no signal: a caption, a name chip |
 
 Hover is not a state and gets no colour: it lifts the surface
