@@ -11,6 +11,7 @@
 //
 // Usage: bun tests/e2e-attach.ts [binary]
 
+import { freePort } from "./freeport";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const xdg = `/tmp/dapweb_attach_test_${process.pid}`;
@@ -44,9 +45,8 @@ class Peer {
   }
 }
 
-let port = 8190;
 async function spawnSrv(log: string): Promise<any> {
-  const p = port++;
+  const p = await freePort();
   const srv = Bun.spawn([bin, "web", "--port", String(p), "--quiet"], {
     cwd: root, stdout: "pipe", stderr: "pipe",
     env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg, STUB_LOG: log },

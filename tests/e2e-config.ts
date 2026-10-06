@@ -4,6 +4,7 @@
 // keeps `name`. Self-spawns dapweb-web with a throwaway $XDG_STATE_HOME.
 // Usage: bun tests/e2e-config.ts [binary]   (needs /tmp/dapweb_nested + /tmp/dapweb_inter built)
 
+import { freePort } from "./freeport";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const xdg = `/tmp/dapweb_cfg_test_${process.pid}`;
@@ -38,9 +39,8 @@ class Peer {
   }
 }
 
-let port = 8150;
 async function spawnSrv(args: string[]): Promise<any> {
-  const p = port++;
+  const p = await freePort();
   const srv = Bun.spawn([bin, "web", "--port", String(p), "--quiet", ...args], {
     cwd: root, stdout: "pipe", stderr: "pipe",
     env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },

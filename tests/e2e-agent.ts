@@ -6,6 +6,7 @@
 // breakpoint store and session registry are never touched.
 // Usage: bun tests/e2e-agent.ts [binary]   (needs /tmp/dapweb_nested built)
 
+import { freePort } from "./freeport";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const xdg = `/tmp/dapweb_agent_test_${process.pid}`;
@@ -25,11 +26,9 @@ function ok(cond: any, label: string, detail?: any) {
   }
 }
 
-let port = 8750 + (process.pid % 120);
 const servers: any[] = [];
 async function serve(extra: string[] = []) {
-  port += 1;
-  const p = port;
+  const p = await freePort();
   const srv = Bun.spawn([bin, "web", "--program", prog, "--port", String(p), "--quiet", ...extra], {
     cwd: root, env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },
     stdout: "pipe", stderr: "ignore",
@@ -79,17 +78,18 @@ try {
        "conditions survive too", s.breakpoints);
 
     // A different program must not inherit them: the store is keyed by program.
-    const other = Bun.spawn([bin, "web", "--program", "/tmp/dapweb_inter", "--port", String(port + 40),
+    const otherPort = await freePort();
+    const other = Bun.spawn([bin, "web", "--program", "/tmp/dapweb_inter", "--port", String(otherPort),
                              "--quiet"], {
       cwd: root, env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },
       stdout: "ignore", stderr: "ignore",
     });
     servers.push(other);
     for (let i = 0; i < 100; i++) {
-      try { if ((await fetch(`http://localhost:${port + 40}/api/state`)).ok) break; } catch {}
+      try { if ((await fetch(`http://localhost:${otherPort}/api/state`)).ok) break; } catch {}
       await sleep(100);
     }
-    ok((await state(port + 40)).breakpoints.length === 0,
+    ok((await state(otherPort)).breakpoints.length === 0,
        "a different program starts with its own (empty) breakpoint set");
   }
 

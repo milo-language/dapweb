@@ -4,6 +4,7 @@
 // shells out to `dapweb api` exactly as an agent would.
 // Usage: bun tests/api.ts [binary]   (needs a debuggable /tmp/dapweb_api_demo)
 
+import { freePort } from "./freeport";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const xdg = `/tmp/dapweb_api_test_${process.pid}`;
@@ -34,7 +35,7 @@ int main(void) {
   if (c.exitCode !== 0) { console.error("clang failed:", c.stderr.toString()); process.exit(1); }
 }
 
-const port = 8700 + (process.pid % 200);
+const port = await freePort();
 const srv = Bun.spawn([bin, "web", "--program", exe, "--port", String(port), "--quiet"], {
   cwd: root,
   env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },

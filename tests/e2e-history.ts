@@ -5,6 +5,7 @@
 // a throwaway $XDG_STATE_HOME so it never touches the real history file.
 // Usage: bun tests/e2e-history.ts [binary]   (needs /tmp/dapweb_nested built)
 
+import { freePort } from "./freeport";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const xdg = `/tmp/dapweb_hist_test_${process.pid}`;
@@ -40,9 +41,8 @@ class Peer {
   }
 }
 
-let port = 8130;
 async function spawnSrv(args: string[]): Promise<any> {
-  const p = port++;
+  const p = await freePort();
   const srv = Bun.spawn([bin, "web", "--port", String(p), "--quiet", ...args], {
     cwd: root, stdout: "pipe", stderr: "pipe",
     env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },

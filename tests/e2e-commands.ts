@@ -10,6 +10,7 @@
 //
 // Usage: bun tests/e2e-commands.ts [binary]
 
+import { freePort } from "./freeport";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const xdg = `/tmp/dapweb_cmds_test_${process.pid}`;
@@ -34,7 +35,7 @@ ok(dispatched.size > 15, `the chain dispatches ${dispatched.size} commands`, [..
 
 // ── the table, as the running server serves it ──
 
-const port = 8770 + (process.pid % 40);
+const port = await freePort();
 const srv = Bun.spawn([bin, "web", "--port", String(port), "--quiet", "--program", "/tmp/dapweb_nested"], {
   cwd: root, stdout: "pipe", stderr: "pipe",
   env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },
