@@ -104,7 +104,7 @@ from "../dap/client" import {
     DapClient, DapMsg
 }
 from "./state" import {
-    gSession, Bp, OutLine, cloneBp, ChildLaunch, PendingRun
+    gSession, Bp, OutLine, cloneBp, ChildLaunch, PendingRun, Sink
 }
 from "json-rpc/frame" import {
     writeFrame as writeFrameFd
@@ -117,28 +117,15 @@ from "../dap/session" import {
     mainSymbolFor, histEntryFor, histInsert, histMergeMany, specConfigJson,
 }
 
-// NOTE: module-scope string initializers are NYI in Milo and silently produce
-// "" — every one of these is assigned in main() before any request is served.
-var gHistory: string = "" // config history JSON array, newest first, cap 10 — persisted to XDG state (init "[]" in main)
-
 // Shared session: ONE debug session per server process, any number of WS
-// peers (browser tabs + `dapweb api` callers) all seeing identical broadcast state.
-// Green runtime = one OS thread, cooperative scheduling — plain globals are
-// race-free at yield-point granularity (same argument as the config globals).
-// All assigned in main() before any request is served (module init NYI).
+// peers (browser tabs + `dapweb api` callers) all seeing identical broadcast
+// state. Everything else the session holds is in gSession (./state).
 var gCapsMsg: string = "" // last capabilities push — replayed to late joiners
 var gStopMsg: string = "" // last stopped push while still stopped — replayed
 var gThreadsMsg: string = "" // last threads push while stopped — replayed
 var gRegionsMsg: string = "" // last memory-region push while stopped — replayed (region colors)
-// recent terminal output (debugger console + program stdout/stderr),
-// replayed to a joining tab so startup chatter and history survive reload /
-// late join. Bounded — a non-pty adapter routes ALL program output here.
-var gOutputLog: Vec<OutLine> = []
 let OUTLOG_MAX: i64 = 400
-var gNextClient: i64 = 1
-var gBps: Vec<Bp> = [] // shared breakpoint set (was per-connection before the shared session)
-var gPeers: i64 = 0 // attached WS peers (browser tabs; `api` callers are one-shot HTTP)
-var gLastActivityMs: i64 = 0 // epochMillis of the last peer event OR api call — idle-ttl clock
+
 // Breakpoints are keyed on (path, line) and lldb binds on the FULL path, so the
 // one spelling that works is the absolute one the compiler recorded. A client can
 // send either: the UI keys on `--source`/hello before the first stop and on the
@@ -466,10 +453,10 @@ fn logEvent(event: &string, details: &string): void {
 }
 
 fn peerCountStr(): string {
-    if gPeers == 1 {
+    if gSession.peers.count == 1 {
         return "(1 peer)"
     }
-    return $"({gPeers} peers)"
+    return $"({gSession.peers.count} peers)"
 }
 
 // ── Outbound WS funnel ──
@@ -495,23 +482,8 @@ fn wsWriterLoop(fd: i32, ch: Channel<string>): void {
     }
 }
 
-// one broadcaster fans the session bus out to every connected peer.
-struct Sink {
-    id: i64,
-    ch: Channel<string>,
-}
-
-// The peer registry is a plain global, not a Channel<Sink>: std/sync moves a
-// payload with memcpy + memset-to-zero and lets the zeroed original drop, and
-// Channel's own Drop dereferences its handle unconditionally — so a Sink (which
-// owns a Channel<string>) segfaults the moment it is sent through a channel.
-// Every peer task and the broadcaster are green tasks on one scheduler thread
-// and none of the register/unregister/fanout sequences below contain a yield
-// point, so direct mutation is exactly as atomic as the channel round-trip was.
-var gSinks: Vec<Sink> = []
-
 fn sinkRegister(id: i64, ch: &Channel<string>): void {
-    gSinks.push(Sink {
+    gSession.peers.sinks.push(Sink {
         id: id, ch: ch.clone(),
     }
     )
@@ -522,7 +494,7 @@ fn sinkRegister(id: i64, ch: &Channel<string>): void {
 // longer push to the closed channel.
 fn sinkUnregister(id: i64): void {
     var keep: Vec<Sink> = []
-    for s in gSinks {
+    for s in gSession.peers.sinks {
         if s.id == id {
             s.ch.close()
         } else {
@@ -532,7 +504,7 @@ fn sinkUnregister(id: i64): void {
             )
         }
     }
-    gSinks = keep
+    gSession.peers.sinks = keep
 }
 
 fn broadcastLoop(bus: Channel<string>): void {
@@ -542,7 +514,7 @@ fn broadcastLoop(bus: Channel<string>): void {
         // replays go straight to their own channel and are deliberately not
         // recorded twice.
         journalOut(m)
-        for sink in gSinks {
+        for sink in gSession.peers.sinks {
             wsPush(sink.ch, m.clone())
         }
     }
@@ -604,7 +576,7 @@ fn helloMsg(): string {
     if gSession.proc.started {
         b = b.str("phase", "running")
     }
-    b = b.raw("history", gHistory)
+    b = b.raw("history", gSession.persisted.history)
     if gSession.server.restored {
         b = b.bool("restored", true)
     }
@@ -632,7 +604,7 @@ fn pushHelloState(bus: &Channel<string>): void {
     if gSession.target.spec.srcPath.len > 0 {
         wsPush(bus, sourceMsg(gSession.target.spec.srcPath))
     }
-    for bp in gBps {
+    for bp in gSession.persisted.bps {
         wsPush(bus, bpSyncMsg(bp))
     }
 }
@@ -777,8 +749,8 @@ fn applyConfig(raw: string, selectName: string): string {
             var s = spec
             s.srcPath = src
             gSession.target.spec = s
-            gBps = []
-            gOutputLog = []
+            gSession.persisted.bps = []
+            gSession.output = []
             refreshSession()
             return ""
         }
@@ -871,14 +843,14 @@ fn ensureDir(path: &string): void {
 fn loadHistory(): void {
     let p = histFilePath()
     if !pathExists(p) {
-        gHistory = "[]"
+        gSession.persisted.history = "[]"
         return
     }
-    gHistory = "[]"
+    gSession.persisted.history = "[]"
     if let Result.Ok(s) = readFile(p) {
         if let Result.Ok(d) = Json.parse(s) {
             if d.isArray() {
-                gHistory = s
+                gSession.persisted.history = s
             }
         }
     }
@@ -923,7 +895,7 @@ fn persistBps(): void {
             }
         }
     }
-    out = out.raw(gSession.target.spec.binPath, bpsJson(gBps))
+    out = out.raw(gSession.target.spec.binPath, bpsJson(gSession.persisted.bps))
     ensureDir(histDir())
     let _r = writeFile(bpsFilePath(), out.build())
 }
@@ -965,20 +937,20 @@ fn loadBps(): void {
         }
     }
     if restored.len > 0 {
-        gBps = restored
-        logEvent("breakpoints", $"restored {gBps.len} for {gSession.target.spec.binPath}")
+        gSession.persisted.bps = restored
+        logEvent("breakpoints", $"restored {gSession.persisted.bps.len} for {gSession.target.spec.binPath}")
     }
 }
 
 fn persistHistory(): void {
     ensureDir(histDir())
-    let _r = writeFile(histFilePath(), gHistory)
+    let _r = writeFile(histFilePath(), gSession.persisted.history)
 }
 
 // Append the current session config to history on a launch (dedup + cap 10),
 // persist, and return the broadcast so the caller can push it to all peers.
 fn appendHistory(): string {
-    gHistory = histInsert(gHistory, histEntryFor(gSession.target.spec, epochMillis()), 10 as i64)
+    gSession.persisted.history = histInsert(gSession.persisted.history, histEntryFor(gSession.target.spec, epochMillis()), 10 as i64)
     persistHistory()
     return historyChangedMsg()
 }
@@ -989,19 +961,19 @@ fn appendHistory(): string {
 // existing run stamp forward so recording a config cannot un-run an entry.
 fn recordConfig(): string {
     let probe = histEntryFor(gSession.target.spec, 0 as i64)
-    let stamp = histLastRunAt(gHistory, probe)
-    gHistory = histInsert(gHistory, histEntryFor(gSession.target.spec, stamp), 10 as i64)
+    let stamp = histLastRunAt(gSession.persisted.history, probe)
+    gSession.persisted.history = histInsert(gSession.persisted.history, histEntryFor(gSession.target.spec, stamp), 10 as i64)
     persistHistory()
     return historyChangedMsg()
 }
 
 fn historyChangedMsg(): string {
-    return Json.obj().str("type", "historyChanged").raw("history", gHistory).build()
+    return Json.obj().str("type", "historyChanged").raw("history", gSession.persisted.history).build()
 }
 
 // history[0] as a re-appliable config object, or None if history is empty.
 fn firstHistoryConfig(): Option<string> {
-    if let Result.Ok(d) = Json.parse(gHistory) {
+    if let Result.Ok(d) = Json.parse(gSession.persisted.history) {
         if d.isArray() && d.len() > 0 {
             if let Option.Some(el) = d.at(0 as i64) {
                 return Option.Some(el.rawStr())
@@ -1167,12 +1139,12 @@ fn parentDrainLoop(client: DapClient, ch: Channel<string>): void {
                 if m.kind == "event" && m.event == "output" {
                     let ocat = bodyStr(m.raw, "category")
                     if ocat != "telemetry" {
-                        gOutputLog.push(OutLine {
+                        gSession.output.push(OutLine {
                             text: bodyStr(m.raw, "output"), category: ocat.clone()
                         }
                         )
-                        if gOutputLog.len > OUTLOG_MAX {
-                            let _d = gOutputLog.remove(0)
+                        if gSession.output.len > OUTLOG_MAX {
+                            let _d = gSession.output.remove(0)
                         }
                         wsPush(ch, outputMsg(m.raw))
                     }
@@ -1551,12 +1523,12 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 // never displayed). Bounded FIFO; a non-pty adapter floods here.
                 let ocat = bodyStr(msg.raw, "category")
                 if ocat != "telemetry" {
-                    gOutputLog.push(OutLine {
+                    gSession.output.push(OutLine {
                         text: bodyStr(msg.raw, "output"), category: ocat.clone()
                     }
                     )
-                    if gOutputLog.len > OUTLOG_MAX {
-                        let _d = gOutputLog.remove(0)
+                    if gSession.output.len > OUTLOG_MAX {
+                        let _d = gSession.output.remove(0)
                     }
                 }
                 wsPush(ch, outputMsg(msg.raw))
@@ -1959,7 +1931,7 @@ fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
             }
             let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "initialize", id: 0, extra: buildAllBpArgs(gBps),
+                seq: seq, kind: "initialize", id: 0, extra: buildAllBpArgs(gSession.persisted.bps),
             }
             )
             sendReqFd(dfd, seq, "initialize", initArgs())
@@ -2055,14 +2027,14 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         // Upsert: drop any existing bp at (path, line), then re-add for
         // "set" (a condition edit is a set on an existing line).
         var keep: Vec<Bp> = []
-        for bp in gBps {
+        for bp in gSession.persisted.bps {
             if bp.line != line || bp.path != path {
                 keep.push(cloneBp(bp))
             }
         }
-        gBps = keep
+        gSession.persisted.bps = keep
         if c == "setBreakpoint" {
-            gBps.push(Bp {
+            gSession.persisted.bps.push(Bp {
                 path: path.clone(),
                 line: line,
                 condition: dStr(doc, "condition"),
@@ -2092,7 +2064,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
                 seq: seq, kind: "bpLive", id: 0, extra: ""
             }
             )
-            sendReqFd(dfd, seq, "setBreakpoints", buildBpArgsForPath(gBps, path))
+            sendReqFd(dfd, seq, "setBreakpoints", buildBpArgsForPath(gSession.persisted.bps, path))
         }
     } else if c == "run" {
         // The editor is the source of truth: an inline `config` object rides
@@ -2407,7 +2379,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         // sole writer thereafter). Idempotent — dedup collapses re-imports.
         if let Option.Some(e) = doc.get("entries") {
             if e.isArray() {
-                gHistory = histMergeMany(gHistory, e.rawStr(), 10 as i64)
+                gSession.persisted.history = histMergeMany(gSession.persisted.history, e.rawStr(), 10 as i64)
                 persistHistory()
                 wsPush(bus, historyChangedMsg())
             }
@@ -2426,12 +2398,12 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             )
             sendReqFd(dfd, seq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
         }
-        gBps = []
+        gSession.persisted.bps = []
         persistBps()
         gStopMsg = ""
         gThreadsMsg = ""
         gRegionsMsg = ""
-        gOutputLog = []
+        gSession.output = []
         gSession.server.sessionId = newSessionName(sessionNameSeeds())
         journalHere()
         logEvent("session reset", $"new session {gSession.server.sessionId}")
@@ -2595,7 +2567,7 @@ fn apiStateJson(): string {
         phase = "stopped"
     }
     var bps = Json.arr()
-    for bp in gBps {
+    for bp in gSession.persisted.bps {
         bps = bps.raw(Json.obj().str("path", bp.path).int("line", bp.line)
             .str("condition", bp.condition).bool("enabled", bp.enabled).build())
     }
@@ -2605,7 +2577,7 @@ fn apiStateJson(): string {
         .str("program", gSession.target.spec.binPath)
         .str("sourcePath", gSession.target.spec.srcPath)
         .str("adapter", adapterId())
-        .int("peers", gPeers)
+        .int("peers", gSession.peers.count)
         .arr("breakpoints", bps)
     if gStopMsg.len > 0 {
         b = b.raw("stopped", gStopMsg)
@@ -2674,7 +2646,7 @@ fn unknownCmdJson(c: &string): string {
 fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: &Channel<string>, pendCh: &Channel<Pending>): string {
     // An agent driving the session IS activity: without this an --idle-ttl server
     // reaps the debuggee out from under a caller that has no WS peer holding it.
-    gLastActivityMs = epochMillis()
+    gSession.peers.lastActivityMs = epochMillis()
     if awaitType.len == 0 {
         let known = jStr(body, "cmd")
         if !dispatchClientCmd(body.clone(), "api", who, bus, pendCh) {
@@ -2683,8 +2655,8 @@ fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: 
         return Json.obj().bool("ok", true).build()
     }
     let ch = Channel<string>.new(256)!
-    let clientId = gNextClient
-    gNextClient = gNextClient + 1
+    let clientId = gSession.peers.nextClient
+    gSession.peers.nextClient = gSession.peers.nextClient + 1
     sinkRegister(clientId, ch)
     let wantCmd = jStr(body, "cmd")
     if !dispatchClientCmd(body.clone(), "api", who, bus, pendCh) {
@@ -2740,10 +2712,10 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, pendCh: &C
     // join the shared session. Register with the broadcaster, then replay
     // current state directly onto our own sink — no yield point in between,
     // so the replay is ordered before any subsequent broadcast fanout.
-    let clientId = gNextClient
-    gNextClient = gNextClient + 1
+    let clientId = gSession.peers.nextClient
+    gSession.peers.nextClient = gSession.peers.nextClient + 1
     sinkRegister(clientId, ch)
-    gPeers = gPeers + 1
+    gSession.peers.count = gSession.peers.count + 1
     logEvent("peer connected", $"{peerKind}  {peerCountStr()}")
 
     wsPush(ch, helloMsg())
@@ -2753,7 +2725,7 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, pendCh: &C
     if gCapsMsg.len > 0 {
         wsPush(ch, gCapsMsg.clone())
     }
-    for bp in gBps {
+    for bp in gSession.persisted.bps {
         wsPush(ch, bpSyncMsg(bp))
     }
     if gStopMsg.len > 0 {
@@ -2767,7 +2739,7 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, pendCh: &C
     }
     // replay buffered terminal history. Flagged so a same-session reconnect
     // (which kept its scrollback) can drop it; a fresh/new-session tab renders it.
-    for outLine in gOutputLog {
+    for outLine in gSession.output {
         wsPush(ch, Json.obj().str("type", "output").str("text", outLine.text).str("category", outLine.category).bool("replay", true).build())
     }
 
@@ -2791,8 +2763,8 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, pendCh: &C
     // the writer. Wait for it to exit before `conn` drops and closes the socket.
     sinkUnregister(clientId)
     writer.join()
-    gPeers = gPeers - 1
-    gLastActivityMs = epochMillis()
+    gSession.peers.count = gSession.peers.count - 1
+    gSession.peers.lastActivityMs = epochMillis()
     logEvent("peer disconnected", $"{peerKind}  {peerCountStr()}")
 }
 
@@ -2809,10 +2781,10 @@ fn reaperLoop(tickMs: i64, pendCh: Channel<Pending>): void {
         let Option.Some(dfd) = gSession.proc.dapIn else {
             continue
         }
-        if gPeers > 0 {
+        if gSession.peers.count > 0 {
             continue
         }
-        if epochMillis() - gLastActivityMs < gSession.server.idleTtlSecs * 1000 {
+        if epochMillis() - gSession.peers.lastActivityMs < gSession.server.idleTtlSecs * 1000 {
             continue
         }
         logEvent("session idle", $"no peers for {gSession.server.idleTtlSecs}s — terminating debuggee")
@@ -3432,17 +3404,15 @@ pub fn webMain(argv: Vec<string>): i32 {
     let port = args.getI64("port")
 
     // Shared session: one bus, one broadcaster, any number of peers.
-    gHistory = "[]"
-    gSession.server.restored = false
+    // gSession's declaration holds the rest of the initial state; these need a
+    // runtime value (a non-empty string literal at module scope is NYI).
+    gSession.persisted.history = "[]"
     gCapsMsg = ""
     gStopMsg = ""
     gThreadsMsg = ""
     gRegionsMsg = ""
-    gNextClient = 1
-    gBps = []
     gSession.server.sessionId = newSessionName(sessionNameSeeds())
-    gPeers = 0
-    gLastActivityMs = epochMillis()
+    gSession.peers.lastActivityMs = epochMillis()
     gSession.server.idleTtlSecs = args.getI64("idle-ttl")
 
     // Apply a --launch config through the same path as every other config

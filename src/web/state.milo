@@ -14,6 +14,9 @@ from "std/pty" import {
 from "std/term" import {
     TermSize
 }
+from "std/sync" import {
+    Channel
+}
 
 // A browser-set breakpoint. Keyed by (path, line); empty
 // condition/hitCondition/logMessage mean a plain breakpoint — the keys are
@@ -139,9 +142,41 @@ impl RunState {
     }
 }
 
+// one broadcaster fans the session bus out to every connected peer.
+pub struct Sink {
+    id: i64,
+    ch: Channel<string>,
+}
+
+pub struct Peers {
+    // The peer registry lives here, not in a Channel<Sink>: std/sync moves a
+    // payload with memcpy + memset-to-zero and lets the zeroed original drop, and
+    // Channel's own Drop dereferences its handle unconditionally — so a Sink (which
+    // owns a Channel<string>) segfaults the moment it is sent through a channel.
+    // Every peer task and the broadcaster are green tasks on one scheduler thread
+    // and none of the register/unregister/fanout sequences contain a yield
+    // point, so direct mutation is exactly as atomic as the channel round-trip was.
+    sinks: Vec<Sink>,
+    count: i64, // attached WS peers (browser tabs; `api` callers are one-shot HTTP)
+    nextClient: i64,
+    lastActivityMs: i64, // epochMillis of the last peer event OR api call — idle-ttl clock
+}
+
+// What outlives the server process (XDG state).
+pub struct Persisted {
+    history: string, // config history JSON array, newest first, cap 10
+    bps: Vec<Bp>, // shared breakpoint set, keyed by program on disk
+}
+
 pub struct Session {
     target: Target,
     proc: RunState,
+    peers: Peers,
+    persisted: Persisted,
+    // recent terminal output (debugger console + program stdout/stderr),
+    // replayed to a joining tab so startup chatter and history survive reload /
+    // late join. Bounded — a non-pty adapter routes ALL program output here.
+    output: Vec<OutLine>,
     server: ServerInfo,
 }
 
@@ -160,6 +195,13 @@ pub var gSession: Session = Session {
         srvPort: Option.None, debuggeePid: Option.None, parentIn: Option.None,
         child: Option.None, pendingRun: Option.None, runStartMs: 0, lastExit: Option.None,
     },
+    peers: Peers {
+        sinks: [], count: 0, nextClient: 1, lastActivityMs: 0,
+    },
+    persisted: Persisted {
+        history: "", bps: [],
+    },
+    output: [],
     server: ServerInfo {
         sessionId: "", listenPort: Option.None, startedAt: 0, noBrowser: false,
         idleTtlSecs: 0, logLevel: 0, webroot: Option.None, restored: false,
