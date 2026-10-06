@@ -209,32 +209,26 @@ struct Pending {
 
 // ── JSON helpers ──
 
-fn firstThreadId(raw: &string): i64 {
-    if let Result.Ok(doc) = Json.parse(raw) {
-        return doc.curInt(doc.curPath("body.threads[0].id")) ?? (-1 as i64)
-    }
-    return -1 as i64
+fn firstThreadId(doc: &Json): i64 {
+    return doc.curInt(doc.curPath("body.threads[0].id")) ?? (-1 as i64)
 }
 
 // stackTrace body → [{"id":..,"name":..,"line":..,"path":..}] for the UI.
 // path may be "" (no debug info / synthetic frame) — the UI skips navigation.
-fn framesJson(raw: &string): string {
+fn framesJson(doc: &Json): string {
     var arr = Json.arr()
-    if let Result.Ok(doc) = Json.parse(raw) {
-        let frames = doc.curField(doc.curField(doc.curRoot(), "body"), "stackFrames")
-        let n = doc.curLen(frames)
-        var i: i64 = 0
-        while i < n {
-            let f = doc.curChild(frames, i)
-            let path = doc.curStr(doc.curField(doc.curField(f, "source"), "path")) ?? ""
-            arr = arr.obj(Json.obj().int("id", doc.curInt(doc.curField(f, "id")) ?? (0 as i64)).str("name", doc.curStr(doc.curField(f, "name")) ?? "?").int("line", doc.curInt(doc.curField(f, "line")) ?? (0 as i64)).str("path", path).str("ipRef", doc.curStr(doc.curField(f, "instructionPointerReference")) ?? ""))
-            i = i + 1
-        }
+    let frames = doc.curField(doc.curField(doc.curRoot(), "body"), "stackFrames")
+    let n = doc.curLen(frames)
+    var i: i64 = 0
+    while i < n {
+        let f = doc.curChild(frames, i)
+        let path = doc.curStr(doc.curField(doc.curField(f, "source"), "path")) ?? ""
+        arr = arr.obj(Json.obj().int("id", doc.curInt(doc.curField(f, "id")) ?? (0 as i64)).str("name", doc.curStr(doc.curField(f, "name")) ?? "?").int("line", doc.curInt(doc.curField(f, "line")) ?? (0 as i64)).str("path", path).str("ipRef", doc.curStr(doc.curField(f, "instructionPointerReference")) ?? ""))
+        i = i + 1
     }
     return arr.build()
 }
 
-// variables body → [{"name":..,"value":..,"ref":..}] (ref>0 ⇒ expandable).
 // Parse `memory region --all` console text → [{s,e,p,n}] (start/end hex kept as
 // strings so the client parses them; p = perms "rw-", n = segment name if lldb
 // gave one, e.g. "__TEXT"/"__DATA_CONST", else ""). Line shape:
@@ -275,73 +269,66 @@ fn regionsJson(txt: &string): string {
     return arr.build()
 }
 
-fn localsJson(raw: &string): string {
+// variables body → [{"name":..,"value":..,"ref":..}] (ref>0 ⇒ expandable).
+fn localsJson(doc: &Json): string {
     var arr = Json.arr()
-    if let Result.Ok(doc) = Json.parse(raw) {
-        let vars = doc.curField(doc.curField(doc.curRoot(), "body"), "variables")
-        let n = doc.curLen(vars)
-        var i: i64 = 0
-        while i < n {
-            let v = doc.curChild(vars, i)
-            arr = arr.obj(Json.obj().str("name", doc.curStr(doc.curField(v, "name")) ?? "?").str("value", doc.curStr(doc.curField(v, "value")) ?? "?")
-            // DWARF-derived type (e.g. "int", "Node *", "double") when the
-            // adapter supplies it; "" for register scopes and untyped values.
-                .str("type", doc.curStr(doc.curField(v, "type")) ?? "").int("ref", doc.curInt(doc.curField(v, "variablesReference")) ?? (0 as i64)).str("mref", doc.curStr(doc.curField(v, "memoryReference")) ?? ""))
-            i = i + 1
-        }
+    let vars = doc.curField(doc.curField(doc.curRoot(), "body"), "variables")
+    let n = doc.curLen(vars)
+    var i: i64 = 0
+    while i < n {
+        let v = doc.curChild(vars, i)
+        arr = arr.obj(Json.obj().str("name", doc.curStr(doc.curField(v, "name")) ?? "?").str("value", doc.curStr(doc.curField(v, "value")) ?? "?")
+        // DWARF-derived type (e.g. "int", "Node *", "double") when the
+        // adapter supplies it; "" for register scopes and untyped values.
+            .str("type", doc.curStr(doc.curField(v, "type")) ?? "").int("ref", doc.curInt(doc.curField(v, "variablesReference")) ?? (0 as i64)).str("mref", doc.curStr(doc.curField(v, "memoryReference")) ?? ""))
+        i = i + 1
     }
     return arr.build()
 }
 
 // disassemble body → [{"addr":..,"text":..,"sym":..}] for the asm pane.
-fn disasmJson(raw: &string): string {
+fn disasmJson(doc: &Json): string {
     var arr = Json.arr()
-    if let Result.Ok(doc) = Json.parse(raw) {
-        let insns = doc.curField(doc.curField(doc.curRoot(), "body"), "instructions")
-        let n = doc.curLen(insns)
-        var i: i64 = 0
-        while i < n {
-            let ins = doc.curChild(insns, i)
-            arr = arr.obj(Json.obj().str("addr", doc.curStr(doc.curField(ins, "address")) ?? "").str("text", doc.curStr(doc.curField(ins, "instruction")) ?? "").str("sym", doc.curStr(doc.curField(ins, "symbol")) ?? "").int("line", doc.curInt(doc.curField(ins, "line")) ?? (0 as i64)))
-            i = i + 1
-        }
+    let insns = doc.curField(doc.curField(doc.curRoot(), "body"), "instructions")
+    let n = doc.curLen(insns)
+    var i: i64 = 0
+    while i < n {
+        let ins = doc.curChild(insns, i)
+        arr = arr.obj(Json.obj().str("addr", doc.curStr(doc.curField(ins, "address")) ?? "").str("text", doc.curStr(doc.curField(ins, "instruction")) ?? "").str("sym", doc.curStr(doc.curField(ins, "symbol")) ?? "").int("line", doc.curInt(doc.curField(ins, "line")) ?? (0 as i64)))
+        i = i + 1
     }
     return arr.build()
 }
 
 // completions body → [{"label":..,"text":..}] (text falls back to label).
-fn completionsJson(raw: &string): string {
+fn completionsJson(doc: &Json): string {
     var arr = Json.arr()
-    if let Result.Ok(doc) = Json.parse(raw) {
-        let targets = doc.curField(doc.curField(doc.curRoot(), "body"), "targets")
-        let n = doc.curLen(targets)
-        var i: i64 = 0
-        while i < n {
-            let t = doc.curChild(targets, i)
-            let label = doc.curStr(doc.curField(t, "label")) ?? ""
-            var text = doc.curStr(doc.curField(t, "text")) ?? ""
-            if text.len == 0 {
-                text = label.clone()
-            }
-            arr = arr.obj(Json.obj().str("label", label).str("text", text))
-            i = i + 1
+    let targets = doc.curField(doc.curField(doc.curRoot(), "body"), "targets")
+    let n = doc.curLen(targets)
+    var i: i64 = 0
+    while i < n {
+        let t = doc.curChild(targets, i)
+        let label = doc.curStr(doc.curField(t, "label")) ?? ""
+        var text = doc.curStr(doc.curField(t, "text")) ?? ""
+        if text.len == 0 {
+            text = label.clone()
         }
+        arr = arr.obj(Json.obj().str("label", label).str("text", text))
+        i = i + 1
     }
     return arr.build()
 }
 
 // threads body → [{"id":..,"name":..}] for the threads panel.
-fn threadsJson(raw: &string): string {
+fn threadsJson(doc: &Json): string {
     var arr = Json.arr()
-    if let Result.Ok(doc) = Json.parse(raw) {
-        let threads = doc.curField(doc.curField(doc.curRoot(), "body"), "threads")
-        let n = doc.curLen(threads)
-        var i: i64 = 0
-        while i < n {
-            let t = doc.curChild(threads, i)
-            arr = arr.obj(Json.obj().int("id", doc.curInt(doc.curField(t, "id")) ?? (0 as i64)).str("name", doc.curStr(doc.curField(t, "name")) ?? "?"))
-            i = i + 1
-        }
+    let threads = doc.curField(doc.curField(doc.curRoot(), "body"), "threads")
+    let n = doc.curLen(threads)
+    var i: i64 = 0
+    while i < n {
+        let t = doc.curChild(threads, i)
+        arr = arr.obj(Json.obj().int("id", doc.curInt(doc.curField(t, "id")) ?? (0 as i64)).str("name", doc.curStr(doc.curField(t, "name")) ?? "?"))
+        i = i + 1
     }
     return arr.build()
 }
@@ -349,20 +336,18 @@ fn threadsJson(raw: &string): string {
 // The register scope's variablesReference, or 0 if the adapter exposes none.
 // lldb-dap tags it presentationHint "registers"; debugpy has no such scope, so
 // a 0 here is what gates the UI's Registers panel (no register-cap flag in DAP).
-fn registersScopeRef(raw: &string): i64 {
-    if let Result.Ok(doc) = Json.parse(raw) {
-        let scopes = doc.curField(doc.curField(doc.curRoot(), "body"), "scopes")
-        let n = doc.curLen(scopes)
-        var i: i64 = 0
-        while i < n {
-            let sc = doc.curChild(scopes, i)
-            let hint = doc.curStr(doc.curField(sc, "presentationHint")) ?? ""
-            let name = doc.curStr(doc.curField(sc, "name")) ?? ""
-            if hint == "registers" || name == "Registers" {
-                return doc.curInt(doc.curField(sc, "variablesReference")) ?? (0 as i64)
-            }
-            i = i + 1
+fn registersScopeRef(doc: &Json): i64 {
+    let scopes = doc.curField(doc.curField(doc.curRoot(), "body"), "scopes")
+    let n = doc.curLen(scopes)
+    var i: i64 = 0
+    while i < n {
+        let sc = doc.curChild(scopes, i)
+        let hint = doc.curStr(doc.curField(sc, "presentationHint")) ?? ""
+        let name = doc.curStr(doc.curField(sc, "name")) ?? ""
+        if hint == "registers" || name == "Registers" {
+            return doc.curInt(doc.curField(sc, "variablesReference")) ?? (0 as i64)
         }
+        i = i + 1
     }
     return 0 as i64
 }
@@ -373,16 +358,14 @@ fn registersScopeRef(raw: &string): i64 {
 // places for it and adapters disagree: lldb-dap puts a short line in "message",
 // while its 21 series (and js-debug) leave that empty and put the real text in
 // body.error.format. Reading only one of them turns a refusal into a blank.
-fn respErrText(raw: &string): string {
-    if let Result.Ok(doc) = Json.parse(raw) {
-        let m = doc.curStr(doc.curField(doc.curRoot(), "message")) ?? ""
-        if m.len > 0 {
-            return m
-        }
-        let f = doc.curStr(doc.curPath("body.error.format")) ?? ""
-        if f.len > 0 {
-            return f
-        }
+fn respErrText(doc: &Json): string {
+    let m = doc.curStr(doc.curField(doc.curRoot(), "message")) ?? ""
+    if m.len > 0 {
+        return m
+    }
+    let f = doc.curStr(doc.curPath("body.error.format")) ?? ""
+    if f.len > 0 {
+        return f
     }
     return "the adapter refused the request and said nothing about why"
 }
@@ -611,12 +594,12 @@ fn bpAckMsg(b: &Bp, set: bool): string {
         .bool("set", set).build()
 }
 
-fn outputMsg(raw: &string): string {
+fn outputMsg(doc: &Json): string {
     // DAP category ("stdout"/"stderr"/"console"/"important"/…) lets the merged
     // terminal color program output apart from debugger chatter.
     return Json.obj().str("type", "output")
-        .str("text", bodyStr(raw, "output"))
-        .str("category", bodyStr(raw, "category"))
+        .str("text", bodyStr(doc, "output"))
+        .str("category", bodyStr(doc, "category"))
         .build()
 }
 
@@ -967,49 +950,18 @@ fn removePending(pend: &Vec<Pending>, idx: i64): Vec<Pending> {
 // runInTerminal reverse request → spawn debuggee in a std/pty, reply with the
 // pid, start the pump. env vars are honored by exec'ing through /usr/bin/env
 // (lldb-dap's launcher handshake rides on env vars, so dropping them breaks it).
-fn handleRunInTerminal(cl: &mut DapClient, raw: &string, reqSeq: i64, ch: &Channel<string>): i32 {
+fn handleRunInTerminal(cl: &mut DapClient, doc: &Json, reqSeq: i64, ch: &Channel<string>): i32 {
     var argv: Vec<string> = []
     var envs: Vec<string> = []
-    match Json.parse(raw) {
-        Result.Ok(doc) => {
-            match doc.get("arguments") {
-                Option.Some(a) => {
-                    match a.get("args") {
-                        Option.Some(arr) => {
-                            let n = arr.len()
-                            var i: i64 = 0
-                            while i < n {
-                                match arr.at(i) {
-                                    Option.Some(el) => {
-                                        argv.push(el.asStr() ?? "")
-                                    }
-                                    Option.None => {
-                                    }
-                                }
-                                i = i + 1
-                            }
-                        }
-                        Option.None => {
-                        }
-                    }
-                    match a.get("env") {
-                        Option.Some(env) => {
-                            let keys = env.keys()
-                            for key in keys {
-                                let v = env.str(key) ?? ""
-                                envs.push(key.clone() + "=" + v)
-                            }
-                        }
-                        Option.None => {
-                        }
-                    }
-                }
-                Option.None => {
-                }
-            }
-        }
-        Result.Err(_e) => {
-        }
+    let reqArgs = doc.curField(doc.curRoot(), "arguments")
+    let argsCur = doc.curField(reqArgs, "args")
+    for i in 0..doc.curLen(argsCur) {
+        argv.push(doc.curStr(doc.curChild(argsCur, i)) ?? "")
+    }
+    // curLen counts an array's elements too; only an object's are env entries.
+    let env = doc.curField(reqArgs, "env")
+    for i in 0..(if doc.curKind(env) == 5 { doc.curLen(env) } else { 0 as i64 }) {
+        envs.push(doc.curKeyAt(env, i) + "=" + (doc.curStr(doc.curValueAt(env, i)) ?? ""))
     }
     if argv.len == 0 {
         return -1
@@ -1090,23 +1042,23 @@ fn parentDrainLoop(client: DapClient, ch: Channel<string>): void {
         match cl.recv() {
             Result.Ok(m) => {
                 if m.kind == "event" && m.event == "output" {
-                    let ocat = bodyStr(m.raw, "category")
+                    let ocat = bodyStr(m.doc, "category")
                     if ocat != "telemetry" {
                         gSession.output.push(OutLine {
-                            text: bodyStr(m.raw, "output"), category: ocat.clone()
+                            text: bodyStr(m.doc, "output"), category: ocat.clone()
                         }
                         )
                         if gSession.output.len > OUTLOG_MAX {
                             let _d = gSession.output.remove(0)
                         }
-                        wsPush(ch, outputMsg(m.raw))
+                        wsPush(ch, outputMsg(m.doc))
                     }
                 } else if m.kind == "request" {
                     let rc = m.command.clone()
                     if rc == "runInTerminal" {
                         // js-debug asks whichever session it launches from; an
                         // empty ack here would leave the program never started.
-                        let _m = handleRunInTerminal(&mut cl, m.raw, m.seq, ch)
+                        let _m = handleRunInTerminal(&mut cl, m.doc, m.seq, ch)
                     } else {
                         cl.respond(m.seq, rc, "{}")
                     }
@@ -1141,28 +1093,20 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
     var announceEnd = false
 
     while true {
-        var msg = DapMsg {
-            kind: "", seq: 0, requestSeq: -1 as i64, command: "", event: "", success: false, raw: ""
-        }
-        match cl.recv() {
-            Result.Ok(m) => {
-                msg = m
-            }
-            Result.Err(_e) => {
-                // An adapter that dies before answering `initialize` never really
-                // started (bad dapPath, missing module, crash on launch). A bare
-                // "terminated" reads like a clean program exit, so surface the real
-                // cause — the captured stderr — as a configError instead.
-                if !initOk {
-                    var em = "adapter exited before the handshake — it never started."
-                    if gSession.proc.adapterStderr.len > 0 {
-                        em = em + "\n\n" + gSession.proc.adapterStderr
-                    }
-                    wsPush(ch, configErrMsg(em))
+        let Result.Ok(msg) = cl.recv() else {
+            // An adapter that dies before answering `initialize` never really
+            // started (bad dapPath, missing module, crash on launch). A bare
+            // "terminated" reads like a clean program exit, so surface the real
+            // cause — the captured stderr — as a configError instead.
+            if !initOk {
+                var em = "adapter exited before the handshake — it never started."
+                if gSession.proc.adapterStderr.len > 0 {
+                    em = em + "\n\n" + gSession.proc.adapterStderr
                 }
-                announceEnd = true
-                break
+                wsPush(ch, configErrMsg(em))
             }
+            announceEnd = true
+            break
         }
 
         // Adopt R's registered pendings AFTER recv, before matching: R registers
@@ -1205,14 +1149,14 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
 
             if !msg.success {
                 if kind == "eval" {
-                    let emsg = respErrText(msg.raw)
+                    let emsg = respErrText(msg.doc)
                     wsPush(ch, Json.obj().str("type", "evalResult").int("id", pid).str("value", emsg).int("ref", 0).bool("error", true).build())
                 } else if kind == "fsc" || kind == "fvars" {
                     wsPush(ch, Json.obj().str("type", "frameLocals").int("id", pid).raw("vars", "[]").build())
                 } else if kind == "disasm" {
                     wsPush(ch, Json.obj().str("type", "disasm").int("id", pid).raw("instructions", "[]").build())
                 } else if kind == "setv" {
-                    wsPush(ch, Json.obj().str("type", "setVarResult").int("id", pid).str("value", respErrText(msg.raw)).int("ref", 0).bool("error", true).build())
+                    wsPush(ch, Json.obj().str("type", "setVarResult").int("id", pid).str("value", respErrText(msg.doc)).int("ref", 0).bool("error", true).build())
                 } else if kind == "ebInit" {
                     // Exception filters rejected — still finish configuration
                     // or the session never launches.
@@ -1230,7 +1174,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     }
                     wsPush(ch, Json.obj().str("type", "threadStack").int("id", pid).raw("tid", t).raw("frames", "[]").build())
                 } else if kind == "readmem" {
-                    wsPush(ch, Json.obj().str("type", "memory").int("id", pid).str("address", "").str("data", "").str("error", jStr(msg.raw, "message")).build())
+                    wsPush(ch, Json.obj().str("type", "memory").int("id", pid).str("address", "").str("data", "").str("error", msg.doc.curStr(msg.doc.curField(msg.doc.curRoot(), "message")) ?? "").build())
                 } else if kind == "restartR" {
                     // Adapter without restart support (e.g. debugpy): tell the
                     // UI so it falls back to kill+rerun. lldb-dap handles
@@ -1270,7 +1214,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
             } else if kind == "thrPause" {
                 // Pause with no known tid (attach before first stop): pause
                 // the first thread the adapter reports.
-                let t = firstThreadId(msg.raw)
+                let t = firstThreadId(msg.doc)
                 if t >= 0 {
                     let _s = cl.send("pause", Json.obj().int("threadId", t).build())
                 }
@@ -1291,10 +1235,10 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 }
                 )
             } else if kind == "st" {
-                framesJs = framesJson(msg.raw)
-                stopLine = frame0Field(msg.raw, "line")
-                frame0 = frame0Field(msg.raw, "id")
-                let path = frame0Path(msg.raw)
+                framesJs = framesJson(msg.doc)
+                stopLine = frame0Field(msg.doc, "line")
+                frame0 = frame0Field(msg.doc, "id")
+                let path = frame0Path(msg.doc)
                 if path.len > 0 && path != lastSrc {
                     wsPush(ch, sourceMsg(path))
                     lastSrc = path
@@ -1317,8 +1261,8 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     )
                 }
             } else if kind == "sc" {
-                let ref = scopes0Ref(msg.raw)
-                regRef = registersScopeRef(msg.raw)
+                let ref = scopes0Ref(msg.doc)
+                regRef = registersScopeRef(msg.doc)
                 let vArgs = Json.obj().int("variablesReference", ref).build()
                 let s = cl.send("variables", vArgs)
                 // scope ref rides along: setVariable needs the parent
@@ -1336,24 +1280,24 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     line: stopLine, path: lastSrc.clone(), tid: tid,
                     reason: stopReason.clone(), description: stopDesc.clone(),
                     scopeRef: scopeRef, registersRef: regRef,
-                    frames: framesJs.clone(), locals: localsJson(msg.raw),
+                    frames: framesJs.clone(), locals: localsJson(msg.doc),
                 }
                 wsPush(ch, stoppedMsg(info))
                 gSession.stop.stop = Option.Some(info)
             } else if kind == "regions" {
                 // Kept + replayed like the stop so a tab that reloads mid-stop
                 // keeps its region colors instead of going grey until the next step.
-                let regions = regionsJson(bodyStr(msg.raw, "result"))
+                let regions = regionsJson(bodyStr(msg.doc, "result"))
                 wsPush(ch, regionsMsg(regions))
                 gSession.stop.regions = Option.Some(regions)
             } else if kind == "eval" {
-                wsPush(ch, Json.obj().str("type", "evalResult").int("id", pid).str("value", bodyStr(msg.raw, "result")).int("ref", bodyI64(msg.raw, "variablesReference", 0 as i64)).build())
+                wsPush(ch, Json.obj().str("type", "evalResult").int("id", pid).str("value", bodyStr(msg.doc, "result")).int("ref", bodyI64(msg.doc, "variablesReference", 0 as i64)).build())
             } else if kind == "expand" {
-                wsPush(ch, Json.obj().str("type", "children").int("id", pid).raw("vars", localsJson(msg.raw)).build())
+                wsPush(ch, Json.obj().str("type", "children").int("id", pid).raw("vars", localsJson(msg.doc)).build())
             } else if kind == "fsc" {
                 // Frame navigation: scopes for a non-top frame the user
                 // clicked; chains into fvars like the stop-time sc → vars pair.
-                let ref = scopes0Ref(msg.raw)
+                let ref = scopes0Ref(msg.doc)
                 let vArgs = Json.obj().int("variablesReference", ref).build()
                 let s = cl.send("variables", vArgs)
                 pend.push(Pending {
@@ -1365,22 +1309,22 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 if pextra.len > 0 {
                     scopeRef = pextra.clone()
                 }
-                wsPush(ch, Json.obj().str("type", "frameLocals").int("id", pid).raw("scopeRef", scopeRef).raw("vars", localsJson(msg.raw)).build())
+                wsPush(ch, Json.obj().str("type", "frameLocals").int("id", pid).raw("scopeRef", scopeRef).raw("vars", localsJson(msg.doc)).build())
             } else if kind == "setv" {
                 // setVariable: body carries the adapter-formatted new
                 // value (+ a fresh children ref for containers).
-                wsPush(ch, Json.obj().str("type", "setVarResult").int("id", pid).str("value", bodyStr(msg.raw, "value")).int("ref", bodyI64(msg.raw, "variablesReference", 0 as i64)).build())
+                wsPush(ch, Json.obj().str("type", "setVarResult").int("id", pid).str("value", bodyStr(msg.doc, "value")).int("ref", bodyI64(msg.doc, "variablesReference", 0 as i64)).build())
             } else if kind == "disasm" {
-                wsPush(ch, Json.obj().str("type", "disasm").int("id", pid).raw("instructions", disasmJson(msg.raw)).build())
+                wsPush(ch, Json.obj().str("type", "disasm").int("id", pid).raw("instructions", disasmJson(msg.doc)).build())
             } else if kind == "cmpl" {
-                wsPush(ch, Json.obj().str("type", "completions").int("id", pid).raw("targets", completionsJson(msg.raw)).build())
+                wsPush(ch, Json.obj().str("type", "completions").int("id", pid).raw("targets", completionsJson(msg.doc)).build())
             } else if kind == "readmem" {
                 // readMemory body: address + base64 data; UI decodes.
-                wsPush(ch, Json.obj().str("type", "memory").int("id", pid).str("address", bodyStr(msg.raw, "address")).str("data", bodyStr(msg.raw, "data")).build())
+                wsPush(ch, Json.obj().str("type", "memory").int("id", pid).str("address", bodyStr(msg.doc, "address")).str("data", bodyStr(msg.doc, "data")).build())
             } else if kind == "thr" {
                 // threads at this stop; "current" is the stopping thread.
                 let tl = ThreadList {
-                    current: tid, threads: threadsJson(msg.raw)
+                    current: tid, threads: threadsJson(msg.doc)
                 }
                 wsPush(ch, threadsMsg(tl))
                 gSession.stop.threads = Option.Some(tl)
@@ -1414,7 +1358,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 if pextra.len > 0 {
                     t = pextra.clone()
                 }
-                wsPush(ch, Json.obj().str("type", "threadStack").int("id", pid).raw("tid", t).raw("frames", framesJson(msg.raw)).build())
+                wsPush(ch, Json.obj().str("type", "threadStack").int("id", pid).raw("tid", t).raw("frames", framesJson(msg.doc)).build())
             }
             // bpLive / cfgDone / unmatched: nothing to route
         } else if msg.kind == "event" {
@@ -1474,23 +1418,23 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
             } else if msg.event == "output" {
                 // Buffer for late-join replay — skip telemetry (adapter-internal,
                 // never displayed). Bounded FIFO; a non-pty adapter floods here.
-                let ocat = bodyStr(msg.raw, "category")
+                let ocat = bodyStr(msg.doc, "category")
                 if ocat != "telemetry" {
                     gSession.output.push(OutLine {
-                        text: bodyStr(msg.raw, "output"), category: ocat.clone()
+                        text: bodyStr(msg.doc, "output"), category: ocat.clone()
                     }
                     )
                     if gSession.output.len > OUTLOG_MAX {
                         let _d = gSession.output.remove(0)
                     }
                 }
-                wsPush(ch, outputMsg(msg.raw))
+                wsPush(ch, outputMsg(msg.doc))
             } else if msg.event == "process" {
                 // "launch" only: an ATTACHED process was running before this
                 // session and has to outlive it: reaping it would turn a
                 // detach into a kill.
-                if bodyStr(msg.raw, "startMethod") == "launch" {
-                    let dpid = bodyI64(msg.raw, "systemProcessId", 0 as i64)
+                if bodyStr(msg.doc, "startMethod") == "launch" {
+                    let dpid = bodyI64(msg.doc, "systemProcessId", 0 as i64)
                     if dpid > 0 {
                         gSession.proc.debuggeePid = Option.Some(dpid)
                     }
@@ -1498,18 +1442,18 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
             } else if msg.event == "exited" {
                 // Not session end (restart emits it for the old process) —
                 // just remember the code for the run-exited log line.
-                let code = bodyI64(msg.raw, "exitCode", -1 as i64)
+                let code = bodyI64(msg.doc, "exitCode", -1 as i64)
                 gSession.proc.lastExit = Option.None
                 if code >= 0 {
                     gSession.proc.lastExit = Option.Some(code)
                 }
             } else if msg.event == "stopped" {
                 if gSession.server.logLevel >= 2 {
-                    logEvent("stopped", $"thread {bodyI64(msg.raw, "threadId", -1 as i64)}  reason {bodyStr(msg.raw, "reason")}")
+                    logEvent("stopped", $"thread {bodyI64(msg.doc, "threadId", -1 as i64)}  reason {bodyStr(msg.doc, "reason")}")
                 }
-                tid = bodyI64(msg.raw, "threadId", -1 as i64)
-                stopReason = bodyStr(msg.raw, "reason")
-                stopDesc = bodyStr(msg.raw, "description")
+                tid = bodyI64(msg.doc, "threadId", -1 as i64)
+                stopReason = bodyStr(msg.doc, "reason")
+                stopDesc = bodyStr(msg.doc, "description")
                 let stArgs = Json.obj().int("threadId", tid)
                     .int("startFrame", 0).int("levels", 20).build()
                 let s = cl.send("stackTrace", stArgs)
@@ -1535,7 +1479,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 // A restart replaces the pty; the old master needs no close
                 // here — its own pump owns it and closes it when the dead child
                 // EOFs the master.
-                let _m = handleRunInTerminal(&mut cl, msg.raw, msg.seq, ch)
+                let _m = handleRunInTerminal(&mut cl, msg.doc, msg.seq, ch)
             } else if msg.command == "startDebugging" {
                 // js-debug: the debuggee lives in a CHILD session the adapter
                 // asks us to open — a second connection to the same server,
@@ -1544,23 +1488,10 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 // onto it; the parent is left to a drain task (its output
                 // events still carry the program's stdio).
                 cl.respond(msg.seq, "startDebugging", "{}")
+                let childReq = msg.doc.strPath("arguments.request") ?? "launch"
                 var childCfg: string = ""
-                var childReq: string = "launch"
-                if let Result.Ok(doc) = Json.parse(msg.raw) {
-                    match doc.get("arguments") {
-                        Option.Some(args) => {
-                            childReq = args.str("request") ?? "launch"
-                            match args.get("configuration") {
-                                Option.Some(c) => {
-                                    childCfg = c.rawStr()
-                                }
-                                Option.None => {
-                                }
-                            }
-                        }
-                        Option.None => {
-                        }
-                    }
+                if let Option.Some(c) = msg.doc.path("arguments.configuration") {
+                    childCfg = c.rawStr()
                 }
                 var host: string = "127.0.0.1"
                 if gSession.target.spec.port > 0 && gSession.target.spec.host.len > 0 {

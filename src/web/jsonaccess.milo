@@ -1,74 +1,31 @@
-// Shared DAP-response JSON accessors. Milo mangles same-named fns across modules
-// to one linkonce_odr symbol, so keeping these in two files silently merged one
-// body (and now errors on drift); one definition removes that footgun. Kept
-// separate from web/server.milo so any future non-web driver reuses it verbatim.
-// See docs/design.md.
+// Shared DAP-message field readers over the one parse DapClient.recv made
+// (DapMsg.doc). Milo mangles same-named fns across modules to one linkonce_odr
+// symbol, so keeping these in two files silently merged one body (and now
+// errors on drift); one definition removes that footgun. See docs/design.md.
 
 from "std/json" import {
     Json
 }
 
-fn hex4(n: i64): string {
-    let digits: string = "0123456789abcdef"
-    var out: string = ""
-    out.push(digits[(n >> 12) & 15])
-    out.push(digits[(n >> 8) & 15])
-    out.push(digits[(n >> 4) & 15])
-    out.push(digits[n & 15])
-    return out
+pub fn bodyI64(doc: &Json, key: &string, fallback: i64): i64 {
+    return doc.curInt(doc.curField(doc.curField(doc.curRoot(), "body"), key)) ?? fallback
 }
 
-// JSON-quote a string. Control chars get \u00xx — pty data is full of ESC etc.
-// and an unescaped control byte makes the whole frame unparseable JSON.
-fn jsonEsc(s: &string): string {
-    var out: string = "\""
-    for ch in s {
-        if ch == '"' { out.push('\\') out.push('"') }
-        else if ch == '\\' { out.push('\\') out.push('\\') }
-        else if ch == '\n' { out.push('\\') out.push('n') }
-        else if ch == '\r' { out.push('\\') out.push('r') }
-        else if ch == '\t' { out.push('\\') out.push('t') }
-        else if ch < 32 { out = out + "\\u" + hex4(ch as i64) }
-        else { out.push(ch) }
-    }
-    out.push('"')
-    return out
+pub fn bodyStr(doc: &Json, key: &string): string {
+    return doc.curStr(doc.curField(doc.curField(doc.curRoot(), "body"), key)) ?? ""
 }
 
-pub fn bodyI64(raw: &string, key: &string, fallback: i64): i64 {
-    if let Result.Ok(doc) = Json.parse(raw) {
-        return doc.curInt(doc.curField(doc.curField(doc.curRoot(), "body"), key)) ?? fallback
-    }
-    return fallback
-}
-
-pub fn bodyStr(raw: &string, key: &string): string {
-    if let Result.Ok(doc) = Json.parse(raw) {
-        return doc.curStr(doc.curField(doc.curField(doc.curRoot(), "body"), key)) ?? ""
-    }
-    return ""
-}
-
-pub fn frame0Field(raw: &string, key: &string): i64 {
-    if let Result.Ok(doc) = Json.parse(raw) {
-        let f0 = doc.curChild(doc.curField(doc.curField(doc.curRoot(), "body"), "stackFrames"), 0 as i64)
-        return doc.curInt(doc.curField(f0, key)) ?? (0 as i64)
-    }
-    return 0 as i64
+pub fn frame0Field(doc: &Json, key: &string): i64 {
+    let f0 = doc.curChild(doc.curField(doc.curField(doc.curRoot(), "body"), "stackFrames"), 0 as i64)
+    return doc.curInt(doc.curField(f0, key)) ?? (0 as i64)
 }
 
 // stackTrace body → frame 0's source.path.
-pub fn frame0Path(raw: &string): string {
-    if let Result.Ok(doc) = Json.parse(raw) {
-        return doc.curStr(doc.curPath("body.stackFrames[0].source.path")) ?? ""
-    }
-    return ""
+pub fn frame0Path(doc: &Json): string {
+    return doc.curStr(doc.curPath("body.stackFrames[0].source.path")) ?? ""
 }
 
-pub fn scopes0Ref(raw: &string): i64 {
-    if let Result.Ok(doc) = Json.parse(raw) {
-        let s0 = doc.curChild(doc.curField(doc.curField(doc.curRoot(), "body"), "scopes"), 0 as i64)
-        return doc.curInt(doc.curField(s0, "variablesReference")) ?? (0 as i64)
-    }
-    return 0 as i64
+pub fn scopes0Ref(doc: &Json): i64 {
+    let s0 = doc.curChild(doc.curField(doc.curField(doc.curRoot(), "body"), "scopes"), 0 as i64)
+    return doc.curInt(doc.curField(s0, "variablesReference")) ?? (0 as i64)
 }

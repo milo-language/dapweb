@@ -31,7 +31,10 @@ pub struct DapMsg {
     command: string, // responses: the command echoed back
     event: string, // events: the event name
     success: bool, // responses: did the request succeed
-    raw: string, // full JSON body, for callers that want more
+    raw: string, // full JSON text, for callers that forward it verbatim
+    // The one parse of `raw`. Every field reader downstream walks this with the
+    // cursor API; re-parsing raw per field cost up to 6 parses per stop event.
+    doc: Json,
 }
 
 pub struct DapClient {
@@ -39,54 +42,21 @@ pub struct DapClient {
     seq: i64,
 }
 
-fn _strOr(opt: Option<string>, fallback: string): string {
-    return opt ?? fallback
-}
-
-fn _i64Or(opt: Option<i64>, fallback: i64): i64 {
-    return opt ?? fallback
-}
-
-fn _boolOr(opt: Option<bool>, fallback: bool): bool {
-    return opt ?? fallback
-}
-
 // Decode a raw JSON frame into a DapMsg.
 fn _decode(raw: string): Result<DapMsg> {
     let doc = Json.parse(raw)?
-    let kindKey: string = "type"
-    let kind = _strOr(_getStr(doc, kindKey), "")
-    var msg = DapMsg {
-        kind: kind,
-        seq: _i64Or(_getI64(doc, "seq"), 0 as i64),
-        requestSeq: _i64Or(_getI64(doc, "request_seq"), -1 as i64),
-        command: _strOr(_getStr(doc, "command"), ""),
-        event: _strOr(_getStr(doc, "event"), ""),
-        success: _boolOr(_getBool(doc, "success"), false),
+    let root = doc.curRoot()
+    let msg = DapMsg {
+        kind: doc.curStr(doc.curField(root, "type")) ?? "",
+        seq: doc.curInt(doc.curField(root, "seq")) ?? (0 as i64),
+        requestSeq: doc.curInt(doc.curField(root, "request_seq")) ?? (-1 as i64),
+        command: doc.curStr(doc.curField(root, "command")) ?? "",
+        event: doc.curStr(doc.curField(root, "event")) ?? "",
+        success: doc.curBool(doc.curField(root, "success")) ?? false,
         raw: raw,
+        doc: doc,
     }
     return Result.Ok(msg)
-}
-
-fn _getStr(doc: &Json, key: string): Option<string> {
-    let Option.Some(node) = doc.get(key) else {
-        return Option.None
-    }
-    return node.asStr()
-}
-
-fn _getI64(doc: &Json, key: string): Option<i64> {
-    let Option.Some(node) = doc.get(key) else {
-        return Option.None
-    }
-    return node.asI64()
-}
-
-fn _getBool(doc: &Json, key: string): Option<bool> {
-    let Option.Some(node) = doc.get(key) else {
-        return Option.None
-    }
-    return node.asBool()
 }
 
 impl DapClient {
