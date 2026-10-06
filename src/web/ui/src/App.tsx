@@ -796,7 +796,9 @@ export default function App() {
         // return the pane to the program's source; leaving a dead no-source
         // (dyld/libc) frame in viewPath strands the "disassembling…" placeholder.
         setStopPath("");
-        setViewPath(srcPathRef.current);
+        // With no configured source (a bare `dapweb ./prog`), the file the run
+        // stopped in is the best thing to show; a pseudo-path is not.
+        setViewPath(srcPathRef.current || (hasSrc(viewPathRef.current) ? viewPathRef.current : ""));
         if (pendingRestart.current) {
           pendingRestart.current = false;
           runRef.current();
@@ -1165,7 +1167,8 @@ export default function App() {
     return out;
   }, [bps, viewPath]);
   const canInstrStep = stopped && !!caps.supportsSteppingGranularity && !!asm;
-  const primary = primaryAction({ phase, hasTarget: hasTarget(cfg, program || undefined), attach: attachMode });
+  const targetSet = hasTarget(cfg, program || undefined);
+  const primary = primaryAction({ phase, hasTarget: targetSet, attach: attachMode });
 
   return (
     <div className="app">
@@ -1375,9 +1378,21 @@ export default function App() {
               // No-debug-info frame (dyld/libc etc.): show the disassembly in place
               // of the source — not a placeholder telling the user to run a command.
               if (!hasSrc(viewPath)) {
-                return asmPane ?? (
+                if (asmPane) return asmPane;
+                // Nothing configured: a blank editor gives no clue what comes first.
+                if (!targetSet) return (
+                  <div className="src-empty">
+                    <div className="src-empty-title">Nothing to debug yet</div>
+                    <div>Type a program path in the target bar above and press Enter,</div>
+                    <div>or start dapweb with one: <code>dapweb /path/to/binary</code></div>
+                  </div>
+                );
+                return (
                   <div className="src-hint">
-                    {stopped && caps.supportsDisassembleRequest ? "disassembling…" : "no source available for this frame"}
+                    {stopped ? (caps.supportsDisassembleRequest ? "disassembling…" : "no source available for this frame")
+                      : attachMode ? "Run attaches and opens the source where the process stops"
+                      : stopMain ? "Run stops at main and opens its source here"
+                      : "no source configured: tick stop at main and Run to open it here"}
                   </div>
                 );
               }
@@ -1425,7 +1440,7 @@ export default function App() {
                     #{i} {f.name}:{f.line}
                   </div>
                 ))
-              : <span className="hint">—</span>}
+              : <span className="hint">{stopped ? "no frames" : "run to a breakpoint to see the call stack"}</span>}
           </Panel>
           <Panel title="Breakpoints" action={bps.size > 0 && (
             <span className="bpacts">
@@ -1439,6 +1454,7 @@ export default function App() {
           </Panel>
           <Panel title="Locals">
             <VarList vars={locals} disabled={!stopped} parentRef={scopeRef}
+                     empty={stopped ? "no locals in this frame" : "run to a breakpoint to see local variables"}
                      onSetVar={caps.supportsSetVariable ? setVar : undefined}
                      onAddr={memLinks ? viewMemory : undefined} />
           </Panel>
@@ -1460,7 +1476,7 @@ export default function App() {
                     <span className="rm" onClick={() => setWatches((x) => x.filter((_, j) => j !== i))}>✕</span>
                   </div>
                 ))
-              : <span className="hint">no expressions</span>}
+              : <span className="hint">no expressions: + adds one, evaluated at every stop</span>}
           </Panel>
           {/* Registers moved to their own bottom-panel tab (next to Memory) —
               they're tall and noisy beside LOCALS, and pair with the memory view. */}
@@ -1744,7 +1760,7 @@ function RegistersPanel({ regRef, stopSeq, disabled, classify, onFrame, onSetVar
   // Region-color each register by what its value points into (classify comes
   // from App; null until a `regions` message arrives — python/go send none).
   const content = gp.rows.length === 0 && otherGroups.length === 0
-    ? <span className="hint">—</span>
+    ? <span className="hint">{disabled ? "stop the program to read the registers" : "no registers"}</span>
     : <>
         <div className="regctl">
           {([16, 10, 8, 2] as const).map((r) => (
@@ -1921,11 +1937,11 @@ type SetVarFn = (parentRef: number, name: string, value: string) => Promise<any>
 // it survives the leaf remount on resume. Its presence enables the highlight.
 type PrevVals = React.MutableRefObject<Map<string, string>>;
 
-function VarList({ vars, disabled, parentRef, onSetVar, onAddr, prevVals, gen }: {
+function VarList({ vars, disabled, parentRef, onSetVar, onAddr, prevVals, gen, empty = "—" }: {
   vars: Var[]; disabled: boolean; parentRef: number; onSetVar?: SetVarFn;
-  onAddr?: (a: string) => void; prevVals?: PrevVals; gen?: number;
+  onAddr?: (a: string) => void; prevVals?: PrevVals; gen?: number; empty?: string;
 }) {
-  if (!vars.length) return <span className="hint">—</span>;
+  if (!vars.length) return <span className="hint">{empty}</span>;
   return (
     <div className="vartree">
       {realFirst(vars).map((v, i) => <VarNode key={i} v={v} disabled={disabled} parentRef={parentRef} onSetVar={onSetVar} onAddr={onAddr} prevVals={prevVals} gen={gen} />)}
@@ -2586,7 +2602,7 @@ function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, locals, f
                     onClick={() => setStride(s)}>{bits}</button>
           );
         })}
-        {!enabled && <span className="hint">stop the program (and adapter must support readMemory)</span>}
+        {!enabled && <span className="hint">stop the program to read memory</span>}
       </div>
       {mem && (() => {
         // The window's own region is shown by lighting up its legend entry — no

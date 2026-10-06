@@ -497,6 +497,12 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
 /* Fallback shown briefly for a no-debug-info frame before its disasm arrives. */
 .src-hint { flex: 1; display: flex; align-items: center; justify-content: center;
             color: var(--muted); font-size: 12px; }
+/* No target at all: the editor area says what to do first. */
+.src-empty { flex: 1; display: flex; flex-direction: column; align-items: center;
+             justify-content: center; gap: 4px; color: var(--muted); font-size: 12px; }
+.src-empty-title { color: var(--fg); font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+.src-empty code { font-family: var(--mono); color: var(--fg); background: var(--panel);
+                  border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
 /* Inline disassembly (Monaco view zone under a source line). */
 .asm-zone { padding: 1px 0 1px 5.5ch; font: 11px/1.5 var(--mono, monospace);
             border-left: 2px solid var(--r-code); background: rgba(121,192,255,0.05); }
