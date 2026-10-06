@@ -177,10 +177,38 @@ const SGR = {
 // Per-stream begin-of-line flags so a message split across events (or a partial
 // pty line) isn't re-tagged mid-line.
 const atBol: Record<string, boolean> = {};
+// Everything the terminal was handed, by stream, so a hidden stream is only
+// hidden: toggling redraws from here and nothing is lost. Capped well past
+// xterm's own scrollback, so a redraw never shows less than was on screen.
+// "adapter" is the debugger's unprompted console output (lldb's banner chatter);
+// "prog" the debuggee; "repl" what the user or a peer asked for.
+type TermKind = "prog" | "adapter" | "repl";
+const termLog: { kind: TermKind; data: string }[] = [];
+let termLogLen = 0;
+const TERM_LOG_MAX = 2_000_000;
+const termHidden = new Set<TermKind>(["adapter"]);
+function termPut(term: Terminal | null, kind: TermKind, data: string) {
+  if (!data) return;
+  termLog.push({ kind, data });
+  termLogLen += data.length;
+  while (termLogLen > TERM_LOG_MAX && termLog.length > 1) termLogLen -= termLog.shift()!.data.length;
+  if (term && !termHidden.has(kind)) term.write(data);
+}
+function termRedraw(term: Terminal | null) {
+  if (!term) return;
+  term.reset();
+  for (const e of termLog) if (!termHidden.has(e.kind)) term.write(e.data);
+}
+function termClear(term: Terminal | null) {
+  termLog.length = 0;
+  termLogLen = 0;
+  term?.clear();
+}
 // Write `text` to the terminal in `color`, prefixing each line-start with `tag`.
 // DAP/REPL text uses bare "\n"; xterm needs CRLF, so we translate and drop the
 // program's own "\r" for tagged streams.
-function writeTagged(term: Terminal | null, key: string, text: string, color: string, tag: string) {
+function writeTagged(term: Terminal | null, key: string, text: string, color: string, tag: string,
+                     kind: TermKind = "repl") {
   if (!term || !text) return;
   if (atBol[key] === undefined) atBol[key] = true;
   let out = color;
@@ -190,7 +218,7 @@ function writeTagged(term: Terminal | null, key: string, text: string, color: st
     if (ch === "\n") { out += "\r\n"; atBol[key] = true; }
     else out += ch;
   }
-  term.write(out + SGR.reset);
+  termPut(term, kind, out + SGR.reset);
 }
 
 // Split a target bar's text into argv the way a shell would for the cases that
@@ -288,6 +316,12 @@ export default function App() {
   const [cfgHist, setCfgHist] = useState<DebugConfig[]>([]);   // server-owned config history
   const [tab, setTab] = useState<"term" | "mem" | "stack" | "regs" | "bin">("term");
   const [dbgLabel, setDbgLabel] = useState("debugger");  // legend + line tag
+  const [termShown, setTermShown] = useState<Set<TermKind>>(() => new Set<TermKind>(["prog", "repl"]));
+  const toggleTerm = (k: TermKind) => {
+    if (termHidden.has(k)) termHidden.delete(k); else termHidden.add(k);
+    termRedraw(termRef.current);
+    setTermShown(new Set<TermKind>((["prog", "adapter", "repl"] as TermKind[]).filter((x) => !termHidden.has(x))));
+  };
   const [bottomH, setBottomH] = useState(240);
   const [asideW, setAsideW] = useState(340);
   const [adapterCmd, setAdapterCmd] = useState("");    // resolved adapter command (ⓘ popover)
@@ -515,7 +549,7 @@ export default function App() {
           setLocals([]); setWatches([]); setStopLine(0);
           setSelFrame(0); setMem(null); setMemAddr(""); setMemErr("");
           if (phaseRef.current !== "idle") setPhase("idle");
-          termRef.current?.clear();
+          termClear(termRef.current);
           // The banner below only prints when the state CHANGES, and clearing the
           // terminal just erased whatever it last printed. Without this, a new
           // session that happens to land in the same state as the old one comes
@@ -739,11 +773,13 @@ export default function App() {
         // handshake, e.g. debugpy's "ptvsd") and never meant for display.
         const t = termRef.current, c = m.category || "";
         if (c === "telemetry") { /* drop */ }
-        else if (c === "stdout") writeTagged(t, "out", m.text, "", "");
-        else if (c === "stderr") writeTagged(t, "err", m.text, SGR.err, "");
-        else writeTagged(t, "dbg", m.text, SGR.dbg, dbgTag + "  ");
+        else if (c === "stdout") writeTagged(t, "out", m.text, "", "", "prog");
+        else if (c === "stderr") writeTagged(t, "err", m.text, SGR.err, "", "prog");
+        // DAP "important" is the adapter asking to be seen, so the adapter
+        // toggle does not get to hide it.
+        else writeTagged(t, "adapter", m.text, SGR.dbg, dbgTag + "  ", c === "important" ? "repl" : "adapter");
       }
-      else if (m.type === "ptyData") termRef.current?.write(m.data);
+      else if (m.type === "ptyData") termPut(termRef.current, "prog", m.data);
       else if (m.type === "restartFailed") {
         pendingRestart.current = true;
         send({ cmd: "kill" });
@@ -765,7 +801,7 @@ export default function App() {
           return;
         }
         setStatus({ text: "the program exited — press Run to start it again", short: "exited", cls: "done" });
-        termRef.current?.write("\r\n\x1b[2m[dapweb] session ended — press ▶ Run to start again\x1b[0m\r\n");
+        termPut(termRef.current, "repl", "\r\n\x1b[2m[dapweb] session ended — press ▶ Run to start again\x1b[0m\r\n");
       }
     };
     };
@@ -1471,9 +1507,13 @@ export default function App() {
             <div className={"tab" + (tab === "bin" ? " active" : "")} onClick={() => setTab("bin")}>Binary</div>
           )}
           {tab === "term" && (
-            <span className="termlegend" title="program output renders plain; debugger output is tagged and dimmed">
-              <span className="sw prog" /> program
-              <span className="sw dbg" /> {dbgLabel}
+            <span className="termlegend">
+              <span className={"termchip" + (termShown.has("prog") ? " on" : "")} onClick={() => toggleTerm("prog")}
+                    data-tip="program output, plain. Click to show or hide">
+                <span className="sw prog" /> program</span>
+              <span className={"termchip" + (termShown.has("adapter") ? " on" : "")} onClick={() => toggleTerm("adapter")}
+                    data-tip={`${dbgLabel}'s own console output, tagged. Hidden by default; click to show or hide`}>
+                <span className="sw dbg" /> {dbgLabel}</span>
             </span>
           )}
         </div>

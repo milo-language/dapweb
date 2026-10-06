@@ -463,11 +463,16 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
 .tabs .tab.active { color: var(--fg); border-bottom: 2px solid var(--accent); }
 .tabpane { flex: 1; min-height: 0; flex-direction: column; }
 .term { flex: 1; min-height: 0; padding: 4px 8px; }
-/* Merged-terminal legend: which color is program vs debugger output. */
-.termlegend { margin-left: auto; display: flex; align-items: center; gap: 5px;
+/* Merged-terminal legend, doubling as per-stream show/hide toggles. */
+.termlegend { margin-left: auto; display: flex; align-items: center; gap: 4px;
               padding-right: 12px; font-size: 10px; color: var(--muted);
               text-transform: none; letter-spacing: 0; }
-.termlegend .sw { width: 9px; height: 9px; border-radius: 2px; margin-left: 8px; }
+.termchip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 6px;
+            border: 1px solid transparent; border-radius: 4px; cursor: pointer;
+            user-select: none; opacity: 0.55; }
+.termchip:hover { background: var(--surface-hi); }
+.termchip.on { opacity: 1; color: var(--accent); border-color: var(--accent); }
+.termlegend .sw { width: 9px; height: 9px; border-radius: 2px; }
 .termlegend .sw.prog { background: var(--fg); }
 .termlegend .sw.dbg { background: var(--dbg); }
 .excrow { display: flex; align-items: center; gap: 6px; padding: 2px 0;
