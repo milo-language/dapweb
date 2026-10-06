@@ -79,8 +79,8 @@ constructs. No invented protocol.
   usually has only the stopping thread; server re-polls 3× at 300ms.
 - **readMemory at unmapped pages**: lldb-dap replies success-but-empty (no error, no data) —
   surface failure in the Memory pane, not the terminal.
-- **Same-named fns in two modules merge via linkonce_odr** (milo): one body silently wins —
-  rename to avoid collisions (broke asm/ipRef once already).
+- **Same-named fns in two modules** used to merge via linkonce_odr (milo). Fixed upstream:
+  private fns and globals are per-module, two `pub fn`s with different bodies are an error.
 - **Green tasks only run after main yields**; wsConnect fds are blocking by default
   (setNonblocking or the reader stalls the scheduler); id-correlated broadcasts require
   peers to ignore foreign ids.

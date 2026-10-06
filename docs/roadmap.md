@@ -95,12 +95,9 @@ Shipped: `Session` in state.milo (52 globals → 0), `snapshot()` for late join 
 suite that fails if any item is dropped, sealed+shared broadcast fanout (milo
 `WsConn.sendShared`), one DAP parse per message (was up to 6), `Request` over a sealed
 buffer, one handler per command, 17 JSON helpers deleted, server.milo 3667 → 671 lines
-split into http, peers, persist, dap_reader, dispatch. New gate: no duplicate top-level
-names across modules (milo's flat namespace merges them silently).
+split into http, peers, persist, dap_reader, dispatch.
 
 Milo compiler issues found (open):
-- Duplicate top-level names across modules merge silently; should be an error (dapweb
-  gates it in test.sh meanwhile).
 - `match` arms do not receive the expected type (the `if` case is fixed, 39a46ee7).
 - Same-scope `let x` then `var x: T` gives a type error, not a redeclaration error.
 - False "use of moved variable" after a `let ... else { ...; return }` whose else diverges.
