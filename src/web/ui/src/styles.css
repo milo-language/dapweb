@@ -18,7 +18,7 @@ body {
 /* Everything that is program text rather than chrome. Grouped in one place so
    the rule above stays enforceable instead of decaying into per-widget taste. */
 .target-input, .target-item, .proc-pid, .bin-path, .hist-prog, .hist-src,
-.filetab, .cap, .info-line, .frame .tloc, .bpline, .bpdetail,
+.filetab, .cap, .info-line, .frame .tloc, .bpline, .bpsrc, .bpdetail,
 .vartree .var .name, .vartree .var .vtype, .vartree .var .val, .varedit, .addr,
 .wrow .expr, .wrow .wval, .console-input input, .console-input .prompt, .comp,
 .regrow .rname, .regrow .rval, .regrow .rdec, .regrow .rmod, .regrow .rsym,
@@ -309,6 +309,8 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
 .bpdot.cond { background: var(--stop); }
 .bpdot.log { border-radius: 2px; transform: rotate(45deg); }
 .bpline { flex: none; }
+.bpsrc { color: var(--muted); font-size: 10px; flex: 1; min-width: 0;
+         white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .bpdetail { color: var(--muted); font-size: 11px; flex: 1;
             white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .bprow .bpedit { color: var(--muted); cursor: pointer; opacity: 0; margin-left: auto; padding: 0 2px; }
@@ -316,7 +318,7 @@ main { flex: 1; display: flex; min-height: 0; position: relative; }
 .bprow:hover .bpedit { opacity: 1; }
 .bprow .bpedit:hover { color: var(--accent); }
 .bprow .rm { color: var(--muted); margin-left: auto; }
-.bprow.off .bpline, .bprow.off .bpdetail { opacity: 0.45; }
+.bprow.off .bpline, .bprow.off .bpsrc, .bprow.off .bpdetail { opacity: 0.45; }
 .bpdot { cursor: pointer; }
 .bpdot.off { background: transparent !important; border: 1.5px solid var(--muted); }
 .bpacts { display: flex; gap: 8px; }

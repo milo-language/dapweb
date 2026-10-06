@@ -1427,7 +1427,7 @@ export default function App() {
               <button className="addbtn" title="remove all" onClick={clearAllBps}>✕</button>
             </span>
           )}>
-            <BpList bps={bps} onJump={(p, ln) => openFile(p, ln)} onRemove={removeBp} onToggle={setBpEnabled}
+            <BpList bps={bps} files={files} onJump={(p, ln) => openFile(p, ln)} onRemove={removeBp} onToggle={setBpEnabled}
                     onEdit={(path, line, x, y) => setBpEdit({ path, line, x, y })} />
           </Panel>
           <Panel title="Locals">
@@ -1857,8 +1857,9 @@ function Val({ text, onAddr, cls }: { text: string; onAddr?: (a: string) => void
 
 // All breakpoints across files with their condition/hit/log meta.
 // Hover a row → ✎ opens the same condition/hit/logpoint editor as the gutter.
-function BpList({ bps, onJump, onRemove, onToggle, onEdit }: {
+function BpList({ bps, files, onJump, onRemove, onToggle, onEdit }: {
   bps: Map<string, BpMeta>;
+  files: Map<string, string>;
   onJump: (path: string, ln: number) => void;
   onRemove: (path: string, ln: number) => void;
   onToggle: (path: string, ln: number, meta: BpMeta) => void;
@@ -1868,6 +1869,14 @@ function BpList({ bps, onJump, onRemove, onToggle, onEdit }: {
     const i = k.indexOf("\n");
     return { path: k.slice(0, i), line: Number(k.slice(i + 1)), meta: m };
   }).sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line);
+  const lines = useMemo(() => new Map<string, string[]>(), [files]);
+  const srcLine = (path: string, line: number) => {
+    const text = files.get(path);
+    if (text === undefined) return "";
+    let ls = lines.get(path);
+    if (!ls) { ls = text.split("\n"); lines.set(path, ls); }
+    return (ls[line - 1] ?? "").trim();
+  };
   if (!rows.length) return <span className="hint">none — click the gutter, or right-click / ✎ for conditions & logpoints</span>;
   return (
     <>
@@ -1882,6 +1891,7 @@ function BpList({ bps, onJump, onRemove, onToggle, onEdit }: {
             <span className={"bpdot " + kind} title={meta.enabled === false ? "enable" : "disable"}
                   onClick={(e) => { e.stopPropagation(); onToggle(path, line, meta); }} />
             <span className="bpline">{base(path)}:{line}</span>
+            {(() => { const t = srcLine(path, line); return t && <span className="bpsrc" title={t}>{t}</span>; })()}
             {detail && <span className="bpdetail" title={detail}>{detail}</span>}
             <span className="bpedit" title="edit condition / hit count / logpoint"
                   onClick={(e) => { e.stopPropagation(); onEdit(path, line, e.clientX, e.clientY); }}>✎</span>
