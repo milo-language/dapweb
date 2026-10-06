@@ -684,9 +684,7 @@ fn adapterStderrPump(errFd: i32): void {
         }
     }
     // Owns the fd — see ptyPumpLoop for why nobody else may close it.
-    unsafe {
-        close(errFd)
-    }
+    close(errFd)
 }
 
 // ── Simple outbound messages ──
@@ -1914,9 +1912,7 @@ fn spawnTcpAdapter(prog: &string, args: &Vec<string>): Result<i64> {
         for c in rest {
             eprint("[adapter] " + c)
         }
-        unsafe {
-            close(outFd)
-        }
+        close(outFd)
     }
     )
     return Result.Ok(port)
