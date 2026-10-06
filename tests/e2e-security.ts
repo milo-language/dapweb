@@ -66,6 +66,24 @@ ok(await get("/api/state", `127.0.0.1:${port}`) === 200, "Host 127.0.0.1:port �
 ok(await get("/api/state", `[::1]:${port}`) === 200, "Host [::1]:port → 200");
 ok(await get("/", self) === 200, "index from localhost → 200");
 
+// Headers split across segments, Host in the second: must not be judged early.
+const split = await new Promise<number | "refused">((resolve) => {
+  const s = connect({ host: "127.0.0.1", port });
+  let buf = "";
+  s.on("connect", () => {
+    s.write("GET /api/state HTTP/1.1\r\n");
+    setTimeout(() => s.write(`Host: ${self}\r\nConnection: close\r\n\r\n`), 150);
+  });
+  s.on("data", (d) => {
+    buf += d.toString();
+    const m = buf.match(/^HTTP\/1\.1 (\d{3})/);
+    if (m) { resolve(Number(m[1])); s.destroy(); }
+  });
+  s.on("error", () => resolve("refused"));
+  s.on("close", () => resolve("refused"));
+});
+ok(split === 200, "headers split across segments → 200", split);
+
 // ── DNS rebinding: right socket, foreign Host ──
 ok(await get("/api/state", `evil.example:${port}`) === 403, "foreign Host → 403");
 ok(await get("/api/state", `localhost.evil.example:${port}`) === 403, "Host with localhost prefix → 403");

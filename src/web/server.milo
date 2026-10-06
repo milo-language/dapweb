@@ -3327,6 +3327,19 @@ fn handleConnection(fd: i32, bus: Channel<string>, busWakeWr: i32, pendCh: Chann
         for i in 0..n {
             raw.push(buf[i])
         }
+        // Headers can arrive split across TCP segments. Read to the blank line
+        // before judging them: requestAllowed would otherwise refuse a request
+        // whose Host has not arrived yet. Capped so a client cannot grow it forever.
+        while !raw.contains("\r\n\r\n") && raw.len < 65536 {
+            schedulerWaitRead(fd)
+            let more = read(fd, buf as *u8, 8192)
+            if more <= 0 {
+                break
+            }
+            for i in 0..more {
+                raw.push(buf[i])
+            }
+        }
 
         let rl = parseRequestLine(raw)
         if !requestAllowed(raw) {

@@ -46,6 +46,12 @@ serve_suite() {
     case "$name" in *"$filter"*) ;; *) return 0 ;; esac
     echo ""
     echo "── $name (port $port)"
+    # Something else on the port (a dev server) would answer every probe while
+    # ours dies on bind, and the suite would quietly test the wrong server.
+    if curl -s -o /dev/null "http://localhost:$port/api/state"; then
+        echo "  FAIL $name: port $port already in use (set DAPWEB_TEST_PORT_BASE)"
+        fail=$((fail + 1)); failed="$failed $name"; return 0
+    fi
     XDG_STATE_HOME="$state/$name" DAPWEB_NO_OPEN=1 \
         ./dapweb web --port "$port" --quiet "$@" >"/tmp/dapweb_test_$name.log" 2>&1 &
     srv=$!
@@ -54,6 +60,10 @@ serve_suite() {
         curl -s -o /dev/null "http://localhost:$port/api/state" && break
         i=$((i + 1)); sleep 0.1
     done
+    if ! kill -0 "$srv" 2>/dev/null; then
+        echo "  FAIL $name: its server exited at startup (port $port taken?), see /tmp/dapweb_test_$name.log"
+        fail=$((fail + 1)); failed="$failed $name"; return 0
+    fi
     if bun "tests/$name.ts" "$port"; then pass=$((pass + 1)); else fail=$((fail + 1)); failed="$failed $name"; fi
     kill "$srv" 2>/dev/null || true
     wait "$srv" 2>/dev/null || true
