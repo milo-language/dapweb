@@ -9,6 +9,12 @@
 import { appendFileSync } from "fs";
 
 const log = process.env.STUB_LOG;
+// STUB_GOTO=1 advertises and implements gotoTargets/goto, which lldb-dap does
+// not, so the set-next-statement path has an adapter to be tested against.
+// A goto target's id is its line * 10; line 9999 has no code (no targets).
+const gotoOn = process.env.STUB_GOTO === "1";
+let curLine = 1;
+let curPath = "";
 
 // process.stdout.write, not Bun.write(Bun.stdout): Bun.write is async and two
 // in-flight writes can interleave, which splits a DAP frame down the middle.
@@ -31,7 +37,8 @@ function handle(req: any) {
   if (log) appendFileSync(log, JSON.stringify(req) + "\n");
   switch (req.command) {
     case "initialize":
-      reply(req, { supportsConfigurationDoneRequest: true, supportsFunctionBreakpoints: true });
+      reply(req, { supportsConfigurationDoneRequest: true, supportsFunctionBreakpoints: true,
+                   ...(gotoOn ? { supportsGotoTargetsRequest: true } : {}) });
       event("initialized");
       return;
     case "setFunctionBreakpoints":
@@ -50,10 +57,22 @@ function handle(req: any) {
       reply(req, { threads: [{ id: 1, name: "stub" }] });
       return;
     case "stackTrace":
-      reply(req, { stackFrames: [{ id: 1, name: "stub_frame", line: 1, column: 1 }], totalFrames: 1 });
+      reply(req, { stackFrames: [{ id: 1, name: "stub_frame", line: curLine, column: 1,
+                                   ...(curPath ? { source: { path: curPath } } : {}) }], totalFrames: 1 });
       return;
     case "scopes":
       reply(req, { scopes: [] });
+      return;
+    case "gotoTargets": {
+      const line = req.arguments?.line ?? 0;
+      curPath = req.arguments?.source?.path ?? "";
+      reply(req, { targets: line === 9999 ? [] : [{ id: line * 10, label: `line ${line}`, line }] });
+      return;
+    }
+    case "goto":
+      curLine = Math.floor((req.arguments?.targetId ?? 0) / 10);
+      reply(req);
+      event("stopped", { reason: "goto", threadId: req.arguments?.threadId ?? 1, allThreadsStopped: true });
       return;
     case "disconnect":
     case "terminate":

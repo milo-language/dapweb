@@ -139,6 +139,12 @@ pub fn configErrMsg(err: &string): string {
     return Json.obj().str("type", "configError").str("error", err).build()
 }
 
+// A command that was accepted but could not do what it asked (a goto the
+// adapter refused). Not a configError: that one opens the target sheet.
+pub fn cmdErrorMsg(c: &string, err: &string): string {
+    return Json.obj().str("type", "cmdError").str("cmd", c).str("error", err).build()
+}
+
 // exitCode rides along only when the adapter reported one (-1 = unknown: killed,
 // detached, or the adapter never started), so a client never shows a made-up code.
 pub fn terminatedMsg(exitCode: Option<i64>): string {

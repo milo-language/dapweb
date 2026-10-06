@@ -41,6 +41,8 @@ pub fn commandSpecs(): Vec<CmdSpec> {
     v.push(CmdSpec { name: "stepOver", args: "tid?, granularity?", summary: "step one line, over calls", awaits: "stopped", dap: "next", verb: "stepOver" })
     v.push(CmdSpec { name: "stepIn", args: "tid?, granularity?", summary: "step into the call at the current line", awaits: "stopped", dap: "stepIn", verb: "stepIn" })
     v.push(CmdSpec { name: "stepOut", args: "tid?, granularity?", summary: "run to the caller and stop there", awaits: "stopped", dap: "stepOut", verb: "stepOut" })
+    v.push(CmdSpec { name: "runToCursor", args: "line, path?, tid?", summary: "continue and stop at a line, leaving the breakpoint list alone", awaits: "stopped", dap: "setBreakpoints+continue", verb: "run to a line" })
+    v.push(CmdSpec { name: "setNextStatement", args: "line, path?, tid?", summary: "move the next statement to a line without running (adapter must support goto)", awaits: "stopped", dap: "gotoTargets+goto", verb: "move the next statement" })
     v.push(CmdSpec { name: "restart", args: "", summary: "restart the debuggee, keeping breakpoints", awaits: "stopped", dap: "restart", verb: "restart the program" })
     v.push(CmdSpec { name: "kill", args: "", summary: "terminate the debuggee", awaits: "terminated", dap: "disconnect", verb: "terminate the program" })
     v.push(CmdSpec { name: "setBreakpoint", args: "line, path?, condition?, hitCondition?, logMessage?, enabled?", summary: "set or update a breakpoint", awaits: "breakpoint", dap: "setBreakpoints", verb: "set a breakpoint" })
