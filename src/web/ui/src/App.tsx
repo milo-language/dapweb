@@ -4,6 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import SourceView, { langFor, BpMeta, BpPopover, HoverVar } from "./SourceView";
 import ConfigDrawer, { DebugConfig, stripJsonc } from "./ConfigDrawer";
+import { tabLabels } from "./tabLabels";
 
 type Frame = { id: number; name: string; line: number; path: string; ipRef: string };
 type Thread = { id: number; name: string };
@@ -269,6 +270,7 @@ export default function App() {
   const [viewPath, setViewPath] = useState(""); // file currently displayed
   const [files, setFiles] = useState<Map<string, string>>(new Map()); // path → content
   const [tabs, setTabs] = useState<string[]>([]);
+  const tabLabel = useMemo(() => tabLabels(tabs), [tabs]);
   const [bps, setBps] = useState<Map<string, BpMeta>>(new Map()); // bpKey → meta
   const [stopLine, setStopLine] = useState(0);
   const [stopPath, setStopPath] = useState("");  // file the stop/selected frame is in
@@ -1279,7 +1281,7 @@ export default function App() {
             <div className="filetabs">
               {tabs.map((p) => (
                 <div key={p} className={"filetab" + (p === viewPath ? " active" : "")}
-                     title={p} onClick={() => openFile(p)}>{base(p)}</div>
+                     title={p} onClick={() => openFile(p)}>{tabLabel.get(p) ?? base(p)}</div>
               ))}
             </div>
           )}
