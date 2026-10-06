@@ -42,9 +42,6 @@ from "std/runtime" import {
 from "std/sync" import {
     Channel
 }
-from "std/event" import {
-    setNonblocking
-}
 from "std/json" import {
     Json
 }
