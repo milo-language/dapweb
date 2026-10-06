@@ -34,10 +34,7 @@ from "std/path" import {
     Path
 }
 from "std/process" import {
-    Child, processAlive
-}
-from "std/os" import {
-    kill
+    Child, processAlive, terminateProcess
 }
 from "std/pty" import {
     Pty
@@ -1363,8 +1360,8 @@ fn killAdapterSrv(): void {
 // under a SERVER we spawned: SIGTERMing that server reparents the program to
 // init and dapweb reports "idle" while it is still running (and still holding
 // the port/file the next run wants). Give it a moment to go on its own, then
-// SIGTERM it. Not a child of ours: no Child handle exists for it, so this is a raw
-// kill by pid (unsafe: the pid may have been reused), and never a wait.
+// SIGTERM it. Not a child of ours: no Child handle exists for it, so this goes by
+// pid (which may have been reused; processAlive is the check) and never waits.
 fn reapDebuggee(): void {
     if let Option.Some(dpid) = gSession.proc.debuggeePid {
         let pid = dpid as i32
@@ -1375,9 +1372,7 @@ fn reapDebuggee(): void {
             waited = waited + 50
         }
         if processAlive(pid) {
-            unsafe {
-                let _k = kill(pid, 15)
-            }
+            let _k = terminateProcess(pid)
             logEvent("debuggee reaped", $"pid {dpid} outlived the adapter (SIGTERM)")
         }
     }
