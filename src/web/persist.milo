@@ -25,8 +25,8 @@ from "std/io" import {
 from "std/json" import {
     Json
 }
-from "std/os" import {
-    getpid
+from "std/sysinfo" import {
+    pid as selfPid
 }
 from "std/path" import {
     Path
@@ -348,7 +348,7 @@ pub fn sessionNameSeeds(): Vec<string> {
 pub fn registerSession(port: i64): void {
     gSession.server.listenPort = Option.Some(port)
     gSession.server.startedAt = epochMillis()
-    writeSession(gSession.server.sessionId, getpid() as i64, port, gSession.target.spec.binPath, adapterId(), gSession.server.startedAt)
+    writeSession(gSession.server.sessionId, selfPid() as i64, port, gSession.target.spec.binPath, adapterId(), gSession.server.startedAt)
     journalHere()
 }
 
@@ -361,7 +361,7 @@ pub fn journalHere(): void {
     if let Result.Ok(d) = currentDir() {
         cwd = d
     }
-    journalSession(gSession.server.sessionId, getpid() as i64, gSession.server.listenPort ?? (0 as i64), gSession.target.spec.binPath, adapterId(), cwd)
+    journalSession(gSession.server.sessionId, selfPid() as i64, gSession.server.listenPort ?? (0 as i64), gSession.target.spec.binPath, adapterId(), cwd)
 }
 
 // The descriptor names the program this server is debugging, and that changes
@@ -370,7 +370,7 @@ pub fn journalHere(): void {
 // each session is on — so rewrite it, keeping the original start time.
 fn refreshSession(): void {
     if let Option.Some(port) = gSession.server.listenPort {
-        writeSession(gSession.server.sessionId, getpid() as i64, port, gSession.target.spec.binPath, adapterId(), gSession.server.startedAt)
+        writeSession(gSession.server.sessionId, selfPid() as i64, port, gSession.target.spec.binPath, adapterId(), gSession.server.startedAt)
         journalHere()
     }
 }

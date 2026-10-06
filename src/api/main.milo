@@ -13,8 +13,11 @@ from "std/args" import {
 from "std/argparse" import {
     ArgParser
 }
-from "std/os" import {
-    exit, getpid, isatty
+from "std/sysinfo" import {
+    pid as selfPid
+}
+from "std/pty" import {
+    fdIsTerminal
 }
 from "std/json" import {
     Json, jsonPretty
@@ -91,7 +94,7 @@ fn agentLabel(): string {
             return "claude"
         }
     }
-    if isatty(0 as i32) == 1 {
+    if fdIsTerminal(0 as i32) {
         return "cli"
     }
     return "agent"
@@ -111,7 +114,7 @@ fn emit(reply: &string, pretty: bool): void {
 
 // POST a command body and print the reply. `awaitType` empty ⇒ fire-and-forget.
 fn postCmd(port: i64, body: string, awaitType: string, timeoutMs: i64, pretty: bool): i32 {
-    var path = $"/api/cmd?agent={agentLabel()}&pid={getpid() as i64}"
+    var path = $"/api/cmd?agent={agentLabel()}&pid={selfPid() as i64}"
     if awaitType.len > 0 {
         path = path + $"&await={awaitType}&timeout={timeoutMs}"
     }

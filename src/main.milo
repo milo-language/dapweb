@@ -21,9 +21,6 @@ from "std/args" import {
 from "std/argparse" import {
     ArgParser
 }
-from "std/os" import {
-    exit
-}
 from "std/fs" import {
     pathExists
 }

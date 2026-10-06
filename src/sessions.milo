@@ -12,9 +12,6 @@
 // happen: the day one of them starts honouring a new env var, the other silently
 // reads an empty registry and reports "no live sessions".
 
-from "std/os" import {
-    kill
-}
 from "std/time" import {
     sleepMs
 }
@@ -22,10 +19,10 @@ from "std/net" import {
     TcpListener, NetError, ip4
 }
 from "std/process" import {
-    Command, exePath
+    Command, exePath, processAlive
 }
 from "std/fs" import {
-    readDir, removeFile, mkdir
+    readDir, removeFile, mkdirAll
 }
 from "std/io" import {
     readFile, writeFile
@@ -65,15 +62,10 @@ pub fn sessionFilePath(id: &string): string {
     return sessionsDir() + "/" + id + ".json"
 }
 
-// mkdir -p: create each ancestor in turn, ignoring already-exists errors (0755).
+// mkdir -p (0755). Best effort: a directory that cannot be made surfaces as the write
+// into it failing.
 pub fn ensureDir(path: &string): void {
-    var i: i64 = 1
-    while i <= path.len {
-        if i == path.len || path[i] == '/' {
-            let _r = mkdir(path.substr(0, i), 493)
-        }
-        i = i + 1
-    }
+    let _r = mkdirAll(path, 493)
 }
 
 pub fn writeSession(id: &string, pid: i64, port: i64, program: &string, adapter: &string, startedAt: i64): void {
@@ -134,8 +126,7 @@ pub fn loadSessions(prune: bool): Vec<SessionRow> {
             }
         }
         let pid = doc.i64("pid") ?? (0 as i64)
-        // kill(pid, 0): 0 ⇒ alive, -1/ESRCH ⇒ gone. No signal is delivered.
-        let alive = pid > 0 && kill(pid as i32, 0) == 0
+        let alive = pid > 0 && processAlive(pid as i32)
         if !alive && prune {
             let _r = removeFile(path)
             continue
