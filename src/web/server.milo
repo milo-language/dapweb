@@ -373,55 +373,6 @@ fn respErrText(doc: &Json): string {
     return "the adapter refused the request and said nothing about why"
 }
 
-fn jStr(raw: &string, key: &string): string {
-    if let Result.Ok(doc) = Json.parse(raw) {
-        return doc.str(key) ?? ""
-    }
-    return ""
-}
-
-fn jBool(raw: &string, key: &string, fallback: bool): bool {
-    if let Result.Ok(doc) = Json.parse(raw) {
-        return doc.bool(key) ?? fallback
-    }
-    return fallback
-}
-
-fn jI64(raw: &string, key: &string, fallback: i64): i64 {
-    if let Result.Ok(doc) = Json.parse(raw) {
-        return doc.i64(key) ?? fallback
-    }
-    return fallback
-}
-
-// `key`'s value as raw JSON if it's an object, else "" (run's inline config).
-fn jObjRaw(raw: &string, key: &string): string {
-    if let Result.Ok(doc) = Json.parse(raw) {
-        if let Option.Some(v) = doc.get(key) {
-            if v.isObject() {
-                return v.rawStr()
-            }
-        }
-    }
-    return ""
-}
-
-// Root-field readers over an ALREADY-parsed doc. The jStr family above re-parses
-// the whole message per field, which is fine for a single read but not for the
-// command path, which reads up to seven fields of one payload; dispatchClientCmd
-// parses once and these make each read an index hop (std/json cursor API).
-fn dStr(doc: &Json, key: &string): string {
-    return doc.curStr(doc.curField(doc.curRoot(), key)) ?? ""
-}
-
-fn dBool(doc: &Json, key: &string, fallback: bool): bool {
-    return doc.curBool(doc.curField(doc.curRoot(), key)) ?? fallback
-}
-
-fn dI64(doc: &Json, key: &string, fallback: i64): i64 {
-    return doc.curInt(doc.curField(doc.curRoot(), key)) ?? fallback
-}
-
 // ── Lifecycle log ──
 
 // One line per session event: `HH:MM:SS <event> <details>`. Event column
@@ -1947,16 +1898,16 @@ fn cmdHandler(name: string): Option<(&Cmd) => void> {
     }
 }
 
-// Returns whether the command was recognised. A caller that answers over HTTP
-// needs that: an unknown `cmd` used to fall off the end of the if-chain, do
+// None when the command ran; Some(the refused name) otherwise. A caller that
+// answers over HTTP needs that: an unknown `cmd` used to fall off the end of the if-chain, do
 // nothing, and still be answered {"ok":true}, so an agent's typo looked exactly
 // like success. The check comes BEFORE the activity announcement too — telling
 // the human "the agent is attempting to frobnicate" about a command that will
 // not run is worse than saying nothing.
-fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
+fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: &Channel<string>, pendCh: &Channel<Pending>): Option<string> {
     let Result.Ok(doc) = Json.parse(payload) else {
         journalCmd("", peerKind, peerLabel, false, "not a dapweb command", payload, "")
-        return false
+        return Option.Some("")
     }
     let c = doc.str("cmd") ?? ""
     var handler: Option<(&Cmd) => void> = Option.None
@@ -1965,7 +1916,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
     }
     let Option.Some(run) = handler else {
         journalCmd(c, peerKind, peerLabel, false, "not a dapweb command", payload, "")
-        return false
+        return Option.Some(c.clone())
     }
     journalCmd(c, peerKind, peerLabel, true, "", payload, cmdPath(c, doc))
     let cmd = Cmd {
@@ -1983,7 +1934,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             .str("text", $"{peerLabel} is attempting to {what}").build())
     }
     run(cmd)
-    return true
+    return Option.None
 }
 
 fn cmdBreakpoint(cmd: &Cmd): void {
@@ -2488,9 +2439,8 @@ fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: 
     // reaps the debuggee out from under a caller that has no WS peer holding it.
     gSession.peers.lastActivityMs = epochMillis()
     if awaitType.len == 0 {
-        let known = jStr(body, "cmd")
-        if !dispatchClientCmd(body.clone(), "api", who, bus, pendCh) {
-            return unknownCmdJson(known)
+        if let Option.Some(bad) = dispatchClientCmd(body, "api", who, bus, pendCh) {
+            return unknownCmdJson(bad)
         }
         return Json.obj().bool("ok", true).build()
     }
@@ -2498,10 +2448,9 @@ fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: 
     let clientId = gSession.peers.nextClient
     gSession.peers.nextClient = gSession.peers.nextClient + 1
     sinkRegister(clientId, ch)
-    let wantCmd = jStr(body, "cmd")
-    if !dispatchClientCmd(body.clone(), "api", who, bus, pendCh) {
+    if let Option.Some(bad) = dispatchClientCmd(body, "api", who, bus, pendCh) {
         sinkUnregister(clientId)
-        return unknownCmdJson(wantCmd)
+        return unknownCmdJson(bad)
     }
 
     let deadline = epochMillis() + timeoutMs
@@ -2510,16 +2459,19 @@ fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: 
         match ch.tryRecv() {
             Option.Some(sm) => {
                 let m = sharedWith(sm, (s: &Sealed): string => s.text(s.span()))
-                let mt = jStr(m, "type")
+                let Result.Ok(d) = Json.parse(m) else {
+                    continue
+                }
+                let mt = d.str("type") ?? ""
                 if mt == awaitType {
-                    out = m.clone()
+                    out = m
                     break
                 }
                 // A rejected command never produces the awaited reply, so return
                 // the refusal rather than burning the caller's whole timeout and
                 // then reporting a useless {"error":"timeout"}.
                 if mt == "configError" {
-                    out = Json.obj().bool("ok", false).str("error", jStr(m, "error")).build()
+                    out = Json.obj().bool("ok", false).str("error", d.str("error") ?? "").build()
                     break
                 }
             }
@@ -2574,8 +2526,8 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, pendCh: &C
             }
         }
 
-        if !dispatchClientCmd(payload.clone(), peerKind.clone(), peerKind.clone(), bus, pendCh) {
-            wsPush(bus, configErrMsg($"unknown command {jStr(payload, "cmd")}"))
+        if let Option.Some(bad) = dispatchClientCmd(payload, peerKind.clone(), peerKind.clone(), bus, pendCh) {
+            wsPush(bus, configErrMsg($"unknown command {bad}"))
         }
     }
 
@@ -2867,17 +2819,11 @@ fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): vo
         } else {
             arr = journalRows(f)
         }
-        var body: string = "["
-        var ai: i64 = 0
-        while ai < arr.len {
-            if ai > 0 {
-                body = body + ","
-            }
-            body = body + arr[ai]
-            ai = ai + 1
+        var rows = Json.arr()
+        for r in arr {
+            rows = rows.raw(r)
         }
-        body = body + "]"
-        sendHttp(fd, 200, "application/json", Json.obj().bool("ok", true).raw("rows", body).build())
+        sendHttp(fd, 200, "application/json", Json.obj().bool("ok", true).arr("rows", rows).build())
         close(fd)
         return
     }

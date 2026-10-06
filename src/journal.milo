@@ -302,7 +302,16 @@ pub fn journalCmd(cmd: &string, peer: &string, who: &string, ok: bool, err: &str
     if ok {
         okI = 1
     }
-    jrnInsert("in", cmd.clone(), peer.clone(), who.clone(), okI, err, payload, path.clone())
+    var pr = JrnPromoted {
+        path: "", line: 0 - 1, tid: 0 - 1
+    }
+    if let Result.Ok(doc) = Json.parse(payload) {
+        pr = jrnPromote(doc)
+    }
+    if path.len > 0 {
+        pr.path = path.clone()
+    }
+    jrnInsert("in", cmd.clone(), peer.clone(), who.clone(), okI, err, payload, pr)
 }
 
 // A broadcast the session answered with. `kind` is the message's own "type".
@@ -310,7 +319,10 @@ pub fn journalOut(payload: &string): void {
     if !journalOpen() {
         return
     }
-    let kind = jrnStr(payload, "type")
+    let Result.Ok(doc) = Json.parse(payload) else {
+        return
+    }
+    let kind = doc.str("type") ?? ""
     if kind.len == 0 {
         return
     }
@@ -321,11 +333,29 @@ pub fn journalOut(payload: &string): void {
     if kind == "ptyData" || kind == "source" {
         return
     }
-    jrnInsert("out", kind, "", "", 0 - 1, "", payload, "")
+    jrnInsert("out", kind, "", "", 0 - 1, "", payload, jrnPromote(doc))
+}
+
+// JrnPromoted out of the payload because these three are what every question
+// groups by, and json_extract is not something to bet the query layer on.
+// line/tid are -1 when absent, so a real 0 (line 0, thread 0) is not mistaken
+// for missing.
+struct JrnPromoted {
+    path: string,
+    line: i64,
+    tid: i64,
+}
+
+fn jrnPromote(doc: &Json): JrnPromoted {
+    return JrnPromoted {
+        path: doc.str("path") ?? "",
+        line: doc.i64("line") ?? (0 - 1),
+        tid: doc.i64("tid") ?? (0 - 1),
+    }
 }
 
 // okI < 0 binds NULL — an out row has nothing to say about success.
-fn jrnInsert(dir: string, kind: string, peer: string, who: string, okI: i64, err: &string, payload: &string, pathOverride: string): void {
+fn jrnInsert(dir: string, kind: string, peer: string, who: string, okI: i64, err: &string, payload: &string, pr: JrnPromoted): void {
     if gIns.len == 0 {
         return
     }
@@ -348,26 +378,18 @@ fn jrnInsert(dir: string, kind: string, peer: string, who: string, okI: i64, err
         let _7 = dbBindInt64(gIns[0], 7, okI)
     }
     let _8 = dbBindText(gIns[0], 8, err.clone())
-    // Promoted out of the payload because these three are what every question
-    // groups by, and json_extract is not something to bet the query layer on.
-    var path = pathOverride.clone()
-    if path.len == 0 {
-        path = jrnStr(payload, "path")
-    }
-    if path.len > 0 {
-        let _9 = dbBindText(gIns[0], 9, path)
+    if pr.path.len > 0 {
+        let _9 = dbBindText(gIns[0], 9, pr.path)
     } else {
         let _9 = dbBindNull(gIns[0], 9)
     }
-    let line = jrnI64(payload, "line")
-    if line >= 0 {
-        let _10 = dbBindInt64(gIns[0], 10, line)
+    if pr.line >= 0 {
+        let _10 = dbBindInt64(gIns[0], 10, pr.line)
     } else {
         let _10 = dbBindNull(gIns[0], 10)
     }
-    let tid = jrnI64(payload, "tid")
-    if tid >= 0 {
-        let _11 = dbBindInt64(gIns[0], 11, tid)
+    if pr.tid >= 0 {
+        let _11 = dbBindInt64(gIns[0], 11, pr.tid)
     } else {
         let _11 = dbBindNull(gIns[0], 11)
     }
@@ -618,22 +640,3 @@ pub fn journalBreakpoints(program: &string, limit: i64): Vec<string> {
     return out
 }
 
-// ── JSON scalars ──
-//
-// Same shape as web/server.milo's jStr/jI64 and deliberately not the same
-// names: milo merges same-named functions across modules into one symbol.
-
-fn jrnStr(raw: &string, key: &string): string {
-    if let Result.Ok(doc) = Json.parse(raw) {
-        return doc.str(key) ?? ""
-    }
-    return ""
-}
-
-// -1 for absent, so a real 0 (line 0, thread 0) is not mistaken for missing.
-fn jrnI64(raw: &string, key: &string): i64 {
-    if let Result.Ok(doc) = Json.parse(raw) {
-        return doc.i64(key) ?? (0 - 1)
-    }
-    return 0 - 1
-}

@@ -114,26 +114,17 @@ impl DapClient {
     // Reply to a reverse request (e.g. runInTerminal) from the adapter.
     fn respond(self: &mut Self, requestSeq: i64, command: &string, bodyJson: &string): void {
         let s = self._nextSeq()
-        let q: string = "\""
-        let payload = "{" + q + "seq" + q + ":" + s.toString()
-        + "," + q + "type" + q + ":" + q + "response" + q
-        + "," + q + "request_seq" + q + ":" + requestSeq.toString()
-        + "," + q + "success" + q + ":true"
-        + "," + q + "command" + q + ":" + q + command + q
-        + "," + q + "body" + q + ":" + bodyJson + "}"
+        let payload = Json.obj().int("seq", s).str("type", "response")
+            .int("request_seq", requestSeq).bool("success", true)
+            .str("command", command).raw("body", bodyJson).build()
         let _w = writeFrame(self.child, payload)
     }
 
     // Frame and send a request. Returns the seq assigned, for response matching.
     fn send(self: &mut Self, command: &string, argsJson: &string): i64 {
         let s = self._nextSeq()
-        // Built by concatenation: escaped quotes inside a $"..." interpolation
-        // don't lex, so we splice a quote constant instead.
-        let q: string = "\""
-        let payload = "{" + q + "seq" + q + ":" + s.toString()
-        + "," + q + "type" + q + ":" + q + "request" + q
-        + "," + q + "command" + q + ":" + q + command + q
-        + "," + q + "arguments" + q + ":" + argsJson + "}"
+        let payload = Json.obj().int("seq", s).str("type", "request")
+            .str("command", command).raw("arguments", argsJson).build()
         let w = writeFrame(self.child, payload)
         if w < 0 {
             return -1 as i64
