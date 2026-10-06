@@ -1,0 +1,94 @@
+// Server state for the one debug session this process hosts, grouped by what
+// each part describes. One global instance, gSession.
+//
+// Green runtime = one OS thread, cooperative scheduling: a plain global is
+// race-free at yield-point granularity. Any sequence below that a comment calls
+// atomic is atomic because it contains no yield point, not because of a lock.
+
+from "../dap/session" import {
+    LaunchSpec
+}
+
+// A browser-set breakpoint. Keyed by (path, line); empty
+// condition/hitCondition/logMessage mean a plain breakpoint — the keys are
+// omitted from the DAP request.
+pub struct Bp {
+    path: string,
+    line: i64,
+    condition: string,
+    hitCondition: string,
+    logMessage: string,
+    // Disabled bps stay in the list (and in bpSync) but are omitted from the
+    // DAP request — DAP has no per-bp enable, absence IS disable.
+    enabled: bool,
+}
+
+pub fn cloneBp(b: &Bp): Bp {
+    return Bp {
+        path: b.path.clone(),
+        line: b.line,
+        condition: b.condition.clone(),
+        hitCondition: b.hitCondition.clone(),
+        logMessage: b.logMessage.clone(),
+        enabled: b.enabled,
+    }
+}
+
+// one buffered terminal line for late-join replay.
+pub struct OutLine {
+    text: string,
+    category: string,
+}
+
+// What to debug and how. `spec` is a VS Code launch configuration lowered by
+// ../dap/session: meta keys (type/request/name/source/dapPath/stopAtMain/
+// program/port/host) become its fields, every other key lands verbatim in
+// spec.launchExtra (the DAP body). spec.srcPath is always canonical (absSourcePath).
+pub struct Target {
+    spec: LaunchSpec,
+    // per-run (set from the run cmd): break at main / first user line.
+    // spec.stopAtMain is the config's default for it.
+    stopAtMain: bool,
+    // JSON array of selected exception filter ids.
+    excFilters: Option<string>,
+}
+
+// This server process as a registry entry and a CLI program.
+pub struct ServerInfo {
+    // Three words, not a uuid: this id is read off a screen, typed into
+    // `api --session`, and pasted in a URL. See newSessionName in ../sessions.
+    // In hello, so a reloaded tab detects same-vs-new session.
+    sessionId: string,
+    // the port we bound; the registry descriptor carries it. None until bound.
+    listenPort: Option<i64>,
+    startedAt: i64, // when this server bound its port, for the dashboard
+    noBrowser: bool,
+    idleTtlSecs: i64, // --idle-ttl; 0 = never reap
+    // lifecycle log. 0 = --quiet (banner only), 1 = normal, 2 = --verbose
+    // (adds per-stop lines). Runtime events go to stdout — a server should read
+    // like a server; stderr stays for errors.
+    logLevel: i64,
+    // UI bundle dir served from disk (--webroot); None serves the embedded copy.
+    webroot: Option<string>,
+    restored: bool, // booted idle and staged history[0] (banner hint)
+}
+
+pub struct Session {
+    target: Target,
+    server: ServerInfo,
+}
+
+pub var gSession: Session = Session {
+    target: Target {
+        spec: LaunchSpec {
+            binPath: "", srcPath: "", adapterCmd: "", adapterKind: "", launchExtra: "",
+            stopAtMain: false, request: "", host: "", port: 0, name: "", dapPath: "",
+        },
+        stopAtMain: false,
+        excFilters: Option.None,
+    },
+    server: ServerInfo {
+        sessionId: "", listenPort: Option.None, startedAt: 0, noBrowser: false,
+        idleTtlSecs: 0, logLevel: 0, webroot: Option.None, restored: false,
+    },
+}

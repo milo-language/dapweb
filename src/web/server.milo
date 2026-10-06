@@ -100,6 +100,9 @@ from "std/path" import {
 from "../dap/client" import {
     DapClient, DapMsg
 }
+from "./state" import {
+    gSession, Bp, OutLine, cloneBp
+}
 from "json-rpc/frame" import {
     writeFrame as writeFrameFd
 }
@@ -113,23 +116,6 @@ from "../dap/session" import {
 
 // NOTE: module-scope string initializers are NYI in Milo and silently produce
 // "" — every one of these is assigned in main() before any request is served.
-var binPath: string = ""
-var gStartedAt: i64 = 0     // when this server bound its port, for the dashboard
-var srcPath: string = ""
-var adapterCmd: string = "" // full command line, first token resolved via PATH
-var adapterKind: string = "" // dialect kind (lldb|python|node|go) — selects launch/init dialect, see Dialect registry
-var stopAtMain: bool = false // per-run (set from the run cmd): break at main / first user line
-var excFiltersJson: string = "" // JSON array of selected exception filter ids ("" = none)
-var launchExtra: string = "" // JSON object merged verbatim into the launch/attach request
-// config = a VS Code launch-configuration object. Meta keys
-// (type/request/name/source/dapPath/stopAtMain/program/port/host) are extracted
-// into globals; every other key lowers verbatim into launchExtra (the DAP body).
-var gConfigStopAtMain: bool = false // stopAtMain persisted from config (run cmd can override)
-var gRequest: string = "" // "launch" (default, incl. "") | "attach" — selects the DAP command
-var gConfigName: string = "" // optional launch-config "name" label — shown in history
-var gDapPathRaw: string = "" // user's explicit "dapPath" verbatim ("" = probed) — config echo only
-var gDapHost: string = "" // TCP transport host (gDapPort>0); "" = stdio spawn
-var gDapPort: i64 = 0 // TCP transport port; 0 = spawn adapterCmd over stdio
 // js-debug support: its DAP server only listens on TCP, so the node dialect
 // spawns it (`node dapDebugServer.js 0`), parses the printed port, and connects.
 // gSrvPid/gSrvPort are that spawned server (0 = none this run) — the pid is
@@ -189,53 +175,10 @@ var gOutputLog: Vec<OutLine> = []
 let OUTLOG_MAX: i64 = 400
 var gNextClient: i64 = 1
 var gBps: Vec<Bp> = [] // shared breakpoint set (was per-connection before the shared session)
-// Three words, not a uuid: this id is read off a screen, typed into
-// `api --session`, and pasted in a URL. See newSessionName in ../sessions.
-var gSessionId: string = "" // in hello — a reloaded tab detects same-vs-new session
-var gListenPort: i64 = 0    // the port we bound; the registry descriptor carries it
-var gNoBrowser: bool = false
 var gPeers: i64 = 0 // attached WS peers (browser tabs; `api` callers are one-shot HTTP)
 var gLastActivityMs: i64 = 0 // epochMillis of the last peer event OR api call — idle-ttl clock
-var gIdleTtlSecs: i64 = 0 // --idle-ttl; 0 = never reap
-var webroot: string = "" // UI bundle dir served from disk (--webroot)
-var Q: string = ""
-// lifecycle log. 0 = --quiet (banner only), 1 = normal, 2 = --verbose
-// (adds per-stop lines). Runtime events go to stdout — a server should read
-// like a server; stderr stays for errors.
-var gLogLevel: i64 = 0
 var gRunStartMs: i64 = 0 // epochMillis at adapter spawn — run duration
 var gLastExit: i64 = -1 // debuggee exitCode from the "exited" event; -1 = unknown
-
-// A browser-set breakpoint. Keyed by (path, line); empty
-// condition/hitCondition/logMessage mean a plain breakpoint — the keys are
-// omitted from the DAP request.
-struct Bp {
-    path: string,
-    line: i64,
-    condition: string,
-    hitCondition: string,
-    logMessage: string,
-    // Disabled bps stay in the list (and in bpSync) but are omitted from the
-    // DAP request — DAP has no per-bp enable, absence IS disable.
-    enabled: bool,
-}
-
-// one buffered terminal line for late-join replay.
-struct OutLine {
-    text: string,
-    category: string,
-}
-
-fn cloneBp(b: &Bp): Bp {
-    return Bp {
-        path: b.path.clone(),
-        line: b.line,
-        condition: b.condition.clone(),
-        hitCondition: b.hitCondition.clone(),
-        logMessage: b.logMessage.clone(),
-        enabled: b.enabled,
-    }
-}
 
 // Breakpoints are keyed on (path, line) and lldb binds on the FULL path, so the
 // one spelling that works is the absolute one the compiler recorded. A client can
@@ -555,7 +498,7 @@ fn dI64(doc: &Json, key: &string, fallback: i64): i64 {
 // One line per session event: `HH:MM:SS <event> <details>`. Event column
 // padded so details align.
 fn logEvent(event: &string, details: &string): void {
-    if gLogLevel < 1 {
+    if gSession.server.logLevel < 1 {
         return
     }
     let dt = DateTime.localNow()
@@ -691,19 +634,19 @@ fn helloMsg(): string {
     // resolveConfig accepts back verbatim); program/adapterCmd ride alongside as
     // display conveniences (toolbar span, ⓘ adapter line).
     var b = Json.obj().str("type", "hello")
-        .str("program", binPath)
-        .str("sourcePath", srcPath)
-        .str("adapterCmd", adapterCmd)
+        .str("program", gSession.target.spec.binPath)
+        .str("sourcePath", gSession.target.spec.srcPath)
+        .str("adapterCmd", gSession.target.spec.adapterCmd)
         .str("adapterId", adapterId())
-        .str("sessionId", gSessionId)
-        .raw("config", specConfigJson(curSpec(), true, 0 as i64))
+        .str("sessionId", gSession.server.sessionId)
+        .raw("config", specConfigJson(gSession.target.spec, true, 0 as i64))
     // late joiners need to know a session is live (kill-confirm on Run etc.);
     // a replayed stopped snapshot then refines running → stopped.
     if gStarted {
         b = b.str("phase", "running")
     }
     b = b.raw("history", gHistory)
-    if gRestored {
+    if gSession.server.restored {
         b = b.bool("restored", true)
     }
     return b.build()
@@ -727,8 +670,8 @@ fn bpSyncMsg(b: &Bp): string {
 // reload, while the server still held the bps.
 fn pushHelloState(bus: &Channel<string>): void {
     wsPush(bus, helloMsg())
-    if srcPath.len > 0 {
-        wsPush(bus, sourceMsg(srcPath))
+    if gSession.target.spec.srcPath.len > 0 {
+        wsPush(bus, sourceMsg(gSession.target.spec.srcPath))
     }
     for bp in gBps {
         wsPush(bus, bpSyncMsg(bp))
@@ -832,7 +775,7 @@ fn buildBpArgsForPath(bps: &Vec<Bp>, path: &string): string {
 // with bps. D replays these during the initialized event (kind sbInit each).
 fn buildAllBpArgs(bps: &Vec<Bp>): string {
     var arr = Json.arr()
-    let paths = bpPaths(bps, srcPath)
+    let paths = bpPaths(bps, gSession.target.spec.srcPath)
     for path in paths {
         arr = arr.obj(Json.obj().str("args", buildBpArgsForPath(bps, path)))
     }
@@ -842,8 +785,8 @@ fn buildAllBpArgs(bps: &Vec<Bp>): string {
 // setExceptionBreakpoints args from the selected filter ids.
 fn excArgs(): string {
     var filters: string = "[]"
-    if excFiltersJson.len > 0 {
-        filters = excFiltersJson.clone()
+    if let Option.Some(f) = gSession.target.excFilters {
+        filters = f.clone()
     }
     return Json.obj().raw("filters", filters).build()
 }
@@ -852,26 +795,15 @@ fn excArgs(): string {
 // (shared with the HTTP API path). These wrappers bind the shared, value-based fns
 // to this driver's session globals.
 fn adapterId(): string {
-    return adapterIdForKind(adapterKind)
+    return adapterIdForKind(gSession.target.spec.adapterKind)
 }
 
 fn initArgs(): string {
-    return initArgsFor(adapterKind)
+    return initArgsFor(gSession.target.spec.adapterKind)
 }
 
 fn launchRequest(): string {
-    return launchRequestOf(curSpec())
-}
-
-// snapshot the session globals as the value the shared launch builders consume.
-fn curSpec(): LaunchSpec {
-    return LaunchSpec {
-        binPath: binPath.clone(), srcPath: srcPath.clone(),
-        adapterCmd: adapterCmd.clone(), adapterKind: adapterKind.clone(),
-        launchExtra: launchExtra.clone(), stopAtMain: gConfigStopAtMain,
-        request: gRequest.clone(), host: gDapHost.clone(), port: gDapPort,
-        name: gConfigName.clone(), dapPath: gDapPathRaw.clone(),
-    }
+    return launchRequestOf(gSession.target.spec)
 }
 
 // Apply a config (VS Code launch-configuration object) into this session while
@@ -882,17 +814,10 @@ fn curSpec(): LaunchSpec {
 fn applyConfig(raw: string, selectName: string): string {
     match resolveConfig(raw, selectName) {
         Result.Ok(spec) => {
-            binPath = spec.binPath.clone()
-            srcPath = absSourcePath(spec.srcPath)
-            adapterCmd = spec.adapterCmd.clone()
-            adapterKind = spec.adapterKind.clone()
-            launchExtra = spec.launchExtra.clone()
-            gConfigStopAtMain = spec.stopAtMain
-            gRequest = spec.request.clone()
-            gConfigName = spec.name.clone()
-            gDapPathRaw = spec.dapPath.clone()
-            gDapHost = spec.host.clone()
-            gDapPort = spec.port
+            let src = absSourcePath(spec.srcPath)
+            var s = spec
+            s.srcPath = src
+            gSession.target.spec = s
             gBps = []
             gOutputLog = []
             refreshSession()
@@ -1022,7 +947,7 @@ fn bpsJson(bps: &Vec<Bp>): string {
 
 // Rewrite this program's entry, leaving every other program's set intact.
 fn persistBps(): void {
-    if binPath.len == 0 {
+    if gSession.target.spec.binPath.len == 0 {
         return
     }
     var out = Json.obj()
@@ -1030,7 +955,7 @@ fn persistBps(): void {
         if let Result.Ok(doc) = Json.parse(s2) {
             if doc.isObject() {
                 for k in doc.keys() {
-                    if k != binPath {
+                    if k != gSession.target.spec.binPath {
                         if let Option.Some(v) = doc.get(k) {
                             out = out.raw(k, v.rawStr())
                         }
@@ -1039,14 +964,14 @@ fn persistBps(): void {
             }
         }
     }
-    out = out.raw(binPath, bpsJson(gBps))
+    out = out.raw(gSession.target.spec.binPath, bpsJson(gBps))
     ensureDir(histDir())
     let _r = writeFile(bpsFilePath(), out.build())
 }
 
 // Load this program's saved set. Missing/corrupt file leaves gBps untouched.
 fn loadBps(): void {
-    if binPath.len == 0 {
+    if gSession.target.spec.binPath.len == 0 {
         return
     }
     let f = bpsFilePath()
@@ -1056,7 +981,7 @@ fn loadBps(): void {
     var restored: Vec<Bp> = []
     if let Result.Ok(s2) = readFile(f) {
         if let Result.Ok(doc) = Json.parse(s2) {
-            if let Option.Some(arr) = doc.get(binPath) {
+            if let Option.Some(arr) = doc.get(gSession.target.spec.binPath) {
                 if arr.isArray() {
                     let n = arr.len()
                     var i: i64 = 0
@@ -1082,7 +1007,7 @@ fn loadBps(): void {
     }
     if restored.len > 0 {
         gBps = restored
-        logEvent("breakpoints", $"restored {gBps.len} for {binPath}")
+        logEvent("breakpoints", $"restored {gBps.len} for {gSession.target.spec.binPath}")
     }
 }
 
@@ -1094,7 +1019,7 @@ fn persistHistory(): void {
 // Append the current session config to history on a launch (dedup + cap 10),
 // persist, and return the broadcast so the caller can push it to all peers.
 fn appendHistory(): string {
-    gHistory = histInsert(gHistory, histEntryFor(curSpec(), epochMillis()), 10 as i64)
+    gHistory = histInsert(gHistory, histEntryFor(gSession.target.spec, epochMillis()), 10 as i64)
     persistHistory()
     return historyChangedMsg()
 }
@@ -1104,9 +1029,9 @@ fn appendHistory(): string {
 // and the next boot with no flags restores whatever came before it. Carries the
 // existing run stamp forward so recording a config cannot un-run an entry.
 fn recordConfig(): string {
-    let probe = histEntryFor(curSpec(), 0 as i64)
+    let probe = histEntryFor(gSession.target.spec, 0 as i64)
     let stamp = histLastRunAt(gHistory, probe)
-    gHistory = histInsert(gHistory, histEntryFor(curSpec(), stamp), 10 as i64)
+    gHistory = histInsert(gHistory, histEntryFor(gSession.target.spec, stamp), 10 as i64)
     persistHistory()
     return historyChangedMsg()
 }
@@ -1130,11 +1055,11 @@ fn firstHistoryConfig(): Option<string> {
 // launch/init bodies + adapter argv come from the shared session module; these
 // bind them to this driver's globals (stopAtMain is the per-run override).
 fn launchArgs(): string {
-    return launchArgsFor(curSpec(), stopAtMain)
+    return launchArgsFor(gSession.target.spec, gSession.target.stopAtMain)
 }
 
 fn adapterArgv(): Vec<string> {
-    return adapterArgvOf(adapterCmd)
+    return adapterArgvOf(gSession.target.spec.adapterCmd)
 }
 
 // ── D: the DAP-reader task ──
@@ -1321,7 +1246,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
     var stopDesc: string = "" // optional human text the adapter attached
     var frame0: i64 = 0
     var regRef: i64 = 0 // register scope ref for the current stop (0 = adapter has none)
-    var lastSrc: string = srcPath.clone() // browser already has the main source
+    var lastSrc: string = gSession.target.spec.srcPath.clone() // browser already has the main source
     var bpArgs: string = "[]" // per-file bundle from buildAllBpArgs
     var sbLeft: i64 = 0 // sbInit responses still outstanding
     var initOk = false // adapter answered `initialize` (handshake reached)
@@ -1500,7 +1425,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 )
                 // Memory map for region-coloring — lldb only (python/go repl has
                 // no `memory region`). Fired alongside scopes; reply → "regions".
-                if adapterKind == "lldb" {
+                if gSession.target.spec.adapterKind == "lldb" {
                     let rArgs = Json.obj().str("expression", "memory region --all")
                         .str("context", "repl").int("frameId", frame0).build()
                     let rs = cl.send("evaluate", rArgs)
@@ -1618,8 +1543,8 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 // is long past and the breakpoint would never hit. There the same
                 // toggle means "stop on attach" and rides in the attach body's
                 // stopOnEntry — see launchArgsFor().
-                if stopAtMain && adapterKind != "python" && adapterKind != "node" && gRequest != "attach" {
-                    let fb = Json.obj().arr("breakpoints", Json.arr().obj(Json.obj().str("name", mainSymbolFor(adapterKind)))).build()
+                if gSession.target.stopAtMain && gSession.target.spec.adapterKind != "python" && gSession.target.spec.adapterKind != "node" && gSession.target.spec.request != "attach" {
+                    let fb = Json.obj().arr("breakpoints", Json.arr().obj(Json.obj().str("name", mainSymbolFor(gSession.target.spec.adapterKind)))).build()
                     let fs = cl.send("setFunctionBreakpoints", fb)
                     pend.push(Pending {
                         seq: fs, kind: "fbInit", id: 0, extra: ""
@@ -1686,7 +1611,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 // just remember the code for the run-exited log line.
                 gLastExit = bodyI64(msg.raw, "exitCode", -1 as i64)
             } else if msg.event == "stopped" {
-                if gLogLevel >= 2 {
+                if gSession.server.logLevel >= 2 {
                     logEvent("stopped", $"thread {bodyI64(msg.raw, "threadId", -1 as i64)}  reason {bodyStr(msg.raw, "reason")}")
                 }
                 tid = bodyI64(msg.raw, "threadId", -1 as i64)
@@ -1745,8 +1670,8 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     }
                 }
                 var host: string = "127.0.0.1"
-                if gDapPort > 0 && gDapHost.len > 0 {
-                    host = gDapHost.clone()
+                if gSession.target.spec.port > 0 && gSession.target.spec.host.len > 0 {
+                    host = gSession.target.spec.host.clone()
                 }
                 if childCfg.len == 0 || gSrvPort <= 0 {
                     eprint("[srv] startDebugging without a child config/port — ignored\n")
@@ -1848,8 +1773,8 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
         }
         if err.len > 0 {
             wsPush(ch, configErrMsg(err))
-        } else if binPath.len > 0 || gRequest == "attach" {
-            stopAtMain = gPendingStopAtMain
+        } else if gSession.target.spec.binPath.len > 0 || gSession.target.spec.request == "attach" {
+            gSession.target.stopAtMain = gPendingStopAtMain
             let _ok = startRun(ch, pendCh)
         }
     }
@@ -1987,19 +1912,19 @@ fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
     // is the DAP write fd — the rest of the handshake is identical.
     var startRes: Result<DapClient> = Result.Err("uninitialized")
     var label: string = ""
-    if gDapPort > 0 {
-        label = $"tcp {gDapHost}:{gDapPort}"
-        startRes = DapClient.startTcp(gDapHost, gDapPort)
+    if gSession.target.spec.port > 0 {
+        label = $"tcp {gSession.target.spec.host}:{gSession.target.spec.port}"
+        startRes = DapClient.startTcp(gSession.target.spec.host, gSession.target.spec.port)
         // a user-run js-debug server also hands the debuggee to a child session;
         // remember where to open that second connection (see startDebugging).
-        if adapterKind == "node" {
-            gSrvPort = gDapPort
+        if gSession.target.spec.adapterKind == "node" {
+            gSrvPort = gSession.target.spec.port
         }
-    } else if tcpListenArgs(adapterKind).len > 0 {
+    } else if tcpListenArgs(gSession.target.spec.adapterKind).len > 0 {
         // A socket-only adapter (js-debug, dlv): spawn it asking for port 0,
         // read the port it bound off stdout, connect. From here the handshake is
         // the same as any TCP adapter.
-        var argv = adapterArgvOf(adapterCmd)
+        var argv = adapterArgvOf(gSession.target.spec.adapterCmd)
         if argv.len == 0 {
             eprint("[srv] no adapter configured\n")
             gStarted = false
@@ -2013,7 +1938,7 @@ fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
             rest.push(argv[ai].clone())
             ai = ai + 1
         }
-        for la in tcpListenArgs(adapterKind) {
+        for la in tcpListenArgs(gSession.target.spec.adapterKind) {
             rest.push(la.clone())
         }
         label = $"adapter {Path.basename(prog)}"
@@ -2027,7 +1952,7 @@ fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
             }
         }
     } else {
-        var argv = adapterArgvOf(adapterCmd)
+        var argv = adapterArgvOf(gSession.target.spec.adapterCmd)
         // adapterCmd is always set by config-apply before a stdio run reaches here.
         if argv.len == 0 {
             eprint("[srv] no adapter configured\n")
@@ -2050,7 +1975,7 @@ fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
             var cl = client
             gRunStartMs = epochMillis()
             gLastExit = -1 as i64
-            logEvent("run started", $"{binPath}  {label} pid {cl.child.pid}")
+            logEvent("run started", $"{gSession.target.spec.binPath}  {label} pid {cl.child.pid}")
             gDapIn = cl.child.stdinFd
             // Drain + capture adapter stderr (stdio spawns only; TCP has no child
             // stderr, errFd -1). Must start before cl moves into the reader task.
@@ -2121,7 +2046,7 @@ fn activityText(c: &string, doc: &Json): string {
 fn cmdPath(c: &string, doc: &Json): string {
     var path = absSourcePath(dStr(doc, "path"))
     if path.len == 0 && (c == "setBreakpoint" || c == "clearBreakpoint") {
-        path = absSourcePath(srcPath)
+        path = absSourcePath(gSession.target.spec.srcPath)
     }
     return path
 }
@@ -2216,7 +2141,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             if dBool(doc, "force", false) && gDapIn >= 0 {
                 gPendingRun = true
                 gPendingConfig = cfgRaw
-                gPendingStopAtMain = dBool(doc, "stopAtMain", gConfigStopAtMain)
+                gPendingStopAtMain = dBool(doc, "stopAtMain", gSession.target.spec.stopAtMain)
                 logEvent("run killed", $"forced by {peerKind} peer — relaunching")
                 gOddSeq = gOddSeq + 2
                 let _p = pendCh.trySend(Pending {
@@ -2232,19 +2157,19 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             if cfgRaw.len > 0 {
                 cfgErr = applyConfig(cfgRaw, "")
                 if cfgErr.len == 0 {
-                    logEvent("target changed", $"{binPath}  (by {peerKind} peer)")
+                    logEvent("target changed", $"{gSession.target.spec.binPath}  (by {peerKind} peer)")
                     loadBps()
                     pushHelloState(bus)
                 }
             }
             if cfgErr.len > 0 {
                 wsPush(bus, configErrMsg(cfgErr))
-            } else if binPath.len == 0 && gRequest != "attach" {
+            } else if gSession.target.spec.binPath.len == 0 && gSession.target.spec.request != "attach" {
                 // Booted idle with no target: nudge to the config drawer instead
                 // of spawning the adapter with an empty program path.
                 wsPush(bus, configErrMsg("no program configured — set a debug target (⚙) before running"))
             } else {
-                stopAtMain = dBool(doc, "stopAtMain", gConfigStopAtMain)
+                gSession.target.stopAtMain = dBool(doc, "stopAtMain", gSession.target.spec.stopAtMain)
                 let _ok = startRun(bus, pendCh)
             }
         }
@@ -2384,7 +2309,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             arr = arr.str(doc.curStr(doc.curChild(f, i)) ?? "")
             i = i + 1
         }
-        excFiltersJson = arr.build()
+        gSession.target.excFilters = Option.Some(arr.build())
         if gStarted && gDapIn >= 0 {
             gOddSeq = gOddSeq + 2
             let _p = pendCh.trySend(Pending {
@@ -2490,7 +2415,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             if err.len > 0 {
                 wsPush(bus, configErrMsg(err))
             } else {
-                logEvent("target changed", $"{binPath}  (by {peerKind} peer)")
+                logEvent("target changed", $"{gSession.target.spec.binPath}  (by {peerKind} peer)")
                     loadBps()
                 wsPush(bus, recordConfig())
                 pushHelloState(bus)
@@ -2527,9 +2452,9 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         gThreadsMsg = ""
         gRegionsMsg = ""
         gOutputLog = []
-        gSessionId = newSessionName(sessionNameSeeds())
+        gSession.server.sessionId = newSessionName(sessionNameSeeds())
         journalHere()
-        logEvent("session reset", $"new session {gSessionId}")
+        logEvent("session reset", $"new session {gSession.server.sessionId}")
         pushHelloState(bus)
     }
     return true
@@ -2553,9 +2478,9 @@ fn sessionNameSeeds(): Vec<string> {
 }
 
 fn registerSession(port: i64): void {
-    gListenPort = port
-    gStartedAt = epochMillis()
-    writeSession(gSessionId, getpid() as i64, port, binPath, adapterId(), gStartedAt)
+    gSession.server.listenPort = Option.Some(port)
+    gSession.server.startedAt = epochMillis()
+    writeSession(gSession.server.sessionId, getpid() as i64, port, gSession.target.spec.binPath, adapterId(), gSession.server.startedAt)
     journalHere()
 }
 
@@ -2568,7 +2493,7 @@ fn journalHere(): void {
     if let Result.Ok(d) = currentDir() {
         cwd = d
     }
-    journalSession(gSessionId, getpid() as i64, gListenPort, binPath, adapterId(), cwd)
+    journalSession(gSession.server.sessionId, getpid() as i64, gSession.server.listenPort ?? (0 as i64), gSession.target.spec.binPath, adapterId(), cwd)
 }
 
 // The descriptor names the program this server is debugging, and that changes
@@ -2576,14 +2501,14 @@ fn journalHere(): void {
 // go stale on the first retarget, and the dashboard's whole job is to say what
 // each session is on — so rewrite it, keeping the original start time.
 fn refreshSession(): void {
-    if gListenPort > 0 {
-        writeSession(gSessionId, getpid() as i64, gListenPort, binPath, adapterId(), gStartedAt)
+    if let Option.Some(port) = gSession.server.listenPort {
+        writeSession(gSession.server.sessionId, getpid() as i64, port, gSession.target.spec.binPath, adapterId(), gSession.server.startedAt)
         journalHere()
     }
 }
 
 fn unregisterSession(): void {
-    removeSession(gSessionId)
+    removeSession(gSession.server.sessionId)
     journalEnd()
 }
 
@@ -2594,16 +2519,16 @@ fn unregisterSession(): void {
 // start`: two ways to make a session that disagreed on which executable to run
 // or which port to try is exactly the drift that module exists to prevent.
 fn spawnSessionJson(): string {
-    let port = freePortFrom(gListenPort + 1)
+    let port = freePortFrom((gSession.server.listenPort ?? (0 as i64)) + 1)
     if port == 0 {
         return Json.obj().bool("ok", false).str("error", "no free port near this one").build()
     }
     // Inherit --webroot: without it a child serves the bundle embedded at compile
     // time, so during UI work every spawned session silently shows yesterday's UI.
     var extra: Vec<string> = []
-    if webroot.len > 0 {
+    if let Option.Some(w) = gSession.server.webroot {
         extra.push("--webroot")
-        extra.push(webroot.clone())
+        extra.push(w.clone())
     }
     match spawnSessionOn(port, extra) {
         Result.Ok(_pid) => {
@@ -2695,10 +2620,10 @@ fn apiStateJson(): string {
             .str("condition", bp.condition).bool("enabled", bp.enabled).build())
     }
     var b = Json.obj().str("type", "state")
-        .str("sessionId", gSessionId)
+        .str("sessionId", gSession.server.sessionId)
         .str("phase", phase)
-        .str("program", binPath)
-        .str("sourcePath", srcPath)
+        .str("program", gSession.target.spec.binPath)
+        .str("sourcePath", gSession.target.spec.srcPath)
         .str("adapter", adapterId())
         .int("peers", gPeers)
         .arr("breakpoints", bps)
@@ -2842,8 +2767,8 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, pendCh: &C
     logEvent("peer connected", $"{peerKind}  {peerCountStr()}")
 
     wsPush(ch, helloMsg())
-    if srcPath.len > 0 {
-        wsPush(ch, sourceMsg(srcPath))
+    if gSession.target.spec.srcPath.len > 0 {
+        wsPush(ch, sourceMsg(gSession.target.spec.srcPath))
     }
     if gCapsMsg.len > 0 {
         wsPush(ch, gCapsMsg.clone())
@@ -2904,10 +2829,10 @@ fn reaperLoop(tickMs: i64, pendCh: Channel<Pending>): void {
         if !gStarted || gPeers > 0 || gDapIn < 0 {
             continue
         }
-        if epochMillis() - gLastActivityMs < gIdleTtlSecs * 1000 {
+        if epochMillis() - gLastActivityMs < gSession.server.idleTtlSecs * 1000 {
             continue
         }
-        logEvent("session idle", $"no peers for {gIdleTtlSecs}s — terminating debuggee")
+        logEvent("session idle", $"no peers for {gSession.server.idleTtlSecs}s — terminating debuggee")
         gOddSeq = gOddSeq + 2
         let _p = pendCh.trySend(Pending {
             seq: gOddSeq, kind: "disc", id: 0, extra: ""
@@ -3101,8 +3026,8 @@ fn serveStatic(fd: i32, reqPath: &string, origin: &string): void {
     // --webroot wins when set, so UI work does not need a server rebuild;
     // otherwise serve the copy compiled into this binary.
     var body: string = ""
-    if webroot.len > 0 {
-        match readFile(webroot + p) {
+    if let Option.Some(w) = gSession.server.webroot {
+        match readFile(w + p) {
             Result.Ok(disk) => {
                 body = disk
             }
@@ -3296,7 +3221,7 @@ fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): vo
     // work; ?session=all widens to every session in the journal.
     if apiPath == "/api/log" {
         var f = logFilter()
-        f.session = gSessionId.clone()
+        f.session = gSession.server.sessionId.clone()
         let qs = queryParam(apiQuery, "session")
         if qs == "all" {
             f.session = ""
@@ -3330,7 +3255,7 @@ fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): vo
         return
     }
     if apiPath == "/api/sessions" {
-        sendHttp(fd, 200, "application/json", sessionsJson(gSessionId))
+        sendHttp(fd, 200, "application/json", sessionsJson(gSession.server.sessionId))
         close(fd)
         return
     }
@@ -3345,7 +3270,7 @@ fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): vo
         return
     }
     if apiPath == "/api/binfo" {
-        sendHttp(fd, 200, "application/json", binInfoJson(binPath))
+        sendHttp(fd, 200, "application/json", binInfoJson(gSession.target.spec.binPath))
         close(fd)
         return
     }
@@ -3441,7 +3366,6 @@ fn openBrowser(url: &string): void {
 // argv[0] is the display name (skipped by parseFrom); the rest are the web flags.
 pub fn webMain(argv: Vec<string>): i32 {
     ignoreSignal(SIGPIPE)
-    Q = "\""
     var parser = ArgParser.new("dapweb web", "web UI for any DAP debugger. Serves a shared session: any number of browser tabs see and drive the same debuggee, and `dapweb api` drives it from the CLI.")
     // No default target: boot idle and let the browser configure it (⚙ drawer).
     parser.addString("program", "p", "path to the debuggee binary (optional; configure in the browser if omitted)", "")
@@ -3464,22 +3388,22 @@ pub fn webMain(argv: Vec<string>): i32 {
     let args = parser.parseFrom(argv)
     // getString is None only when the flag is absent AND its registered default
     // is empty, so `?? ""` is exactly the value the old string-returning API gave.
-    binPath = args.getString("program") ?? ""
+    gSession.target.spec.binPath = args.getString("program") ?? ""
     // Canonical from the start: bp paths go through absSourcePath, so a relative
     // --source would have the browser keying its gutter on a spelling the
     // breakpoint acks never use.
-    srcPath = absSourcePath(args.getString("source") ?? "")
-    webroot = args.getString("webroot") ?? ""
-    gNoBrowser = args.getBool("no-browser")
+    gSession.target.spec.srcPath = absSourcePath(args.getString("source") ?? "")
+    gSession.server.webroot = args.getString("webroot")
+    gSession.server.noBrowser = args.getBool("no-browser")
     if args.getBool("no-journal") {
         journalDisable()
     }
-    gLogLevel = 1
+    gSession.server.logLevel = 1
     if args.getBool("quiet") {
-        gLogLevel = 0
+        gSession.server.logLevel = 0
     }
     if args.getBool("verbose") {
-        gLogLevel = 2
+        gSession.server.logLevel = 2
     }
     // Read + syntax-check --launch now (fail fast); applied via applyConfig
     // after the session globals are initialized below.
@@ -3512,20 +3436,22 @@ pub fn webMain(argv: Vec<string>): i32 {
         }
     }
     // An explicit --webroot must exist; without one the embedded bundle always does.
-    if webroot.len > 0 && !pathExists(webroot + "/index.html") {
-        eprint($"error: --webroot {webroot} has no index.html — run src/web/ui/build.sh, or drop the flag to use the embedded UI\n")
-        return 1
+    if let Option.Some(w) = gSession.server.webroot {
+        if !pathExists(w + "/index.html") {
+            eprint($"error: --webroot {w} has no index.html — run src/web/ui/build.sh, or drop the flag to use the embedded UI\n")
+            return 1
+        }
     }
     let adapterArg = args.getString("dapPath") ?? "lldb-dap" // mirrors the addString default
     let sel = resolveAdapterCmd(adapterArg)
-    adapterCmd = sel.cmd
-    adapterKind = sel.kind
+    gSession.target.spec.adapterCmd = sel.cmd
+    gSession.target.spec.adapterKind = sel.kind
     let port = args.getI64("port")
 
     // Shared session: one bus, one broadcaster, any number of peers.
     gStarted = false
     gHistory = "[]"
-    gRestored = false
+    gSession.server.restored = false
     gDapIn = -1
     gPty = Option.None
     gOddSeq = -1 as i64
@@ -3539,33 +3465,27 @@ pub fn webMain(argv: Vec<string>): i32 {
     gPendingConfig = ""
     gPendingStopAtMain = false
     gPendingRun = false
-    gConfigStopAtMain = false
-    gConfigName = ""
-    gDapPathRaw = ""
-    gRequest = ""
-    gDapHost = ""
-    gDapPort = 0
-    gSessionId = newSessionName(sessionNameSeeds())
+    gSession.server.sessionId = newSessionName(sessionNameSeeds())
     gPeers = 0
     gLastActivityMs = epochMillis()
-    gIdleTtlSecs = args.getI64("idle-ttl")
+    gSession.server.idleTtlSecs = args.getI64("idle-ttl")
 
     // Apply a --launch config through the same path as every other config
     // (wrapper unwrap + --config name select + validation), CLI flags gap-filled.
     if launchText.len > 0 {
-        let err = applyConfig(mergeCliDefaults(launchText, binPath, srcPath), args.getString("config") ?? "")
+        let err = applyConfig(mergeCliDefaults(launchText, gSession.target.spec.binPath, gSession.target.spec.srcPath), args.getString("config") ?? "")
         if err.len > 0 {
             eprint($"error: --launch: {err}\n")
             return 1
         }
-    } else if binPath.len > 0 && adapterArg == "lldb-dap" {
+    } else if gSession.target.spec.binPath.len > 0 && adapterArg == "lldb-dap" {
         // --program alone: the dapPath default hardwires lldb, but a .js/.py/.go
         // program names its own dialect — route through the config path so the
         // right adapter is probed. Best-effort like the history restore: a probe
         // miss leaves the session idle and the run command reports it.
-        var b = Json.obj().str("program", binPath)
-        if srcPath.len > 0 {
-            b = b.str("source", srcPath)
+        var b = Json.obj().str("program", gSession.target.spec.binPath)
+        if gSession.target.spec.srcPath.len > 0 {
+            b = b.str("source", gSession.target.spec.srcPath)
         }
         let err = applyConfig(b.build(), "")
         if err.len > 0 {
@@ -3578,11 +3498,11 @@ pub fn webMain(argv: Vec<string>): i32 {
     // a fresh browser lands on the last thing debugged. Best-effort — a restored
     // entry whose program/adapter is gone just leaves the session idle.
     loadHistory()
-    if binPath.len == 0 {
+    if gSession.target.spec.binPath.len == 0 {
         match firstHistoryConfig() {
             Option.Some(cfg) => {
                 if applyConfig(cfg, "").len == 0 {
-                    gRestored = true
+                    gSession.server.restored = true
                 }
             }
             Option.None => {
@@ -3606,10 +3526,10 @@ pub fn webMain(argv: Vec<string>): i32 {
     }
     )
 
-    if gIdleTtlSecs > 0 {
+    if gSession.server.idleTtlSecs > 0 {
         // 1s ticks for short (test) TTLs, 30s otherwise — reap latency ≤ ttl + tick.
         var tickMs: i64 = 30000
-        if gIdleTtlSecs <= 60 {
+        if gSession.server.idleTtlSecs <= 60 {
             tickMs = 1000
         }
         let reapPend = pendCh.clone()
@@ -3623,14 +3543,14 @@ pub fn webMain(argv: Vec<string>): i32 {
         Result.Ok(listener) => {
             var l = listener
             print($"dapweb web UI → http://localhost:{port}")
-            if binPath.len > 0 {
-                if gRestored {
-                    print($"  target:   {binPath}   ({adapterKind})   (restored — Run to launch)")
+            if gSession.target.spec.binPath.len > 0 {
+                if gSession.server.restored {
+                    print($"  target:   {gSession.target.spec.binPath}   ({gSession.target.spec.adapterKind})   (restored — Run to launch)")
                 } else {
-                    print($"  target:   {binPath}   ({adapterKind})")
+                    print($"  target:   {gSession.target.spec.binPath}   ({gSession.target.spec.adapterKind})")
                 }
-                if srcPath.len > 0 {
-                    print($"  source:   {srcPath}")
+                if gSession.target.spec.srcPath.len > 0 {
+                    print($"  source:   {gSession.target.spec.srcPath}")
                 }
             } else {
                 print("  target:   (none — configure in the browser via the ⚙ drawer)")
@@ -3639,11 +3559,11 @@ pub fn webMain(argv: Vec<string>): i32 {
             print($"  sessions: http://localhost:{port}/sessions   (every live dapweb on this machine)")
             print("  docs:     https://github.com/milo-language/dapweb")
             registerSession(port)
-            if gLogLevel >= 1 {
+            if gSession.server.logLevel >= 1 {
                 print("")
             }
             flush()
-            if !gNoBrowser {
+            if !gSession.server.noBrowser {
                 openBrowser($"http://localhost:{port}")
             }
             let acceptBus = bus.clone()
