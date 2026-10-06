@@ -34,7 +34,7 @@ from "std/path" import {
     Path
 }
 from "std/process" import {
-    Child, processAlive, terminateProcess
+    Child, processAlive, terminateProcess, capture
 }
 from "std/pty" import {
     Pty
@@ -65,8 +65,10 @@ fn bpPaths(bps: &Vec<Bp>, fallback: &string): Vec<string> {
         }
     }
     // Always at least one setBreakpoints per session so clearing the last bp
-    // live actually clears it adapter-side.
-    if out.len == 0 {
+    // live actually clears it adapter-side. Not for an empty path (an attach
+    // by pid names no source): delve rejects it, and a failed setBreakpoints
+    // during the handshake ends the run.
+    if out.len == 0 && fallback.len > 0 {
         out.push(fallback.clone())
     }
     return out
@@ -81,10 +83,6 @@ pub struct Pending {
 }
 
 // ── DAP bodies → the JSON the UI renders ──
-
-fn firstThreadId(doc: &Json): i64 {
-    return doc.curInt(doc.curPath("body.threads[0].id")) ?? (-1 as i64)
-}
 
 // stackTrace body → [{"id":..,"name":..,"line":..,"path":..}] for the UI.
 // path may be "" (no debug info / synthetic frame) — the UI skips navigation.
@@ -483,7 +481,92 @@ fn launchRequest(): string {
 }
 
 fn launchArgs(): string {
-    return launchArgsFor(gSession.target.spec, gSession.target.stopAtMain)
+    let body = launchArgsFor(gSession.target.spec, gSession.target.stopAtMain)
+    if gSession.target.spec.adapterKind == "node" && gSession.target.spec.request == "attach" {
+        return withInspectorPort(body)
+    }
+    return body
+}
+
+// TCP ports `pid` listens on, from lsof (-Fn prints "n<addr>:<port>" per socket).
+// Empty when lsof is missing or the process is not ours to inspect.
+fn listenPorts(pid: i64): Vec<i64> {
+    var out: Vec<i64> = []
+    if let Result.Ok(txt) = capture($"lsof -nP -a -p {pid} -iTCP -sTCP:LISTEN -Fn") {
+        for line in txt.split("\n") {
+            let parts = line.split(":")
+            if line.startsWith("n") && parts.len >= 2 {
+                let p = parts[parts.len - 1].trim().parseInt() ?? (0 as i64)
+                if p > 0 {
+                    out.push(p)
+                }
+            }
+        }
+    }
+    return out
+}
+
+// Attach-by-pid for node. js-debug's standalone DAP server only attaches to an
+// inspector port; turning a pid into one is done by VS Code's extension before
+// js-debug ever sees the config, so a bare `processId` here would attach to the
+// default 9229 and find nothing. Do what the extension does: have node call
+// process._debugProcess(pid), which signals the target to open its inspector
+// (SIGUSR1 on unix), then read the port it bound from lsof, falling back to
+// node's default. A config that already names an inspector port is left alone.
+fn withInspectorPort(body: string): string {
+    let Result.Ok(doc) = Json.parse(body) else {
+        return body
+    }
+    if doc.get("port").isSome() || doc.get("address").isSome() {
+        return body
+    }
+    var pid: i64 = doc.i64("processId") ?? (0 as i64)
+    if pid <= 0 {
+        pid = (doc.str("processId") ?? "").parseInt() ?? (0 as i64)
+    }
+    if pid <= 0 {
+        return body
+    }
+    // The adapter command is `<node> <dapDebugServer.js>`, so its interpreter is
+    // a node that is known to exist; a js-debug-adapter wrapper falls back to PATH.
+    var node = "node"
+    let argv = adapterArgvOf(gSession.target.spec.adapterCmd)
+    if argv.len > 0 && Path.basename(argv[0]) == "node" {
+        node = argv[0].clone()
+    }
+    // The inspector is the port that appears after the signal: a server
+    // process already listens on its own ports, and the first of those is not
+    // the debugger.
+    let before = listenPorts(pid)
+    match capture($"{node} -e \"process._debugProcess({pid})\"") {
+        Result.Ok(_o) => {}
+        Result.Err(e) => {
+            logEvent("attach", $"could not open the inspector of pid {pid}: {e}")
+        }
+    }
+    var port: i64 = 9229
+    var tries: i64 = 0
+    var found = false
+    while tries < 30 && !found {
+        for p in listenPorts(pid) {
+            if !before.contains(p) {
+                port = p
+                found = true
+                break
+            }
+        }
+        if !found {
+            sleepMs(100)
+        }
+        tries = tries + 1
+    }
+    var b = Json.obj()
+    for k in doc.keys() {
+        if let Option.Some(v) = doc.get(k) {
+            b = b.raw(k, v.rawStr())
+        }
+    }
+    return b.str("address", "127.0.0.1").int("port", port).build()
 }
 
 // ── D: the DAP-reader task ──
@@ -507,6 +590,23 @@ fn removePending(pend: &Vec<Pending>, idx: i64): Vec<Pending> {
 // runInTerminal reverse request → spawn debuggee in a std/pty, reply with the
 // pid, start the pump. env vars are honored by exec'ing through /usr/bin/env
 // (lldb-dap's launcher handshake rides on env vars, so dropping them breaks it).
+// What every stop fetches: the stopping thread's stack, and the thread list
+// for the threads panel.
+fn requestStopDetails(cl: &mut DapClient, pend: &mut Vec<Pending>, tid: i64): void {
+    let stArgs = Json.obj().int("threadId", tid)
+        .int("startFrame", 0).int("levels", 20).build()
+    let s = cl.send("stackTrace", stArgs)
+    pend.push(Pending {
+        seq: s, kind: "st", id: 0, extra: ""
+    }
+    )
+    let ts = cl.send("threads", "{}")
+    pend.push(Pending {
+        seq: ts, kind: "thr", id: 0, extra: ""
+    }
+    )
+}
+
 fn handleRunInTerminal(cl: &mut DapClient, doc: &Json, reqSeq: i64, ch: &Channel<string>): i32 {
     var argv: Vec<string> = []
     var envs: Vec<string> = []
@@ -846,8 +946,11 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
             } else if kind == "thrPause" {
                 // Pause with no known tid (attach before first stop): pause
                 // the first thread the adapter reports.
-                let t = firstThreadId(msg.doc)
-                if t >= 0 {
+                // Whatever id the adapter reported, negative included: delve
+                // cannot list goroutines while the target runs and answers a
+                // single placeholder thread -1 ("Current"), which its pause
+                // accepts.
+                if let Option.Some(t) = msg.doc.curInt(msg.doc.curPath("body.threads[0].id")) {
                     let _s = cl.send("pause", Json.obj().int("threadId", t).build())
                 }
             } else if kind == "sbInit" {
@@ -868,6 +971,9 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     seq: s, kind: "cfgDone", id: 0, extra: ""
                 }
                 )
+            } else if kind == "stThr" {
+                tid = msg.doc.curInt(msg.doc.curPath("body.threads[0].id")) ?? (-1 as i64)
+                requestStopDetails(&mut cl, &mut pend, tid)
             } else if kind == "st" {
                 framesJs = framesJson(msg.doc)
                 stopLine = frame0Field(msg.doc, "line")
@@ -1119,19 +1225,18 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                         hi = hi + 1
                     }
                 }
-                let stArgs = Json.obj().int("threadId", tid)
-                    .int("startFrame", 0).int("levels", 20).build()
-                let s = cl.send("stackTrace", stArgs)
-                pend.push(Pending {
-                    seq: s, kind: "st", id: 0, extra: ""
+                // delve paused through its placeholder thread (see thrPause)
+                // reports the stop on thread -1, which has no stack. Ask for
+                // the real threads first and show the first one.
+                if tid < 0 {
+                    let ts = cl.send("threads", "{}")
+                    pend.push(Pending {
+                        seq: ts, kind: "stThr", id: 0, extra: ""
+                    }
+                    )
+                } else {
+                    requestStopDetails(&mut cl, &mut pend, tid)
                 }
-                )
-                // every stop also refreshes the threads panel.
-                let ts = cl.send("threads", "{}")
-                pend.push(Pending {
-                    seq: ts, kind: "thr", id: 0, extra: ""
-                }
-                )
             } else if msg.event == "terminated" {
                 announceEnd = true
                 break
