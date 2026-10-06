@@ -13,7 +13,10 @@
 // reads an empty registry and reports "no live sessions".
 
 from "std/os" import {
-    kill, usleep
+    kill
+}
+from "std/time" import {
+    sleepMs
 }
 from "std/net" import {
     TcpListener, NetError, ip4
@@ -363,9 +366,7 @@ pub fn awaitSessionOn(pid: i64, timeoutMs: i64): Option<SessionRow> {
                 return Option.Some(r.clone())
             }
         }
-        unsafe {
-            let _u = usleep(50000 as u32) // 50ms: fast enough to feel instant, cheap enough to spin on
-        }
+        sleepMs(50) // fast enough to feel instant, cheap enough to spin on
         waited = waited + 50
     }
     return Option.None

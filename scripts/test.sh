@@ -78,6 +78,23 @@ self_suite() {
     if bun "tests/$name.ts" ./dapweb; then pass=$((pass + 1)); else fail=$((fail + 1)); failed="$failed $name"; fi
 }
 
+# Raw syscalls belong in milo's std behind safe APIs, so application code has
+# no `unsafe` at all. Counts as a suite so a regression fails the run.
+no_unsafe() {
+    case "no-unsafe" in *"$filter"*) ;; *) return 0 ;; esac
+    echo ""
+    echo "── no-unsafe"
+    if hits=$(grep -rnw --include='*.milo' unsafe src); then
+        echo "$hits" | sed 's/^/  /'
+        echo "  FAIL no-unsafe: $(echo "$hits" | wc -l | tr -d ' ') line(s) under src/ use unsafe"
+        fail=$((fail + 1)); failed="$failed no-unsafe"
+    else
+        echo "  ok no unsafe under src/"
+        pass=$((pass + 1))
+    fi
+}
+
+no_unsafe
 serve_suite e2e            $((base +  0)) --program /tmp/dapweb_inter --source /tmp/dapweb_inter.c
 serve_suite e2e-m8         $((base + 10)) --program /tmp/dapweb_inter --source /tmp/dapweb_inter.c
 serve_suite e2e-multifile  $((base + 20)) --program /tmp/dapweb_nested --source examples/nested/main.c

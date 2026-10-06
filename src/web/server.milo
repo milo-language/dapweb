@@ -28,7 +28,7 @@ from "std/net" import {
     TcpListener, TcpStream
 }
 from "std/os" import {
-    read, write, close, pipe, getpid
+    close, getpid, recvFd, sendFd
 }
 from "std/io" import {
     readFile, fdChannel
@@ -37,10 +37,7 @@ from "std/ws" import {
     WsConn, WsMessage, wsAccept, isWsUpgrade
 }
 from "std/runtime" import {
-    Task, Promise, schedulerWaitRead, schedulerWaitWrite, schedulerYield, schedulerRunToCompletion
-}
-from "std/platform" import {
-    getErrno, eagain
+    Task, schedulerYield, schedulerRunToCompletion
 }
 from "std/sync" import {
     Channel
@@ -94,7 +91,7 @@ from "std/time" import {
     epochMillis
 }
 from "std/time" import {
-    sleepMs
+    sleepMs, sleepBlockingMs
 }
 from "std/datetime" import {
     DateTime
@@ -116,8 +113,6 @@ from "../dap/session" import {
     tcpListenArgs,
     mainSymbolFor, histEntryFor, histInsert, histMergeMany, specConfigJson,
 }
-
-extern fn usleep(usec: u32): i32
 
 // NOTE: module-scope string initializers are NYI in Milo and silently produce
 // "" — every one of these is assigned in main() before any request is served.
@@ -175,8 +170,7 @@ var gPendingRun: bool = false
 // All assigned in main() before any request is served (module init NYI).
 var gStarted: bool = false
 var gDapIn: i32 = -1
-var gPtyFd: i32 = -1
-// The live debuggee pty, for resize. The browser sizes its terminal on mount,
+// The live debuggee pty, for stdin and resize. The browser sizes its terminal on mount,
 // before any pty exists, so the last size asked for is kept and applied at spawn.
 var gPty: Option<Pty> = Option.None
 var gTermRows: i64 = 0
@@ -206,8 +200,6 @@ var gNoBrowser: bool = false
 var gPeers: i64 = 0 // attached WS peers (browser tabs; `api` callers are one-shot HTTP)
 var gLastActivityMs: i64 = 0 // epochMillis of the last peer event OR api call — idle-ttl clock
 var gIdleTtlSecs: i64 = 0 // --idle-ttl; 0 = never reap
-var gTickWr: i32 = -1 // reaper pipe write end (ticker OS thread → green task)
-var gTickUsecs: i64 = 0
 var webroot: string = "" // UI bundle dir served from disk (--webroot)
 var Q: string = ""
 // lifecycle log. 0 = --quiet (banner only), 1 = normal, 2 = --verbose
@@ -583,49 +575,24 @@ fn peerCountStr(): string {
 
 // ── Outbound WS funnel ──
 
-// Enqueue and poke the writer awake via the self-pipe. trySend so a stuffed
-// channel can never block (and stall) the scheduler; drops are loud.
-fn wsPush(ch: &Channel<string>, wakeWr: i32, msg: string): void {
-    if ch.trySend(msg) {
-        var one: [u8; 1] = [110; 1]
-        unsafe {
-            let _n = write(wakeWr, one as *u8, 1)
-        }
-    } else {
+// Enqueue; a receiver parked on the channel wakes on the send. trySend so a
+// stuffed channel can never block (and stall) the scheduler; drops are loud.
+fn wsPush(ch: &Channel<string>, msg: string): void {
+    if !ch.trySend(msg) {
         eprint("[srv] ws out channel full, dropping frame\n")
     }
 }
 
-// W: sole socket writer. Parks on the wake pipe, drains the channel. R joins
-// this task before releasing the socket fd: otherwise a frame still queued
-// here lands on a closed fd (milo exits on EBADF) or on whatever connection
-// reused that fd number.
-fn wsWriterLoop(fd: i32, ch: Channel<string>, wakeRd: i32): void {
+// W: sole socket writer. Parks on its channel until sinkUnregister closes it,
+// then drains what is left. R joins this task before releasing the socket fd:
+// otherwise a frame still queued here lands on a closed fd or on whatever
+// connection reused that fd number.
+fn wsWriterLoop(fd: i32, ch: Channel<string>): void {
     // Borrowed view of the conn: its Drop skips teardown (R owns the real one).
     var conn = WsConn.view(fd, 0, false)
-    var buf: [u8; 64] = [0; 64]
-    while true {
-        var n: i64 = 0
-        unsafe {
-            schedulerWaitRead(wakeRd)
-            n = read(wakeRd, buf as *u8, 64)
-        }
-        if n <= 0 {
-            break
-        } // R closed the wake pipe: session over
-        while true {
-            match ch.tryRecv() {
-                Option.Some(m) => {
-                    let _r = conn.sendText(m)
-                }
-                Option.None => {
-                    break
-                }
-            }
-        }
-    }
-    unsafe {
-        close(wakeRd)
+    var rx = ch
+    for m in rx {
+        let _r = conn.sendText(m)
     }
 }
 
@@ -633,7 +600,6 @@ fn wsWriterLoop(fd: i32, ch: Channel<string>, wakeRd: i32): void {
 struct Sink {
     id: i64,
     ch: Channel<string>,
-    wakeWr: i32,
 }
 
 // The peer registry is a plain global, not a Channel<Sink>: std/sync moves a
@@ -645,63 +611,40 @@ struct Sink {
 // point, so direct mutation is exactly as atomic as the channel round-trip was.
 var gSinks: Vec<Sink> = []
 
-fn sinkRegister(id: i64, ch: &Channel<string>, wakeWr: i32): void {
+fn sinkRegister(id: i64, ch: &Channel<string>): void {
     gSinks.push(Sink {
-        id: id, ch: ch.clone(), wakeWr: wakeWr,
+        id: id, ch: ch.clone(),
     }
     )
 }
 
-// Drop the peer and close its wake fd (EOFs its writer task). Removing it from
-// gSinks first means the broadcaster can no longer name the fd, so closing here
-// cannot race fd reuse against a wake poke.
+// Drop the peer and close its channel, which ends its writer task once the
+// queued frames are out. Removed from gSinks first, so the broadcaster can no
+// longer push to the closed channel.
 fn sinkUnregister(id: i64): void {
     var keep: Vec<Sink> = []
-    var wr: i32 = -1
     for s in gSinks {
         if s.id == id {
-            wr = s.wakeWr
+            s.ch.close()
         } else {
             keep.push(Sink {
-                id: s.id, ch: s.ch.clone(), wakeWr: s.wakeWr,
+                id: s.id, ch: s.ch.clone(),
             }
             )
         }
     }
     gSinks = keep
-    if wr >= 0 {
-        unsafe {
-            close(wr)
-        }
-    }
 }
 
-fn broadcastLoop(bus: Channel<string>, busWakeRd: i32): void {
-    var buf: [u8; 64] = [0; 64]
-    while true {
-        var n: i64 = 0
-        unsafe {
-            schedulerWaitRead(busWakeRd)
-            n = read(busWakeRd, buf as *u8, 64)
-        }
-        if n <= 0 {
-            break
-        }
-        while true {
-            match bus.tryRecv() {
-                Option.Some(m) => {
-                    // The one funnel every broadcast passes through. Per-peer
-                    // late-join replays go straight to their own channel and
-                    // are deliberately not recorded twice.
-                    journalOut(m)
-                    for sink in gSinks {
-                        wsPush(sink.ch, sink.wakeWr, m.clone())
-                    }
-                }
-                Option.None => {
-                    break
-                }
-            }
+fn broadcastLoop(bus: Channel<string>): void {
+    var rx = bus
+    for m in rx {
+        // The one funnel every broadcast passes through. Per-peer late-join
+        // replays go straight to their own channel and are deliberately not
+        // recorded twice.
+        journalOut(m)
+        for sink in gSinks {
+            wsPush(sink.ch, m.clone())
         }
     }
 }
@@ -715,13 +658,18 @@ fn broadcastLoop(bus: Channel<string>, busWakeRd: i32): void {
 // reuse the number gets its bytes stolen by a task from a dead session (which
 // showed up as a second debug run hanging with its DAP responses vanishing into
 // the previous run's stderr log).
-fn ptyPumpLoop(master: i32, ch: Channel<string>, wakeWr: i32): void {
+fn ptyPumpLoop(master: i32, ch: Channel<string>): void {
     for chunk in fdChannel(master) {
-        wsPush(ch, wakeWr, Json.obj().str("type", "ptyData").str("data", chunk).build())
+        wsPush(ch, Json.obj().str("type", "ptyData").str("data", chunk).build())
     }
-    unsafe {
-        close(master)
+    // The stdin command writes through gPty. Forget it before the close, or a
+    // keystroke after the debuggee exits lands on whatever reuses this number.
+    if let Option.Some(p) = replace(gPty, Option.None) {
+        if p.fd() != master {
+            gPty = Option.Some(p)
+        }
     }
+    close(master)
 }
 
 // Drain the adapter's stderr so the pipe never fills (mergeStderr=false) and
@@ -736,9 +684,7 @@ fn adapterStderrPump(errFd: i32): void {
         }
     }
     // Owns the fd — see ptyPumpLoop for why nobody else may close it.
-    unsafe {
-        close(errFd)
-    }
+    close(errFd)
 }
 
 // ── Simple outbound messages ──
@@ -782,13 +728,13 @@ fn bpSyncMsg(b: &Bp): string {
 // connect path did that, which is why changing the target (Run with a config,
 // setConfig, newSession) emptied the BREAKPOINTS panel and the gutter until a
 // reload, while the server still held the bps.
-fn pushHelloState(bus: &Channel<string>, wakeWr: i32): void {
-    wsPush(bus, wakeWr, helloMsg())
+fn pushHelloState(bus: &Channel<string>): void {
+    wsPush(bus, helloMsg())
     if srcPath.len > 0 {
-        wsPush(bus, wakeWr, sourceMsg(srcPath))
+        wsPush(bus, sourceMsg(srcPath))
     }
     for bp in gBps {
-        wsPush(bus, wakeWr, bpSyncMsg(bp))
+        wsPush(bus, bpSyncMsg(bp))
     }
 }
 
@@ -1215,7 +1161,7 @@ fn removePending(pend: &Vec<Pending>, idx: i64): Vec<Pending> {
 // runInTerminal reverse request → spawn debuggee in a std/pty, reply with the
 // pid, start the pump. env vars are honored by exec'ing through /usr/bin/env
 // (lldb-dap's launcher handshake rides on env vars, so dropping them breaks it).
-fn handleRunInTerminal(cl: &mut DapClient, raw: &string, reqSeq: i64, ch: &Channel<string>, wakeWr: i32): i32 {
+fn handleRunInTerminal(cl: &mut DapClient, raw: &string, reqSeq: i64, ch: &Channel<string>): i32 {
     var argv: Vec<string> = []
     var envs: Vec<string> = []
     match Json.parse(raw) {
@@ -1301,19 +1247,16 @@ fn handleRunInTerminal(cl: &mut DapClient, raw: &string, reqSeq: i64, ch: &Chann
                     let master = pty.masterFd
                     // direct global set (same scheduler thread) — and flush
                     // any keystrokes typed while the adapter was launching.
-                    gPtyFd = master
-                    gPty = Option.Some(pty)
                     if gStdinBuf.len > 0 {
-                        unsafe {
-                            let _n = write(master, gStdinBuf, gStdinBuf.len)
-                        }
+                        let _n = pty.writeOnce(gStdinBuf)
                         gStdinBuf = ""
                     }
+                    gPty = Option.Some(pty)
                     // Channel handles are refcounted: the pump task outlives this
                     // call, so it gets its own retained handle rather than ours.
                     let ptyCh = ch.clone()
                     Task.spawn(move(): void => {
-                        ptyPumpLoop(master, ptyCh, wakeWr)
+                        ptyPumpLoop(master, ptyCh)
                     }
                     )
                     return master
@@ -1335,7 +1278,7 @@ fn handleRunInTerminal(cl: &mut DapClient, raw: &string, reqSeq: i64, ch: &Chann
 // source (the debuggee's stdio arrives there as output events) and as a peer
 // that must not stall (reverse requests get a success reply). Session end is
 // the CHILD's story — parent EOF just ends the drain, pushing nothing.
-fn parentDrainLoop(client: DapClient, ch: Channel<string>, wakeWr: i32): void {
+fn parentDrainLoop(client: DapClient, ch: Channel<string>): void {
     var cl = client
     while true {
         match cl.recv() {
@@ -1350,14 +1293,14 @@ fn parentDrainLoop(client: DapClient, ch: Channel<string>, wakeWr: i32): void {
                         if gOutputLog.len > OUTLOG_MAX {
                             let _d = gOutputLog.remove(0)
                         }
-                        wsPush(ch, wakeWr, outputMsg(m.raw))
+                        wsPush(ch, outputMsg(m.raw))
                     }
                 } else if m.kind == "request" {
                     let rc = m.command.clone()
                     if rc == "runInTerminal" {
                         // js-debug asks whichever session it launches from; an
                         // empty ack here would leave the program never started.
-                        let _m = handleRunInTerminal(&mut cl, m.raw, m.seq, ch, wakeWr)
+                        let _m = handleRunInTerminal(&mut cl, m.raw, m.seq, ch)
                     } else {
                         cl.respond(m.seq, rc, "{}")
                     }
@@ -1371,7 +1314,7 @@ fn parentDrainLoop(client: DapClient, ch: Channel<string>, wakeWr: i32): void {
     cl.child.close()
 }
 
-fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Channel<Pending>): void {
+fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending>): void {
     var cl = client
     var pend: Vec<Pending> = []
     var tid: i64 = -1 as i64
@@ -1409,7 +1352,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                     if gAdapterStderr.len > 0 {
                         em = em + "\n\n" + gAdapterStderr
                     }
-                    wsPush(ch, wakeWr, configErrMsg(em))
+                    wsPush(ch, configErrMsg(em))
                 }
                 announceEnd = true
                 break
@@ -1457,13 +1400,13 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
             if !msg.success {
                 if kind == "eval" {
                     let emsg = respErrText(msg.raw)
-                    wsPush(ch, wakeWr, Json.obj().str("type", "evalResult").int("id", pid).str("value", emsg).int("ref", 0).bool("error", true).build())
+                    wsPush(ch, Json.obj().str("type", "evalResult").int("id", pid).str("value", emsg).int("ref", 0).bool("error", true).build())
                 } else if kind == "fsc" || kind == "fvars" {
-                    wsPush(ch, wakeWr, Json.obj().str("type", "frameLocals").int("id", pid).raw("vars", "[]").build())
+                    wsPush(ch, Json.obj().str("type", "frameLocals").int("id", pid).raw("vars", "[]").build())
                 } else if kind == "disasm" {
-                    wsPush(ch, wakeWr, Json.obj().str("type", "disasm").int("id", pid).raw("instructions", "[]").build())
+                    wsPush(ch, Json.obj().str("type", "disasm").int("id", pid).raw("instructions", "[]").build())
                 } else if kind == "setv" {
-                    wsPush(ch, wakeWr, Json.obj().str("type", "setVarResult").int("id", pid).str("value", respErrText(msg.raw)).int("ref", 0).bool("error", true).build())
+                    wsPush(ch, Json.obj().str("type", "setVarResult").int("id", pid).str("value", respErrText(msg.raw)).int("ref", 0).bool("error", true).build())
                 } else if kind == "ebInit" {
                     // Exception filters rejected — still finish configuration
                     // or the session never launches.
@@ -1473,21 +1416,21 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                     }
                     )
                 } else if kind == "cmpl" {
-                    wsPush(ch, wakeWr, Json.obj().str("type", "completions").int("id", pid).raw("targets", "[]").build())
+                    wsPush(ch, Json.obj().str("type", "completions").int("id", pid).raw("targets", "[]").build())
                 } else if kind == "tst" {
                     var t: string = "0"
                     if pextra.len > 0 {
                         t = pextra.clone()
                     }
-                    wsPush(ch, wakeWr, Json.obj().str("type", "threadStack").int("id", pid).raw("tid", t).raw("frames", "[]").build())
+                    wsPush(ch, Json.obj().str("type", "threadStack").int("id", pid).raw("tid", t).raw("frames", "[]").build())
                 } else if kind == "readmem" {
-                    wsPush(ch, wakeWr, Json.obj().str("type", "memory").int("id", pid).str("address", "").str("data", "").str("error", jStr(msg.raw, "message")).build())
+                    wsPush(ch, Json.obj().str("type", "memory").int("id", pid).str("address", "").str("data", "").str("error", jStr(msg.raw, "message")).build())
                 } else if kind == "restartR" {
                     // Adapter without restart support (e.g. debugpy): tell the
                     // UI so it falls back to kill+rerun. lldb-dap handles
                     // restart but never advertises supportsRestartRequest, so
                     // try-then-fallback beats capability gating here.
-                    wsPush(ch, wakeWr, Json.obj().str("type", "restartFailed").build())
+                    wsPush(ch, Json.obj().str("type", "restartFailed").build())
                 } else if kind == "initialize" || kind == "launch" || kind == "childLaunch" || kind == "sbInit" {
                     eprint($"[srv] {msg.command} failed: {msg.raw}\n")
                     announceEnd = true
@@ -1498,7 +1441,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 // Forward the adapter's capabilities verbatim; the UI digs out
                 // .body and gates features on it.
                 gCapsMsg = Json.obj().str("type", "capabilities").str("raw", msg.raw).build()
-                wsPush(ch, wakeWr, gCapsMsg.clone())
+                wsPush(ch, gCapsMsg.clone())
                 // a js-debug child session launches with the configuration the
                 // startDebugging request handed us, not our built launch args;
                 // "childLaunch" so its ack doesn't re-append history.
@@ -1519,7 +1462,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 // running; next signal is a stopped/terminated event.
                 // Launch ack'd: this config actually ran, so record it (single
                 // writer — clients never save) and tell every peer.
-                wsPush(ch, wakeWr, appendHistory())
+                wsPush(ch, appendHistory())
             } else if kind == "thrPause" {
                 // Pause with no known tid (attach before first stop): pause
                 // the first thread the adapter reports.
@@ -1549,7 +1492,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 frame0 = frame0Field(msg.raw, "id")
                 let path = frame0Path(msg.raw)
                 if path.len > 0 && path != lastSrc {
-                    wsPush(ch, wakeWr, sourceMsg(path))
+                    wsPush(ch, sourceMsg(path))
                     lastSrc = path
                 }
                 let scArgs = Json.obj().int("frameId", frame0).build()
@@ -1592,17 +1535,17 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                     .int("registersRef", regRef)
                     .raw("frames", framesJs)
                     .raw("locals", localsJson(msg.raw)).build()
-                wsPush(ch, wakeWr, gStopMsg.clone())
+                wsPush(ch, gStopMsg.clone())
             } else if kind == "regions" {
                 // Cached + replayed like gStopMsg so a tab that reloads mid-stop
                 // keeps its region colors instead of going grey until the next step.
                 gRegionsMsg = Json.obj().str("type", "regions")
                     .raw("regions", regionsJson(bodyStr(msg.raw, "result"))).build()
-                wsPush(ch, wakeWr, gRegionsMsg.clone())
+                wsPush(ch, gRegionsMsg.clone())
             } else if kind == "eval" {
-                wsPush(ch, wakeWr, Json.obj().str("type", "evalResult").int("id", pid).str("value", bodyStr(msg.raw, "result")).int("ref", bodyI64(msg.raw, "variablesReference", 0 as i64)).build())
+                wsPush(ch, Json.obj().str("type", "evalResult").int("id", pid).str("value", bodyStr(msg.raw, "result")).int("ref", bodyI64(msg.raw, "variablesReference", 0 as i64)).build())
             } else if kind == "expand" {
-                wsPush(ch, wakeWr, Json.obj().str("type", "children").int("id", pid).raw("vars", localsJson(msg.raw)).build())
+                wsPush(ch, Json.obj().str("type", "children").int("id", pid).raw("vars", localsJson(msg.raw)).build())
             } else if kind == "fsc" {
                 // Frame navigation: scopes for a non-top frame the user
                 // clicked; chains into fvars like the stop-time sc → vars pair.
@@ -1618,23 +1561,23 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 if pextra.len > 0 {
                     scopeRef = pextra.clone()
                 }
-                wsPush(ch, wakeWr, Json.obj().str("type", "frameLocals").int("id", pid).raw("scopeRef", scopeRef).raw("vars", localsJson(msg.raw)).build())
+                wsPush(ch, Json.obj().str("type", "frameLocals").int("id", pid).raw("scopeRef", scopeRef).raw("vars", localsJson(msg.raw)).build())
             } else if kind == "setv" {
                 // setVariable: body carries the adapter-formatted new
                 // value (+ a fresh children ref for containers).
-                wsPush(ch, wakeWr, Json.obj().str("type", "setVarResult").int("id", pid).str("value", bodyStr(msg.raw, "value")).int("ref", bodyI64(msg.raw, "variablesReference", 0 as i64)).build())
+                wsPush(ch, Json.obj().str("type", "setVarResult").int("id", pid).str("value", bodyStr(msg.raw, "value")).int("ref", bodyI64(msg.raw, "variablesReference", 0 as i64)).build())
             } else if kind == "disasm" {
-                wsPush(ch, wakeWr, Json.obj().str("type", "disasm").int("id", pid).raw("instructions", disasmJson(msg.raw)).build())
+                wsPush(ch, Json.obj().str("type", "disasm").int("id", pid).raw("instructions", disasmJson(msg.raw)).build())
             } else if kind == "cmpl" {
-                wsPush(ch, wakeWr, Json.obj().str("type", "completions").int("id", pid).raw("targets", completionsJson(msg.raw)).build())
+                wsPush(ch, Json.obj().str("type", "completions").int("id", pid).raw("targets", completionsJson(msg.raw)).build())
             } else if kind == "readmem" {
                 // readMemory body: address + base64 data; UI decodes.
-                wsPush(ch, wakeWr, Json.obj().str("type", "memory").int("id", pid).str("address", bodyStr(msg.raw, "address")).str("data", bodyStr(msg.raw, "data")).build())
+                wsPush(ch, Json.obj().str("type", "memory").int("id", pid).str("address", bodyStr(msg.raw, "address")).str("data", bodyStr(msg.raw, "data")).build())
             } else if kind == "thr" {
                 // threads at this stop; "current" is the stopping thread.
                 gThreadsMsg = Json.obj().str("type", "threads").int("current", tid)
                     .raw("threads", threadsJson(msg.raw)).build()
-                wsPush(ch, wakeWr, gThreadsMsg.clone())
+                wsPush(ch, gThreadsMsg.clone())
                 // lldb-dap fills its thread list lazily after a stop — the
                 // immediate response usually carries only the stopping thread.
                 // Re-poll a few times (attempt count rides in the id field);
@@ -1663,7 +1606,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 if pextra.len > 0 {
                     t = pextra.clone()
                 }
-                wsPush(ch, wakeWr, Json.obj().str("type", "threadStack").int("id", pid).raw("tid", t).raw("frames", framesJson(msg.raw)).build())
+                wsPush(ch, Json.obj().str("type", "threadStack").int("id", pid).raw("tid", t).raw("frames", framesJson(msg.raw)).build())
             }
             // bpLive / cfgDone / unmatched: nothing to route
         } else if msg.kind == "event" {
@@ -1733,7 +1676,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                         let _d = gOutputLog.remove(0)
                     }
                 }
-                wsPush(ch, wakeWr, outputMsg(msg.raw))
+                wsPush(ch, outputMsg(msg.raw))
             } else if msg.event == "process" {
                 // "launch" only: an ATTACHED process was running before this
                 // session and has to outlive it: reaping it would turn a
@@ -1777,7 +1720,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 // A restart replaces the pty; the old master needs no close
                 // here — its own pump owns it and closes it when the dead child
                 // EOFs the master.
-                let _m = handleRunInTerminal(&mut cl, msg.raw, msg.seq, ch, wakeWr)
+                let _m = handleRunInTerminal(&mut cl, msg.raw, msg.seq, ch)
             } else if msg.command == "startDebugging" {
                 // js-debug: the debuggee lives in a CHILD session the adapter
                 // asks us to open — a second connection to the same server,
@@ -1824,7 +1767,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                             gDapIn = cl.child.stdinFd
                             let dch = ch.clone()
                             Task.spawn(move(): void => {
-                                parentDrainLoop(parentCl, dch, wakeWr)
+                                parentDrainLoop(parentCl, dch)
                             }
                             )
                             let s = cl.send("initialize", initArgs())
@@ -1867,7 +1810,6 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
     gChildReq = ""
     gStarted = false
     gDapIn = -1
-    gPtyFd = -1
     gPty = Option.None
     gStdinBuf = ""
     gOddSeq = -1 as i64
@@ -1885,7 +1827,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
         }
     }
     if announceEnd {
-        wsPush(ch, wakeWr, terminatedMsg(gLastExit))
+        wsPush(ch, terminatedMsg(gLastExit))
     }
     // A forced run killed the old debuggee; auto-rerun here with its config
     // (a new config can't ride a live adapter — it caches launch args).
@@ -1904,14 +1846,14 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 // a forced relaunch of the same target silently throws away the
                 // breakpoints the user set for it.
                 loadBps()
-                pushHelloState(ch, wakeWr)
+                pushHelloState(ch)
             }
         }
         if err.len > 0 {
-            wsPush(ch, wakeWr, configErrMsg(err))
+            wsPush(ch, configErrMsg(err))
         } else if binPath.len > 0 || gRequest == "attach" {
             stopAtMain = gPendingStopAtMain
-            let _ok = startRun(ch, wakeWr, pendCh)
+            let _ok = startRun(ch, pendCh)
         }
     }
 }
@@ -1970,9 +1912,7 @@ fn spawnTcpAdapter(prog: &string, args: &Vec<string>): Result<i64> {
         for c in rest {
             eprint("[adapter] " + c)
         }
-        unsafe {
-            close(outFd)
-        }
+        close(outFd)
     }
     )
     return Result.Ok(port)
@@ -1996,11 +1936,12 @@ fn killAdapterSrv(): void {
         }
         // Let it exit on its own first: the disconnect we just sent is what makes
         // it kill the debuggee, and SIGTERMing it mid-teardown skips that.
+        // Blocking, not sleepMs: D calls this mid-teardown with gStarted, gDapIn
+        // and gSrvPid still describing the dead session, and a parked D would let
+        // a peer's step or run act on them (gDapIn names an fd cl.close() freed).
         var waited: i64 = 0
         while waited < 1000 && pidAlive(&mut c) {
-            unsafe {
-                let _u = usleep(50000 as u32)
-            }
+            sleepBlockingMs(50)
             waited = waited + 50
         }
         let _k = c.signal(15)
@@ -2021,11 +1962,10 @@ fn reapDebuggee(): void {
         var c = Child {
             pid: gDebuggeePid as i32, stdinFd: -1 as i32, stdoutFd: -1 as i32, stderrFd: -1 as i32
         }
+        // blocking for the same reason as killAdapterSrv
         var waited: i64 = 0
         while waited < 500 && pidAlive(&mut c) {
-            unsafe {
-                let _u = usleep(50000 as u32)
-            }
+            sleepBlockingMs(50)
             waited = waited + 50
         }
         if pidAlive(&mut c) {
@@ -2039,8 +1979,8 @@ fn reapDebuggee(): void {
 // spawn the DAP adapter for the current config and drive the handshake.
 // Shared by the run command (R) and restart-with-staged auto-rerun (D). Assumes
 // binPath set and !gStarted. Broadcasts terminated and returns false if the
-// adapter fails to spawn. bus/busWakeWr are the broadcast channel + wake fd.
-fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): bool {
+// adapter fails to spawn. bus is the broadcast channel.
+fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
     gStarted = true
     // reset BEFORE any spawn: the node path starts its stderr pump inside
     // spawnTcpAdapter, and a reset after it would wipe an early crash capture.
@@ -2066,7 +2006,7 @@ fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): b
         if argv.len == 0 {
             eprint("[srv] no adapter configured\n")
             gStarted = false
-            wsPush(bus, busWakeWr, terminatedMsg(-1 as i64))
+            wsPush(bus, terminatedMsg(-1 as i64))
             return false
         }
         var prog: string = argv[0].clone()
@@ -2095,7 +2035,7 @@ fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): b
         if argv.len == 0 {
             eprint("[srv] no adapter configured\n")
             gStarted = false
-            wsPush(bus, busWakeWr, terminatedMsg(-1 as i64))
+            wsPush(bus, terminatedMsg(-1 as i64))
             return false
         }
         var prog: string = argv[0].clone()
@@ -2136,7 +2076,7 @@ fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): b
             let readerBus = bus.clone()
             let readerPend = pendCh.clone()
             Task.spawn(move(): void => {
-                dapReaderLoop(cl, readerBus, busWakeWr, readerPend)
+                dapReaderLoop(cl, readerBus, readerPend)
             }
             )
             return true
@@ -2145,8 +2085,8 @@ fn startRun(bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): b
             eprint($"[srv] adapter spawn failed: {e}\n")
             killAdapterSrv()
             gStarted = false
-            wsPush(bus, busWakeWr, configErrMsg($"adapter failed to start: {e}"))
-            wsPush(bus, busWakeWr, terminatedMsg(-1 as i64))
+            wsPush(bus, configErrMsg($"adapter failed to start: {e}"))
+            wsPush(bus, terminatedMsg(-1 as i64))
             return false
         }
     }
@@ -2195,7 +2135,7 @@ fn cmdPath(c: &string, doc: &Json): string {
 // like success. The check comes BEFORE the activity announcement too — telling
 // the human "the agent is attempting to frobnicate" about a command that will
 // not run is worse than saying nothing.
-fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): bool {
+fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
     // Parse the payload ONCE; every field read below is a cursor hop on this
     // doc. The old per-field jStr/jI64 helpers re-parsed the message each call.
     let Result.Ok(doc) = Json.parse(payload) else {
@@ -2215,7 +2155,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         let who = peerLabel
         let what = activityText(c, doc)
         logEvent("agent", $"{who} is attempting to {what}")
-        wsPush(bus, busWakeWr, Json.obj().str("type", "activity")
+        wsPush(bus, Json.obj().str("type", "activity")
             .str("peer", peerKind).str("who", who).str("cmd", c)
             .str("text", $"{who} is attempting to {what}").build())
     }
@@ -2252,7 +2192,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             logMessage: dStr(doc, "logMessage"),
             enabled: dBool(doc, "enabled", true),
         }
-        wsPush(bus, busWakeWr, bpAckMsg(ack, c == "setBreakpoint"))
+        wsPush(bus, bpAckMsg(ack, c == "setBreakpoint"))
         if gStarted && gDapIn >= 0 {
             gOddSeq = gOddSeq + 2
             // Register before sending (here and below): D drains pendings
@@ -2288,7 +2228,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
                 )
                 sendReqFd(gDapIn, gOddSeq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
             } else {
-                wsPush(bus, busWakeWr, configErrMsg("a debug session is already active — run with force:true to kill and relaunch"))
+                wsPush(bus, configErrMsg("a debug session is already active — run with force:true to kill and relaunch"))
             }
         } else {
             var cfgErr: string = ""
@@ -2297,18 +2237,18 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
                 if cfgErr.len == 0 {
                     logEvent("target changed", $"{binPath}  (by {peerKind} peer)")
                     loadBps()
-                    pushHelloState(bus, busWakeWr)
+                    pushHelloState(bus)
                 }
             }
             if cfgErr.len > 0 {
-                wsPush(bus, busWakeWr, configErrMsg(cfgErr))
+                wsPush(bus, configErrMsg(cfgErr))
             } else if binPath.len == 0 && gRequest != "attach" {
                 // Booted idle with no target: nudge to the config drawer instead
                 // of spawning the adapter with an empty program path.
-                wsPush(bus, busWakeWr, configErrMsg("no program configured — set a debug target (⚙) before running"))
+                wsPush(bus, configErrMsg("no program configured — set a debug target (⚙) before running"))
             } else {
                 stopAtMain = dBool(doc, "stopAtMain", gConfigStopAtMain)
-                let _ok = startRun(bus, busWakeWr, pendCh)
+                let _ok = startRun(bus, pendCh)
             }
         }
     } else if c == "continue" || c == "stepOver" || c == "stepIn" || c == "stepOut" || c == "pause" {
@@ -2514,14 +2454,17 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         // handles unreadable pseudo-paths (dyld etc.) with a placeholder.
         let p = dStr(doc, "path")
         if p.len > 0 {
-            wsPush(bus, busWakeWr, sourceMsg(p))
+            wsPush(bus, sourceMsg(p))
         }
     } else if c == "stdin" {
         let data = dStr(doc, "data")
-        if gPtyFd >= 0 {
-            unsafe {
-                let _n = write(gPtyFd, data, data.len)
-            }
+        // writeOnce, not write: this runs on a peer's reader task, and parking
+        // it until a debuggee that never reads stdin drains the pty would stall
+        // every command that peer sends after it. A full pty drops input, as the
+        // raw write here always did.
+        if let Option.Some(p) = replace(gPty, Option.None) {
+            let _n = p.writeOnce(data)
+            gPty = Option.Some(p)
         } else {
             gStdinBuf = gStdinBuf + data
         }
@@ -2544,16 +2487,16 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         // programmatic path (`dapweb api` callers). Idle-only — a live session must be
         // force-run to change target (setConfig never kills a debuggee).
         if gStarted {
-            wsPush(bus, busWakeWr, configErrMsg("a debug session is active — stop it (or Run with force) to change the target"))
+            wsPush(bus, configErrMsg("a debug session is active — stop it (or Run with force) to change the target"))
         } else {
             let err = applyConfig(payload, "")
             if err.len > 0 {
-                wsPush(bus, busWakeWr, configErrMsg(err))
+                wsPush(bus, configErrMsg(err))
             } else {
                 logEvent("target changed", $"{binPath}  (by {peerKind} peer)")
                     loadBps()
-                wsPush(bus, busWakeWr, recordConfig())
-                pushHelloState(bus, busWakeWr)
+                wsPush(bus, recordConfig())
+                pushHelloState(bus)
             }
         }
     } else if c == "importHistory" {
@@ -2564,7 +2507,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             if e.isArray() {
                 gHistory = histMergeMany(gHistory, e.rawStr(), 10 as i64)
                 persistHistory()
-                wsPush(bus, busWakeWr, historyChangedMsg())
+                wsPush(bus, historyChangedMsg())
             }
         }
     } else if c == "newSession" {
@@ -2590,7 +2533,7 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
         gSessionId = newSessionName(sessionNameSeeds())
         journalHere()
         logEvent("session reset", $"new session {gSessionId}")
-        pushHelloState(bus, busWakeWr)
+        pushHelloState(bus)
     }
     return true
 }
@@ -2826,33 +2769,23 @@ fn unknownCmdJson(c: &string): string {
         .build()
 }
 
-fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): string {
+fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: &Channel<string>, pendCh: &Channel<Pending>): string {
     // An agent driving the session IS activity: without this an --idle-ttl server
     // reaps the debuggee out from under a caller that has no WS peer holding it.
     gLastActivityMs = epochMillis()
     if awaitType.len == 0 {
         let known = jStr(body, "cmd")
-        if !dispatchClientCmd(body.clone(), "api", who, bus, busWakeWr, pendCh) {
+        if !dispatchClientCmd(body.clone(), "api", who, bus, pendCh) {
             return unknownCmdJson(known)
         }
         return Json.obj().bool("ok", true).build()
     }
     let ch = Channel<string>.new(256)!
-    var wake: [i32; 2] = [0; 2]
-    unsafe {
-        if pipe(wake as *i32) != 0 {
-            return Json.obj().bool("ok", false).str("error", "pipe failed").build()
-        }
-    }
     let clientId = gNextClient
     gNextClient = gNextClient + 1
-    sinkRegister(clientId, ch, wake[1])
-    var one: [u8; 1] = [110; 1]
-    unsafe {
-        let _w = write(busWakeWr, one as *u8, 1)
-    }
+    sinkRegister(clientId, ch)
     let wantCmd = jStr(body, "cmd")
-    if !dispatchClientCmd(body.clone(), "api", who, bus, busWakeWr, pendCh) {
+    if !dispatchClientCmd(body.clone(), "api", who, bus, pendCh) {
         sinkUnregister(clientId)
         return unknownCmdJson(wantCmd)
     }
@@ -2881,13 +2814,6 @@ fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: 
         }
     }
     sinkUnregister(clientId)
-    unsafe {
-        let _w2 = write(busWakeWr, one as *u8, 1)
-        // wake[0] is never read here (the await polls tryRecv), and leaving it
-        // open leaked one descriptor per api call: an agent stepping in a loop
-        // walked the server into EMFILE.
-        close(wake[0])
-    }
     if out.len == 0 {
         return Json.obj().bool("ok", false).str("error", "timeout").str("awaited", awaitType).build()
     }
@@ -2896,24 +2822,16 @@ fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, bus: 
 
 // ── R: the WS-reader task (entry point per debug WebSocket) ──
 
-fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, busWakeWr: i32, pendCh: &Channel<Pending>): void {
+fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, pendCh: &Channel<Pending>): void {
     var conn = ws
 
     let ch = Channel<string>.new(256)!
-    var wake: [i32; 2] = [0; 2]
-    unsafe {
-        if pipe(wake as *i32) != 0 {
-            return
-        }
-    }
-    let wakeRd = wake[0]
-    let wakeWr = wake[1]
     let wfd = conn.fd
     // Channel handles are refcounted and @send: the writer task outlives this
     // frame, so it gets its own retained handle (as does the registry's Sink).
     let writerCh = ch.clone()
     let writer = Task.spawn(move(): void => {
-        wsWriterLoop(wfd, writerCh, wakeRd)
+        wsWriterLoop(wfd, writerCh)
     }
     )
 
@@ -2922,37 +2840,33 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, busWakeWr:
     // so the replay is ordered before any subsequent broadcast fanout.
     let clientId = gNextClient
     gNextClient = gNextClient + 1
-    sinkRegister(clientId, ch, wakeWr)
+    sinkRegister(clientId, ch)
     gPeers = gPeers + 1
     logEvent("peer connected", $"{peerKind}  {peerCountStr()}")
-    var one: [u8; 1] = [110; 1]
-    unsafe {
-        let _w1 = write(busWakeWr, one as *u8, 1)
-    }
 
-    wsPush(ch, wakeWr, helloMsg())
+    wsPush(ch, helloMsg())
     if srcPath.len > 0 {
-        wsPush(ch, wakeWr, sourceMsg(srcPath))
+        wsPush(ch, sourceMsg(srcPath))
     }
     if gCapsMsg.len > 0 {
-        wsPush(ch, wakeWr, gCapsMsg.clone())
+        wsPush(ch, gCapsMsg.clone())
     }
     for bp in gBps {
-        wsPush(ch, wakeWr, bpSyncMsg(bp))
+        wsPush(ch, bpSyncMsg(bp))
     }
     if gStopMsg.len > 0 {
-        wsPush(ch, wakeWr, gStopMsg.clone())
+        wsPush(ch, gStopMsg.clone())
     }
     if gThreadsMsg.len > 0 {
-        wsPush(ch, wakeWr, gThreadsMsg.clone())
+        wsPush(ch, gThreadsMsg.clone())
     }
     if gRegionsMsg.len > 0 {
-        wsPush(ch, wakeWr, gRegionsMsg.clone())
+        wsPush(ch, gRegionsMsg.clone())
     }
     // replay buffered terminal history. Flagged so a same-session reconnect
     // (which kept its scrollback) can drop it; a fresh/new-session tab renders it.
     for outLine in gOutputLog {
-        wsPush(ch, wakeWr, Json.obj().str("type", "output").str("text", outLine.text).str("category", outLine.category).bool("replay", true).build())
+        wsPush(ch, Json.obj().str("type", "output").str("text", outLine.text).str("category", outLine.category).bool("replay", true).build())
     }
 
     while true {
@@ -2966,18 +2880,15 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, busWakeWr:
             }
         }
 
-        if !dispatchClientCmd(payload.clone(), peerKind.clone(), peerKind.clone(), bus, busWakeWr, pendCh) {
-            wsPush(bus, busWakeWr, configErrMsg($"unknown command {jStr(payload, "cmd")}"))
+        if !dispatchClientCmd(payload.clone(), peerKind.clone(), peerKind.clone(), bus, pendCh) {
+            wsPush(bus, configErrMsg($"unknown command {jStr(payload, "cmd")}"))
         }
     }
 
-    // Leave the shared session; sinkUnregister closes our wake fd, which EOFs
+    // Leave the shared session; sinkUnregister closes our channel, which ends
     // the writer. Wait for it to exit before `conn` drops and closes the socket.
     sinkUnregister(clientId)
     writer.join()
-    unsafe {
-        let _w2 = write(busWakeWr, one as *u8, 1)
-    }
     gPeers = gPeers - 1
     gLastActivityMs = epochMillis()
     logEvent("peer disconnected", $"{peerKind}  {peerCountStr()}")
@@ -2985,35 +2896,14 @@ fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, busWakeWr:
 
 // ── Idle TTL (session GC) ──
 
-// OS-thread ticker: the green scheduler blocks in kevent with no timeout, so
-// time-based wakeups need an external poke. Raw usleep + pipe write only — no
-// runtime calls here (the scheduler pointer is a plain global, not
-// thread-local, so std sleep/yield on a foreign thread would corrupt it).
-fn tickerMain(): i64 {
-    while true {
-        unsafe {
-            let _s = usleep((gTickUsecs & 0xffffffff) as u32)
-            var one: [u8; 1] = [116; 1]
-            let _w = write(gTickWr, one as *u8, 1)
-        }
-    }
-    return 0
-}
-
-// Green task: parks on the tick pipe; a session with no peers for the TTL is
+// Green task: sleepMs parks on a select timer arm, and the scheduler bounds its
+// event-loop wait by the nearest timer deadline, so this ticks with the server
+// otherwise idle and needs no OS thread. A session with no peers for the TTL is
 // ended via the same disconnect(terminateDebuggee) path as the kill command —
 // D's terminated/EOF handling resets session state for a later fresh run.
-fn reaperLoop(tickRd: i32, pendCh: Channel<Pending>): void {
-    var buf: [u8; 8] = [0; 8]
+fn reaperLoop(tickMs: i64, pendCh: Channel<Pending>): void {
     while true {
-        var n: i64 = 0
-        unsafe {
-            schedulerWaitRead(tickRd)
-            n = read(tickRd, buf as *u8, 8)
-        }
-        if n <= 0 {
-            break
-        }
+        sleepMs(tickMs)
         if !gStarted || gPeers > 0 || gDapIn < 0 {
             continue
         }
@@ -3048,23 +2938,8 @@ fn sendHttp(fd: i32, status: i32, contentType: &string, body: &string): void {
     resp = resp + body
     // Accepted fds are non-blocking under the green runtime: a single write()
     // stops at the socket buffer (~half a MB of app.js got dropped this way).
-    // Loop with scheduler parking until the whole response is out.
-    var sent: i64 = 0
-    while sent < resp.len {
-        let chunk = resp.substr(sent, resp.len)
-        var n: i64 = 0
-        unsafe {
-            n = write(fd, chunk, chunk.len)
-        }
-        if n < 0 {
-            if getErrno() == eagain() {
-                schedulerWaitWrite(fd)
-                continue
-            }
-            return
-        }
-        sent = sent + n
-    }
+    // sendFd parks until the whole response is out.
+    let _n = sendFd(fd, resp, resp.len)
 }
 
 // UI assets are embedded, so the binary is self-contained: a downloaded release
@@ -3320,218 +3195,213 @@ fn requestAllowed(raw: &string): bool {
     return origin.len == 0 || origin == "http://" + host
 }
 
-fn handleConnection(fd: i32, bus: Channel<string>, busWakeWr: i32, pendCh: Channel<Pending>): void {
+fn handleConnection(fd: i32, bus: Channel<string>, pendCh: Channel<Pending>): void {
     var buf: [u8; 8192] = [0; 8192]
-    unsafe {
-        schedulerWaitRead(fd)
-        let n = read(fd, buf as *u8, 8192)
-        if n <= 0 {
-            close(fd)
-            return
+    let n = recvFd(fd, buf, 8192)
+    if n <= 0 {
+        close(fd)
+        return
+    }
+    var raw: string = ""
+    for i in 0..n {
+        raw.push(buf[i])
+    }
+    // Headers can arrive split across TCP segments. Read to the blank line
+    // before judging them: requestAllowed would otherwise refuse a request
+    // whose Host has not arrived yet. Capped so a client cannot grow it forever.
+    while !raw.contains("\r\n\r\n") && raw.len < 65536 {
+        let more = recvFd(fd, buf, 8192)
+        if more <= 0 {
+            break
         }
-        var raw: string = ""
-        for i in 0..n {
+        for i in 0..more {
             raw.push(buf[i])
         }
-        // Headers can arrive split across TCP segments. Read to the blank line
-        // before judging them: requestAllowed would otherwise refuse a request
-        // whose Host has not arrived yet. Capped so a client cannot grow it forever.
-        while !raw.contains("\r\n\r\n") && raw.len < 65536 {
-            schedulerWaitRead(fd)
-            let more = read(fd, buf as *u8, 8192)
-            if more <= 0 {
-                break
-            }
-            for i in 0..more {
-                raw.push(buf[i])
-            }
-        }
-
-        let rl = parseRequestLine(raw)
-        if !requestAllowed(raw) {
-            sendHttp(fd, 403, "text/plain", "forbidden: dapweb only answers localhost, same-origin")
-            close(fd)
-            return
-        }
-        if isWsUpgrade(raw) {
-            // Peer kind rides the upgrade path's query string: browsers
-            // hit /ws bare, other clients pass ?client=<kind> — known
-            // before the first frame, so connect logs carry the right kind.
-            var wsPath = rl.path.clone()
-            var query: string = ""
-            var qi2: i64 = 0
-            while qi2 < wsPath.len {
-                if wsPath[qi2] == '?' {
-                    query = wsPath.substr(qi2 + 1, wsPath.len)
-                    wsPath = wsPath.substr(0, qi2)
-                    break
-                }
-                qi2 = qi2 + 1
-            }
-            if wsPath == "/ws" {
-                var kind: string = "browser"
-                if query.startsWith("client=") {
-                    kind = query.substr(7, query.len)
-                }
-                match wsAccept(fd, raw) {
-                    Result.Ok(ws) => {
-                        handleDebugWs(ws, kind, bus, busWakeWr, pendCh)
-                    }
-                    Result.Err(_e) => {
-                        close(fd)
-                    }
-                }
-            } else {
-                close(fd)
-            }
-            return
-        }
-
-        // ── HTTP API (same command vocabulary as the WS the browser speaks) ──
-        var apiPath = rl.path.clone()
-        var apiQuery: string = ""
-        var qi3: i64 = 0
-        while qi3 < apiPath.len {
-            if apiPath[qi3] == '?' {
-                apiQuery = apiPath.substr(qi3 + 1, apiPath.len)
-                apiPath = apiPath.substr(0, qi3)
-                break
-            }
-            qi3 = qi3 + 1
-        }
-        if apiPath == "/api/state" {
-            sendHttp(fd, 200, "application/json", apiStateJson())
-            close(fd)
-            return
-        }
-        // Reports on the configured target only, with no path parameter: the API
-        // port is unauthenticated, and a caller-supplied path would make this an
-        // arbitrary-file header reader.
-        if apiPath == "/api/processes" {
-            sendHttp(fd, 200, "application/json", processListJson())
-            close(fd)
-            return
-        }
-        // Every live dapweb on this machine, for the /sessions dashboard. Reads
-        // the same registry `dapweb api list` does, and prunes it on the way.
-        // The vocabulary, so a caller can discover it over the same port it
-        // drives the session on rather than by reading the source.
-        if apiPath == "/api/commands" {
-            sendHttp(fd, 200, "application/json", commandsJson())
-            close(fd)
-            return
-        }
-        // What this machine's sessions have done. Same rows `dapweb log` prints,
-        // over the port an agent is already talking to. Defaults to THIS
-        // session, since the caller driving it is usually asking about its own
-        // work; ?session=all widens to every session in the journal.
-        if apiPath == "/api/log" {
-            var f = logFilter()
-            f.session = gSessionId.clone()
-            let qs = queryParam(apiQuery, "session")
-            if qs == "all" {
-                f.session = ""
-            } else if qs.len > 0 {
-                f.session = qs
-            }
-            f.kind = queryParam(apiQuery, "kind")
-            f.dir = queryParam(apiQuery, "dir")
-            f.since = queryParam(apiQuery, "since").parseInt() ?? (0 as i64)
-            f.limit = queryParam(apiQuery, "limit").parseInt() ?? (0 as i64)
-            var arr: Vec<string> = []
-            if queryParam(apiQuery, "view") == "sessions" {
-                arr = journalSessions(f.limit)
-            } else if queryParam(apiQuery, "view") == "breakpoints" {
-                arr = journalBreakpoints(queryParam(apiQuery, "program"), f.limit)
-            } else {
-                arr = journalRows(f)
-            }
-            var body: string = "["
-            var ai: i64 = 0
-            while ai < arr.len {
-                if ai > 0 {
-                    body = body + ","
-                }
-                body = body + arr[ai]
-                ai = ai + 1
-            }
-            body = body + "]"
-            sendHttp(fd, 200, "application/json", Json.obj().bool("ok", true).raw("rows", body).build())
-            close(fd)
-            return
-        }
-        if apiPath == "/api/sessions" {
-            sendHttp(fd, 200, "application/json", sessionsJson(gSessionId))
-            close(fd)
-            return
-        }
-        if apiPath == "/api/spawn" {
-            if rl.method != "POST" {
-                sendHttp(fd, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
-                close(fd)
-                return
-            }
-            sendHttp(fd, 200, "application/json", spawnSessionJson())
-            close(fd)
-            return
-        }
-        if apiPath == "/api/binfo" {
-            sendHttp(fd, 200, "application/json", binInfoJson(binPath))
-            close(fd)
-            return
-        }
-        if apiPath == "/api/cmd" {
-            if rl.method != "POST" {
-                sendHttp(fd, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
-                close(fd)
-                return
-            }
-            // Body follows the header terminator. Small JSON commands arrive in the
-            // first read; keep pulling while the declared length is short.
-            var body: string = ""
-            var hi: i64 = 0
-            while hi + 3 < raw.len {
-                if raw[hi] == '\r' && raw[hi + 1] == '\n' && raw[hi + 2] == '\r' && raw[hi + 3] == '\n' {
-                    body = raw.substr(hi + 4, raw.len)
-                    break
-                }
-                hi = hi + 1
-            }
-            // Absent/garbage content-length reads as 0, same as the old parser: the
-            // body is whatever already arrived.
-            let want = headerVal(raw, "content-length").parseInt() ?? (0 as i64)
-            while body.len < want {
-                var more: [u8; 8192] = [0; 8192]
-                schedulerWaitRead(fd)
-                let n2 = read(fd, more as *u8, 8192)
-                if n2 <= 0 {
-                    break
-                }
-                for j in 0..n2 {
-                    body.push(more[j])
-                }
-            }
-            var timeoutMs = queryParam(apiQuery, "timeout").parseInt() ?? (0 as i64)
-            if timeoutMs <= 0 {
-                timeoutMs = 5000
-            }
-            let reply = apiRunCmd(body, queryParam(apiQuery, "await"), timeoutMs, apiWho(apiQuery), bus, busWakeWr, pendCh)
-            sendHttp(fd, 200, "application/json", reply)
-            close(fd)
-            return
-        }
-
-        if rl.method == "GET" {
-            // requestAllowed has already pinned Host to a loopback name.
-            serveStatic(fd, rl.path, "http://" + headerVal(raw, "host"))
-        } else {
-            sendHttp(fd, 404, "text/plain", "not found")
-        }
-        close(fd)
     }
+
+    let rl = parseRequestLine(raw)
+    if !requestAllowed(raw) {
+        sendHttp(fd, 403, "text/plain", "forbidden: dapweb only answers localhost, same-origin")
+        close(fd)
+        return
+    }
+    if isWsUpgrade(raw) {
+        // Peer kind rides the upgrade path's query string: browsers
+        // hit /ws bare, other clients pass ?client=<kind> — known
+        // before the first frame, so connect logs carry the right kind.
+        var wsPath = rl.path.clone()
+        var query: string = ""
+        var qi2: i64 = 0
+        while qi2 < wsPath.len {
+            if wsPath[qi2] == '?' {
+                query = wsPath.substr(qi2 + 1, wsPath.len)
+                wsPath = wsPath.substr(0, qi2)
+                break
+            }
+            qi2 = qi2 + 1
+        }
+        if wsPath == "/ws" {
+            var kind: string = "browser"
+            if query.startsWith("client=") {
+                kind = query.substr(7, query.len)
+            }
+            match wsAccept(fd, raw) {
+                Result.Ok(ws) => {
+                    handleDebugWs(ws, kind, bus, pendCh)
+                }
+                Result.Err(_e) => {
+                    close(fd)
+                }
+            }
+        } else {
+            close(fd)
+        }
+        return
+    }
+
+    // ── HTTP API (same command vocabulary as the WS the browser speaks) ──
+    var apiPath = rl.path.clone()
+    var apiQuery: string = ""
+    var qi3: i64 = 0
+    while qi3 < apiPath.len {
+        if apiPath[qi3] == '?' {
+            apiQuery = apiPath.substr(qi3 + 1, apiPath.len)
+            apiPath = apiPath.substr(0, qi3)
+            break
+        }
+        qi3 = qi3 + 1
+    }
+    if apiPath == "/api/state" {
+        sendHttp(fd, 200, "application/json", apiStateJson())
+        close(fd)
+        return
+    }
+    // Reports on the configured target only, with no path parameter: the API
+    // port is unauthenticated, and a caller-supplied path would make this an
+    // arbitrary-file header reader.
+    if apiPath == "/api/processes" {
+        sendHttp(fd, 200, "application/json", processListJson())
+        close(fd)
+        return
+    }
+    // Every live dapweb on this machine, for the /sessions dashboard. Reads
+    // the same registry `dapweb api list` does, and prunes it on the way.
+    // The vocabulary, so a caller can discover it over the same port it
+    // drives the session on rather than by reading the source.
+    if apiPath == "/api/commands" {
+        sendHttp(fd, 200, "application/json", commandsJson())
+        close(fd)
+        return
+    }
+    // What this machine's sessions have done. Same rows `dapweb log` prints,
+    // over the port an agent is already talking to. Defaults to THIS
+    // session, since the caller driving it is usually asking about its own
+    // work; ?session=all widens to every session in the journal.
+    if apiPath == "/api/log" {
+        var f = logFilter()
+        f.session = gSessionId.clone()
+        let qs = queryParam(apiQuery, "session")
+        if qs == "all" {
+            f.session = ""
+        } else if qs.len > 0 {
+            f.session = qs
+        }
+        f.kind = queryParam(apiQuery, "kind")
+        f.dir = queryParam(apiQuery, "dir")
+        f.since = queryParam(apiQuery, "since").parseInt() ?? (0 as i64)
+        f.limit = queryParam(apiQuery, "limit").parseInt() ?? (0 as i64)
+        var arr: Vec<string> = []
+        if queryParam(apiQuery, "view") == "sessions" {
+            arr = journalSessions(f.limit)
+        } else if queryParam(apiQuery, "view") == "breakpoints" {
+            arr = journalBreakpoints(queryParam(apiQuery, "program"), f.limit)
+        } else {
+            arr = journalRows(f)
+        }
+        var body: string = "["
+        var ai: i64 = 0
+        while ai < arr.len {
+            if ai > 0 {
+                body = body + ","
+            }
+            body = body + arr[ai]
+            ai = ai + 1
+        }
+        body = body + "]"
+        sendHttp(fd, 200, "application/json", Json.obj().bool("ok", true).raw("rows", body).build())
+        close(fd)
+        return
+    }
+    if apiPath == "/api/sessions" {
+        sendHttp(fd, 200, "application/json", sessionsJson(gSessionId))
+        close(fd)
+        return
+    }
+    if apiPath == "/api/spawn" {
+        if rl.method != "POST" {
+            sendHttp(fd, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
+            close(fd)
+            return
+        }
+        sendHttp(fd, 200, "application/json", spawnSessionJson())
+        close(fd)
+        return
+    }
+    if apiPath == "/api/binfo" {
+        sendHttp(fd, 200, "application/json", binInfoJson(binPath))
+        close(fd)
+        return
+    }
+    if apiPath == "/api/cmd" {
+        if rl.method != "POST" {
+            sendHttp(fd, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
+            close(fd)
+            return
+        }
+        // Body follows the header terminator. Small JSON commands arrive in the
+        // first read; keep pulling while the declared length is short.
+        var body: string = ""
+        var hi: i64 = 0
+        while hi + 3 < raw.len {
+            if raw[hi] == '\r' && raw[hi + 1] == '\n' && raw[hi + 2] == '\r' && raw[hi + 3] == '\n' {
+                body = raw.substr(hi + 4, raw.len)
+                break
+            }
+            hi = hi + 1
+        }
+        // Absent/garbage content-length reads as 0, same as the old parser: the
+        // body is whatever already arrived.
+        let want = headerVal(raw, "content-length").parseInt() ?? (0 as i64)
+        while body.len < want {
+            var more: [u8; 8192] = [0; 8192]
+            let n2 = recvFd(fd, more, 8192)
+            if n2 <= 0 {
+                break
+            }
+            for j in 0..n2 {
+                body.push(more[j])
+            }
+        }
+        var timeoutMs = queryParam(apiQuery, "timeout").parseInt() ?? (0 as i64)
+        if timeoutMs <= 0 {
+            timeoutMs = 5000
+        }
+        let reply = apiRunCmd(body, queryParam(apiQuery, "await"), timeoutMs, apiWho(apiQuery), bus, pendCh)
+        sendHttp(fd, 200, "application/json", reply)
+        close(fd)
+        return
+    }
+
+    if rl.method == "GET" {
+        // requestAllowed has already pinned Host to a loopback name.
+        serveStatic(fd, rl.path, "http://" + headerVal(raw, "host"))
+    } else {
+        sendHttp(fd, 404, "text/plain", "not found")
+    }
+    close(fd)
 }
 
-fn acceptLoop(listener: TcpListener, bus: Channel<string>, busWakeWr: i32, pendCh: Channel<Pending>): void {
+fn acceptLoop(listener: TcpListener, bus: Channel<string>, pendCh: Channel<Pending>): void {
     var l = listener
     while true {
         match l.accept() {
@@ -3541,7 +3411,7 @@ fn acceptLoop(listener: TcpListener, bus: Channel<string>, busWakeWr: i32, pendC
                 let connBus = bus.clone()
                 let connPend = pendCh.clone()
                 Task.spawn(move(): void => {
-                    handleConnection(fd, connBus, busWakeWr, connPend)
+                    handleConnection(fd, connBus, connPend)
                 }
                 )
             }
@@ -3660,7 +3530,6 @@ pub fn webMain(argv: Vec<string>): i32 {
     gHistory = "[]"
     gRestored = false
     gDapIn = -1
-    gPtyFd = -1
     gPty = Option.None
     gOddSeq = -1 as i64
     gStdinBuf = ""
@@ -3734,44 +3603,21 @@ pub fn webMain(argv: Vec<string>): i32 {
     loadBps()
     let bus = Channel<string>.new(1024)!
     let pendCh = Channel<Pending>.new(64)!
-    var busWake: [i32; 2] = [0; 2]
-    unsafe {
-        if pipe(busWake as *i32) != 0 {
-            eprint("error: pipe failed\n")
-            return 1
-        }
-    }
-    let busWakeRd = busWake[0]
-    let busWakeWr = busWake[1]
     let bcBus = bus.clone()
     Task.spawn(move(): void => {
-        broadcastLoop(bcBus, busWakeRd)
+        broadcastLoop(bcBus)
     }
     )
 
     if gIdleTtlSecs > 0 {
         // 1s ticks for short (test) TTLs, 30s otherwise — reap latency ≤ ttl + tick.
-        gTickUsecs = 30000000
+        var tickMs: i64 = 30000
         if gIdleTtlSecs <= 60 {
-            gTickUsecs = 1000000
+            tickMs = 1000
         }
-        var tick: [i32; 2] = [0; 2]
-        unsafe {
-            if pipe(tick as *i32) != 0 {
-                eprint("error: pipe failed\n")
-                return 1
-            }
-        }
-        let tickRd = tick[0]
-        gTickWr = tick[1]
         let reapPend = pendCh.clone()
         Task.spawn(move(): void => {
-            reaperLoop(tickRd, reapPend)
-        }
-        )
-        // real OS thread (see tickerMain): fire-and-forget, never returns
-        let _ticker = Promise<i64>.blocking(move(): i64 => {
-            return tickerMain()
+            reaperLoop(tickMs, reapPend)
         }
         )
     }
@@ -3806,7 +3652,7 @@ pub fn webMain(argv: Vec<string>): i32 {
             let acceptBus = bus.clone()
             let acceptPend = pendCh.clone()
             Task.spawn(move(): void => {
-                acceptLoop(l, acceptBus, busWakeWr, acceptPend)
+                acceptLoop(l, acceptBus, acceptPend)
             }
             )
         }
