@@ -214,6 +214,18 @@ Each event is recorded to `$XDG_STATE_HOME/dapweb/journal.db`, which can be quer
 ./dapweb log --breakpoints              # per line: sessions set vs sessions hit
 ```
 
+Every stop records who caused it (`by`: `agent` or `user`, `who`: the peer's
+label) along with its frames and locals. The browser's Timeline tab reads this
+session's stops back, newest first; an agent gets the same rows with:
+
+```sh
+./dapweb log --session <id> --kind stopped --dir out --json   # oldest first; peer=agent|user, payload has frames+locals
+curl -s 'localhost:8080/api/log?kind=stopped&dir=out&limit=200'   # the same, for the session on that port
+```
+
+A tab with "follow agent" on (the toggle in the header, on by default) brings
+an agent's stop, breakpoint or opened file into view and flashes the line.
+
 Note: there is no authentication, and `eval` reaches the debugger. dapweb listens on loopback only and refuses requests whose Host is not loopback or whose Origin is another site, so neither the network nor a web page can drive it. Anyone with a shell on this machine still can.
 
 ## Develop
