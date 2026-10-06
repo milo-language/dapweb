@@ -55,6 +55,7 @@ pub fn commandSpecs(): Vec<CmdSpec> {
     v.push(CmdSpec { name: "readMem", args: "memoryReference, offset?, count?, id?", summary: "read raw memory", awaits: "memory", dap: "readMemory", verb: "read memory" })
     v.push(CmdSpec { name: "disassemble", args: "memoryReference, id?", summary: "disassemble around an address", awaits: "disasm", dap: "disassemble", verb: "disassemble" })
     v.push(CmdSpec { name: "stdin", args: "data", summary: "write to the debuggee's terminal", awaits: "", dap: "", verb: "type into the program" })
+    v.push(CmdSpec { name: "resize", args: "rows, cols", summary: "set the debuggee terminal size", awaits: "", dap: "", verb: "resize the program terminal" })
     v.push(CmdSpec { name: "openSource", args: "path", summary: "load a source file into the editor", awaits: "source", dap: "", verb: "open a source file" })
     v.push(CmdSpec { name: "setConfig", args: "type, program|pid, ...", summary: "change the debug target (idle sessions only)", awaits: "hello", dap: "", verb: "change the debug target" })
     v.push(CmdSpec { name: "importHistory", args: "entries", summary: "merge config history entries (one-shot migration)", awaits: "historyChanged", dap: "", verb: "import config history" })

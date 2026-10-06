@@ -62,6 +62,9 @@ d.send({ cmd: "setBreakpoint", line: 6 });
 const ack = await d.wait(m => m.type === "breakpoint");
 ok(ack.line === 6 && ack.set === true, "breakpoint ack line 6");
 
+// The browser sizes its terminal before any pty exists; that size must reach
+// the debuggee when it spawns (checked at the stop below).
+d.send({ cmd: "resize", rows: 33, cols: 101 });
 d.send({ cmd: "run" });
 
 // Debuggee runs in a pty and prompts before the breakpoint; feed it stdin.
@@ -88,6 +91,24 @@ ok(ev.value.includes("42"), `evaluate x+y → ${ev.value}`);
 d.send({ cmd: "evaluate", expr: "x * 2", context: "watch", id: 102, frameId: frame0 });
 const ew = await d.wait(m => m.type === "evalResult" && m.id === 102);
 ok(ew.value.includes("14"), `watch x*2 → ${ew.value}`);
+
+// pty size as the debuggee sees it, rows*1000+cols. ioctl is variadic and the
+// expression parser has no prototype for it; the cast makes the call use the
+// variadic ABI (arm64 passes variadic args on the stack).
+const TIOCGWINSZ = process.platform === "darwin" ? "0x40087468UL" : "0x5413UL";
+let winId = 110;
+const winsize = async () => {
+  const id = ++winId;
+  d.send({ cmd: "evaluate", context: "repl", id, frameId: frame0,
+    expr: `({ unsigned short w[4] = {0,0,0,0}; ((int (*)(int, unsigned long, ...))ioctl)(0, ${TIOCGWINSZ}, w); w[0] * 1000 + w[1]; })` });
+  return (await d.wait(m => m.type === "evalResult" && m.id === id)).value as string;
+};
+const ws0 = await winsize();
+ok(/= 33101$/.test(ws0), `a resize sent before run sizes the spawned pty (got ${ws0})`);
+d.send({ cmd: "resize", rows: 40, cols: 120 });
+await new Promise(r => setTimeout(r, 200));
+const ws1 = await winsize();
+ok(/= 40120$/.test(ws1), `a resize while live reaches the debuggee pty (got ${ws1})`);
 
 // expand: 'name' is a char[64] — has children
 if (nameVar.ref > 0) {

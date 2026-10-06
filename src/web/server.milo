@@ -176,6 +176,11 @@ var gPendingRun: bool = false
 var gStarted: bool = false
 var gDapIn: i32 = -1
 var gPtyFd: i32 = -1
+// The live debuggee pty, for resize. The browser sizes its terminal on mount,
+// before any pty exists, so the last size asked for is kept and applied at spawn.
+var gPty: Option<Pty> = Option.None
+var gTermRows: i64 = 0
+var gTermCols: i64 = 0
 var gOddSeq: i64 = -1 // +2 per R send → 1, 3, 5, … (D's DapClient uses even)
 var gStdinBuf: string = "" // keystrokes typed before the pty exists
 // Recent adapter stderr, captured off the DAP stream (see startArgs). Surfaced
@@ -1273,6 +1278,12 @@ fn handleRunInTerminal(cl: &mut DapClient, raw: &string, reqSeq: i64, ch: &Chann
     match Pty.open() {
         Result.Ok(p) => {
             var pty = p
+            // Before spawn, not after: the forked child sets the slave's size
+            // from the Pty's own rows/cols, and would overwrite a parent-side
+            // resize that raced it.
+            if gTermRows > 0 && gTermCols > 0 {
+                let _r = pty.resize(gTermRows as u16, gTermCols as u16)
+            }
             match pty.spawn(program, args) {
                 Result.Ok(pid) => {
                     logEvent("debuggee spawned", $"pid {pid}")
@@ -1285,6 +1296,7 @@ fn handleRunInTerminal(cl: &mut DapClient, raw: &string, reqSeq: i64, ch: &Chann
                     // direct global set (same scheduler thread) — and flush
                     // any keystrokes typed while the adapter was launching.
                     gPtyFd = master
+                    gPty = Option.Some(pty)
                     if gStdinBuf.len > 0 {
                         unsafe {
                             let _n = write(master, gStdinBuf, gStdinBuf.len)
@@ -1850,6 +1862,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
     gStarted = false
     gDapIn = -1
     gPtyFd = -1
+    gPty = Option.None
     gStdinBuf = ""
     gOddSeq = -1 as i64
     gStopMsg = ""
@@ -2505,6 +2518,19 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
             }
         } else {
             gStdinBuf = gStdinBuf + data
+        }
+    } else if c == "resize" {
+        let rows = dI64(doc, "rows", 0 as i64)
+        let cols = dI64(doc, "cols", 0 as i64)
+        // winsize fields are u16; anything outside is a bad payload, not a size.
+        if rows > 0 && cols > 0 && rows < 65536 && cols < 65536 {
+            gTermRows = rows
+            gTermCols = cols
+            if let Option.Some(p) = replace(gPty, Option.None) {
+                var pty = p
+                let _r = pty.resize(rows as u16, cols as u16)
+                gPty = Option.Some(pty)
+            }
         }
     } else if c == "setConfig" {
         // config = a VS Code launch-configuration object (see applyConfig).
@@ -3616,6 +3642,7 @@ pub fn webMain(argv: Vec<string>): i32 {
     gRestored = false
     gDapIn = -1
     gPtyFd = -1
+    gPty = Option.None
     gOddSeq = -1 as i64
     gStdinBuf = ""
     gCapsMsg = ""
