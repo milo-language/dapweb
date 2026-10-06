@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 460" width="1200" height="460" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <style>
+    .bg { fill: #ffffff; }
+    .card { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 2; }
+    .hub { fill: #0969da; }
+    .t { fill: #1f2328; }
+    .sub { fill: #59636e; }
+    .hubt { fill: #ffffff; }
+    .you { fill: #0969da; }
+    .agent { fill: #bf3989; }
+    .line { stroke: #8c959f; stroke-width: 6; fill: none; }
+    .head { fill: #8c959f; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .card { fill: #161b22; stroke: #30363d; }
+      .hub { fill: #1f6feb; }
+      .t { fill: #e6edf3; }
+      .sub { fill: #9198a1; }
+      .you { fill: #58a6ff; }
+      .agent { fill: #ff7bd5; }
+      .line { stroke: #6e7681; }
+      .head { fill: #6e7681; }
+    }
+  </style>
+  <rect class="bg" width="1200" height="460" rx="16"/>
+
+  <!-- the two peers -->
+  <rect class="card" x="30" y="40" width="330" height="160" rx="18"/>
+  <text class="you" x="195" y="115" font-size="52" font-weight="800" text-anchor="middle">You</text>
+  <text class="sub" x="195" y="160" font-size="26" text-anchor="middle">in the browser</text>
+
+  <rect class="card" x="30" y="260" width="330" height="160" rx="18"/>
+  <text class="agent" x="195" y="335" font-size="52" font-weight="800" text-anchor="middle">Your agent</text>
+  <text class="sub" x="195" y="380" font-size="26" text-anchor="middle">on the command line</text>
+
+  <!-- both feed one session -->
+  <path class="line" d="M360 120 C 420 120, 420 230, 470 230"/>
+  <path class="line" d="M360 340 C 420 340, 420 230, 470 230"/>
+  <polygon class="head" points="470,216 494,230 470,244"/>
+
+  <rect class="hub" x="500" y="120" width="380" height="220" rx="22"/>
+  <text class="hubt" x="690" y="210" font-size="50" font-weight="800" text-anchor="middle">one debug</text>
+  <text class="hubt" x="690" y="266" font-size="50" font-weight="800" text-anchor="middle">session</text>
+  <text class="hubt" x="690" y="310" font-size="24" text-anchor="middle" opacity="0.85">both see every stop</text>
+
+  <path class="line" d="M880 230 L 916 230"/>
+  <polygon class="head" points="914,216 938,230 914,244"/>
+
+  <rect class="card" x="944" y="150" width="226" height="160" rx="18"/>
+  <text class="t" x="1057" y="225" font-size="40" font-weight="800" text-anchor="middle">your</text>
+  <text class="t" x="1057" y="272" font-size="40" font-weight="800" text-anchor="middle">program</text>
+</svg>

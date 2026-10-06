@@ -7,18 +7,12 @@
   built in <a href="https://github.com/milo-language/milo">Milo</a>
 </p>
 
-dapweb lets you control a debugger from a web ui, as well as programmatically control a debugger from a cli. All clients interacting with the debugger view the same output.
+**You and your AI agent drive the same debugger at the same time.** You click in a web UI,
+your agent types `dapweb api` commands, and both of you see every stop.
 
-```mermaid
-flowchart LR
-  browser["browser tab(s)"] <-- "commands / streamed events" --> server["dapweb server"]
-  cli["dapweb api&nbsp;&nbsp;(agent, script)"] <-- "commands / JSON replies" --> server
-  server <-- DAP --> adapter["debug adapter (lldb-dap, debugpy, ...)"]
-  adapter --- debuggee["your program"]
-```
-
-One session, many peers: commands from any peer funnel into the same debugger,
-and every event is broadcast back to all of them.
+<p align="center">
+  <img src="docs/images/how-it-works.svg" alt="You (in the browser) and your agent (on the command line) both drive one debug session, which runs your program" width="900">
+</p>
 
 To start the web ui, run
 ```
