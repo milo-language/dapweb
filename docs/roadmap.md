@@ -129,6 +129,8 @@ Inspiration: messenger.com. Huge bold headline in the accent colour, lots of whi
 copy + install one-liner on the left, overlapping tilted screenshots on the right (browser
 UI over a terminal running `dapweb api`: the "one session, two peers" story), animated mark
 in place of the mascot.
+Decided: GitHub Pages (`docs/site/index.html`, static), light page with the dark app
+screenshots. README links to it.
 
 ## Phase 6: cleanup (S5, R1-R3)
 
