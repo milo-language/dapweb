@@ -111,9 +111,12 @@ self_suite  inlinevalues
 self_suite  primary
 self_suite  threadlabel
 self_suite  session-reducer
+self_suite  follow
+self_suite  recordedstops
 self_suite  hermetic
 self_suite  api
 self_suite  e2e-agent
+self_suite  e2e-timeline
 self_suite  e2e-config
 self_suite  e2e-attach
 self_suite  e2e-commands

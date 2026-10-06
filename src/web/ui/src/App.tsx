@@ -21,6 +21,8 @@ import { WatchPanel, Watch } from "./WatchPanel";
 import { ThreadsPanel } from "./ThreadsPanel";
 import { ExceptionsPanel } from "./ExceptionsPanel";
 import { BottomPanel, BottomTab } from "./BottomPanel";
+import { followTarget, loadFollow, saveFollow } from "./follow";
+import type { Flash } from "./SourceView";
 
 // Enriched hover payload: the evaluated value plus, for aggregates/pointers,
 // one level of expanded members (name/type/value) rendered in the tooltip.
@@ -62,6 +64,12 @@ export default function App() {
   const [showConfig, setShowConfig] = useState(false);
   // Last thing another peer said it was doing, shown briefly in the toolbar.
   const [agentNote, setAgentNote] = useState<{ text: string; at: number } | null>(null);
+  // Follow the agent: an agent's stop, breakpoint or opened file is brought into
+  // view and flashed. Per tab, so one watcher can follow while another reads.
+  const [follow, setFollow] = useState(loadFollow);
+  const followRef = useRef(follow);
+  followRef.current = follow;
+  const [flash, setFlash] = useState<(Flash & { path: string }) | undefined>(undefined);
   const [stopMain, setStopMain] = useState(() => localStorage.getItem("dapweb.stopAtMain") !== "0");
   // Monotonic counters so re-clicking the same line still reveals it.
   const [jump, setJump] = useState({ line: 0, n: 0 });
@@ -241,6 +249,11 @@ export default function App() {
       // the terminal, the editor tabs, the URL, and routing RPC replies.
       dispatch(m);
       if (routeReply(m)) return;
+      const ft = followTarget(m, followRef.current);
+      if (ft?.flash) setFlash((f) => ({ path: ft.path, line: ft.line, n: (f?.n ?? 0) + 1, at: Date.now() }));
+      // A stop and a source already switch the editor below; a breakpoint never
+      // did, so following one is the only reason to open its file.
+      if (ft && m.type === "breakpoint") openFile(ft.path);
       if (m.type === "hello") {
         setViewPath(m.sourcePath || "");
         setDbgTag(m.adapterId || "debugger");
@@ -305,7 +318,9 @@ export default function App() {
       else if (m.type === "source") {
         if (m.path) {
           setTabs((t) => (t.includes(m.path) ? t : [...t, m.path]));
-          setViewPath(m.path);
+          // An agent opening a file is the agent reading, not the user: with
+          // follow off it waits as a tab instead of replacing what is on screen.
+          if (m.by !== "agent" || followRef.current) setViewPath(m.path);
           const pj = pendJumpRef.current;
           if (pj && pj.path === m.path) {
             setJump((j) => ({ line: pj.line, n: j.n + 1 }));
@@ -644,6 +659,9 @@ export default function App() {
             localStorage.setItem("dapweb.stopAtMain", e.target.checked ? "1" : "0");
           }} /> {attachMode ? "stop on attach" : "stop at main"}
         </label>
+        <span className={"termchip follow-chip" + (follow ? " on" : "")} role="switch" aria-checked={follow}
+              data-tip="Follow agent: when an agent stops the program, sets a breakpoint or opens a file, show that line here and flash it"
+              onClick={() => { setFollow(!follow); saveFollow(!follow); }}>follow agent</span>
         {agentNote && <span className="agent-note" data-tip={agentNote.text}>◆ {agentNote.text}</span>}
         <span className={"status " + status.cls} data-tip={status.text}>{status.short}</span>
         {/* Three unlabelled glyphs (ⓘ, +, ⚙) asked the reader to remember which
@@ -663,7 +681,7 @@ export default function App() {
                     stopPath={stopPath} stopLine={stopLine} caps={caps} jump={jump}
                     disasm={disasm} inlineAsm={inlineAsm} fetchDisasm={fetchDisasm}
                     onToggleBp={toggleBp} onSetBpMeta={setBpMeta} onHoverEval={evalHover}
-                    stop={S.stop} stopSeq={stopSeq} onRunToLine={runToLine} onGotoLine={gotoLine}
+                    stop={S.stop} stopSeq={stopSeq} onRunToLine={runToLine} onGotoLine={gotoLine} flash={flash}
                     emptyHint={!targetSet ? "none"
                       : stopped ? (caps.supportsDisassembleRequest ? "disassembling…" : "no source available for this frame")
                       : attachMode ? "Run attaches and opens the source where the process stops"
@@ -720,7 +738,7 @@ export default function App() {
           />
         )}
       </main>
-      <BottomPanel tab={tab} setTab={setTab} memLinks={memLinks} hasRegisters={S.hasRegisters} binTab={binTab}
+      <BottomPanel sessionId={S.sessionId} openFile={openFile} tab={tab} setTab={setTab} memLinks={memLinks} hasRegisters={S.hasRegisters} binTab={binTab}
                    binInfo={binInfo} dbgLabel={dbgLabel} termRef={termRef} consoleAppend={consoleAppend}
                    frame0Ref={frame0Ref} caps={caps} stopped={stopped} locals={locals} frames={frames}
                    stopSeq={stopSeq} registersRef={registersRef} setVar={setVar} viewMemory={viewMemory}

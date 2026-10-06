@@ -340,8 +340,13 @@ const IS_MAC = typeof navigator !== "undefined" && /Mac|iP(hone|ad)/.test(naviga
 // per-instruction addr strings, so compare as BigInt.
 function normAddr(a: string): string { try { return BigInt(a).toString(16); } catch { return a; } }
 
+export type Flash = { line: number; n: number; at: number };
+// A flash older than this was for a file the user was not looking at; landing
+// on that file later must not replay it as if it just happened.
+const FLASH_STALE_MS = 3000;
+
 export default function SourceView({ text, lang, bps, stopLine, onToggle, onSetMeta, onHoverEval, caps, jump, onLineClick, asmByLine, asmPc,
-                                     inlineVals, lineActions }: {
+                                     inlineVals, lineActions, flash }: {
   text: string; lang: string; bps: Map<number, BpMeta>; stopLine: number;
   onToggle: (ln: number) => void; onSetMeta: (ln: number, meta: BpMeta) => void;
   onHoverEval?: (expr: string) => Promise<HoverInfo | null>;
@@ -356,6 +361,8 @@ export default function SourceView({ text, lang, bps, stopLine, onToggle, onSetM
   // Inline values: source line → the locals drawn after its end.
   inlineVals?: Map<number, InlineVal[]>;
   lineActions?: LineActions;
+  // An agent just acted on this line (follow agent): reveal it and flash it.
+  flash?: Flash;
 }) {
   // Only the source view that actually evaluates hovers owns the shared holder —
   // the asm/disasm views pass no onHoverEval and must NOT null it (doing so
@@ -529,6 +536,23 @@ export default function SourceView({ text, lang, bps, stopLine, onToggle, onSetM
     }
     decoRef.current?.set(decos);
   }, [bps, stopLine, text]);
+
+  // After the decorations effect, so the text this line indexes is in the model.
+  // Reveal never focuses: the user may be typing in the console.
+  const flashN = useRef(0);
+  useEffect(() => {
+    const ed = edRef.current, model = ed?.getModel();
+    if (!ed || !model || !flash || flash.n === flashN.current) return;
+    if (Date.now() - flash.at > FLASH_STALE_MS || flash.line < 1 || flash.line > model.getLineCount()) return;
+    flashN.current = flash.n;
+    ed.revealLineInCenterIfOutsideViewport(flash.line);
+    const c = ed.createDecorationsCollection([{
+      range: new monaco.Range(flash.line, 1, flash.line, 1),
+      options: { isWholeLine: true, className: "agent-flash" },
+    }]);
+    const t = setTimeout(() => c.clear(), 1500);
+    return () => { clearTimeout(t); c.clear(); };
+  }, [flash, text]);
 
   return (
     <div className="source-wrap">

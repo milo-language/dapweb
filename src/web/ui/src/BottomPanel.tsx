@@ -12,8 +12,9 @@ import { RegistersPanel } from "./RegistersPanel";
 import { StackView } from "./StackView";
 import { BinInfoView } from "./BinInfoView";
 import type { SetVarFn } from "./VarList";
+import { Timeline } from "./Timeline";
 
-export type BottomTab = "term" | "mem" | "stack" | "regs" | "bin";
+export type BottomTab = "term" | "mem" | "stack" | "regs" | "bin" | "timeline";
 
 export function BottomPanel(p: {
   tab: BottomTab; setTab: (t: BottomTab) => void;
@@ -23,6 +24,7 @@ export function BottomPanel(p: {
   locals: Var[]; frames: Frame[]; stopSeq: number; registersRef: number; regions: Region[];
   setVar: SetVarFn; viewMemory: (a: string) => void;
   mem: { addr: string; bytes: Uint8Array } | null; memAddr: string; setMemAddr: (a: string) => void; memErr: string;
+  sessionId: string; openFile: (path: string, line?: number) => void;
 }) {
   const { tab, setTab, memLinks, binTab, binInfo, dbgLabel, termRef, caps, stopped, frames, stopSeq, viewMemory } = p;
   const [bottomH, setBottomH] = useState(240);
@@ -64,6 +66,7 @@ export function BottomPanel(p: {
         {binTab && (
           <div className={"tab" + (tab === "bin" ? " active" : "")} onClick={() => setTab("bin")}>Binary</div>
         )}
+        <div className={"tab" + (tab === "timeline" ? " active" : "")} onClick={() => setTab("timeline")}>Timeline</div>
         {tab === "term" && (
           <span className="termlegend">
             <span className={"termchip" + (termShown.has("prog") ? " on" : "")} onClick={() => toggleTerm("prog")}
@@ -109,6 +112,13 @@ export function BottomPanel(p: {
           toolbar with no room to say what it was. It is a report about the
           thing being debugged, so it belongs where the other reports are —
           and here it has the width to print a path without wrapping. */}
+      {/* Mounted only when visible: it reloads from the journal on mount, so
+          nothing is lost, and a hidden tab does no fetch per stop. */}
+      {tab === "timeline" && (
+        <div className="tabpane tlpane">
+          <Timeline sessionId={p.sessionId} stopSeq={stopSeq} openFile={p.openFile} />
+        </div>
+      )}
       {tab === "bin" && binTab && (
         <div className="tabpane binpane">
           <BinInfoView info={binInfo} />

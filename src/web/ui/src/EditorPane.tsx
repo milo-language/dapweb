@@ -1,7 +1,7 @@
 // The editor column: file tabs, the source, and the disassembly beside it, in
 // place of it (a frame with no source), or inline under each line.
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import SourceView, { langFor, BpMeta, HoverVar, LineActions } from "./SourceView";
+import SourceView, { langFor, BpMeta, HoverVar, LineActions, Flash } from "./SourceView";
 import { tabLabels } from "./tabLabels";
 import { base, hasSrc, Stop } from "./session";
 import { inlineValues, nextChanged } from "./inlineValues";
@@ -34,7 +34,7 @@ function buildAsm(d: { lines: Insn[]; pc: string }): { text: string; pcLine: num
 
 export function EditorPane({ tabs, viewPath, openFile, files, bps, stopPath, stopLine, caps, jump, disasm, inlineAsm,
                              fetchDisasm, onToggleBp, onSetBpMeta, onHoverEval, emptyHint, stop, stopSeq,
-                             onRunToLine, onGotoLine }: {
+                             onRunToLine, onGotoLine, flash }: {
   tabs: string[]; viewPath: string; openFile: (path: string, line?: number) => void;
   files: Map<string, string>; bps: Map<string, BpMeta>;
   stopPath: string; stopLine: number; caps: Record<string, any>; jump: { line: number; n: number };
@@ -48,6 +48,7 @@ export function EditorPane({ tabs, viewPath, openFile, files, bps, stopPath, sto
   stop: Stop | null; stopSeq: number;
   onRunToLine: (path: string, line: number) => void;
   onGotoLine: (path: string, line: number) => void;
+  flash?: Flash & { path: string };
 }) {
   const tabLabel = useMemo(() => tabLabels(tabs), [tabs]);
   const srcText = files.get(viewPath) ?? "";
@@ -168,7 +169,8 @@ export function EditorPane({ tabs, viewPath, openFile, files, bps, stopPath, sto
                           onToggle={onToggleBp} onSetMeta={onSetBpMeta} onHoverEval={onHoverEval}
                           caps={caps} jump={jump}
                           asmByLine={inlineAsm && viewPath === stopPath ? asmByLine : undefined}
-                          asmPc={disasm?.pc} inlineVals={inlineVals} lineActions={lineActions} />
+                          asmPc={disasm?.pc} inlineVals={inlineVals} lineActions={lineActions}
+                          flash={flash?.path === viewPath ? flash : undefined} />
               {asm && !inlineAsm && asmPane}
             </>
           );

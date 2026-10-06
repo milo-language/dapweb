@@ -644,9 +644,42 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
 
 /* Another peer is driving. Magenta everywhere, matching the console tag, so the
    two readings of the same event are obviously the same event. */
-.agent-note { margin-left: auto; font-size: 11px; color: var(--agent); max-width: 420px;
+.agent-note { margin-left: 10px; font-size: 11px; color: var(--agent); max-width: 420px;
               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.agent-note + .status { margin-left: 12px; }
+.agent-note + .status, .follow-chip + .status { margin-left: 12px; }
+/* Pushes the agent cluster (toggle, note) and the status pill to the right. */
+.follow-chip { margin-left: auto; font-size: 11px; }
+/* The line an agent just acted on (follow agent). A tint that fades out; with
+   reduced motion it holds still and is simply removed when the flash ends. */
+.agent-flash { background: color-mix(in srgb, var(--agent) 30%, transparent);
+               animation: agent-flash 1.5s ease-out forwards; }
+@keyframes agent-flash { from { background: color-mix(in srgb, var(--agent) 45%, transparent); }
+                         to { background: transparent; } }
+@media (prefers-reduced-motion: reduce) { .agent-flash { animation: none; } }
+
+/* ── Timeline (bottom-panel tab): recorded stops, read back from the journal ── */
+.tlpane { display: flex; }
+.timeline { display: flex; flex: 1; min-height: 0; font-size: 11px; }
+.tl-list { width: 46%; min-width: 260px; overflow: auto; border-right: 1px solid var(--border); padding: 4px 0; }
+.tl-row { display: grid; grid-template-columns: 64px 84px 1fr auto; gap: 8px; padding: 3px 10px;
+          cursor: pointer; border-left: 2px solid transparent; white-space: nowrap; }
+.tl-row:hover { background: var(--row-hover); }
+.tl-row.sel { background: var(--surface); }
+/* An agent's stop, and only that, takes --agent. */
+.tl-row.agent { border-left-color: var(--agent); }
+.tl-row.agent .tl-who, .tl-by-agent { color: var(--agent); }
+.tl-time, .tl-where, .tl-fname, .tl-floc, .tl-vname, .tl-vval { font-family: var(--mono); }
+.tl-time, .tl-who, .tl-floc { color: var(--muted); }
+.tl-where, .tl-who { overflow: hidden; text-overflow: ellipsis; }
+.tl-detail { flex: 1; overflow: auto; padding: 6px 12px; }
+.tl-head { margin-bottom: 6px; }
+.tl-link { font-family: var(--mono); cursor: pointer; text-decoration: underline dotted; }
+.tl-ro { margin-left: 10px; padding: 0 6px; border-radius: 4px; font-size: 9px;
+         background: var(--chip-bg); color: var(--chip-fg); }
+.tl-sec { color: var(--muted); margin: 8px 0 3px; }
+.tl-frame { display: flex; gap: 10px; padding: 1px 0; }
+.tl-var { padding: 1px 0; }
+.tl-note { color: var(--muted); padding: 6px 10px; }
 
 /* ── Binary details (bottom-panel tab) ───────────────────────────────────── */
 .binpane { display: flex; }
