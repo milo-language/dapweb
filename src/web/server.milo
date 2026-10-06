@@ -1839,28 +1839,65 @@ fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
     }
 }
 
-// One client command (the `{"cmd": ...}` JSON the browser sends over WS).
-// Factored out of the WS reader so the HTTP API can drive the exact same verbs:
-// one vocabulary, so `dapweb api` cannot drift from what the UI does.
-// One human-readable line for what a command is about to do. Only the verbs an
-// onlooker would care about get spelled out; anything else falls back to its name.
-fn activityText(c: &string, doc: &Json): string {
-    // Only the cases that can say something the table cannot — which line, which
-    // expression. Everything else takes the table's verb, so there is no second
-    // list of commands here to fall behind the first.
-    if c == "evaluate" {
-        return $"evaluate `{dStr(doc, "expr")}`"
+// One client command (the `{"cmd": ...}` JSON the browser sends over WS), as a
+// handler sees it. Factored out of the WS reader so the HTTP API drives the
+// exact same verbs: one vocabulary, so `dapweb api` cannot drift from the UI.
+struct Cmd {
+    name: string,
+    doc: Json, // the payload, parsed once
+    payload: string, // setConfig hands the payload itself to applyConfig
+    peerKind: string,
+    bus: Channel<string>,
+    pendCh: Channel<Pending>,
+}
+
+impl Cmd {
+    fn str(self: &Self, key: &string): string {
+        return self.doc.str(key) ?? ""
     }
-    if c == "setBreakpoint" {
-        return $"set a breakpoint at line {dI64(doc, "line", 0 as i64)}"
+
+    fn int(self: &Self, key: &string, fallback: i64): i64 {
+        return self.doc.i64(key) ?? fallback
     }
-    if c == "clearBreakpoint" {
-        return $"clear the breakpoint at line {dI64(doc, "line", 0 as i64)}"
+
+    fn flag(self: &Self, key: &string, fallback: bool): bool {
+        return self.doc.bool(key) ?? fallback
     }
-    if c == "setVar" {
-        return $"set {dStr(doc, "name")} = {dStr(doc, "value")}"
+}
+
+// Send a DAP request whose response D routes back by `kind`; a no-op with no
+// run live. Registered before the send: D drains pendings after each recv, so
+// the entry must exist before the adapter can possibly reply, or the response
+// is dropped unmatched.
+fn sendPending(pendCh: &Channel<Pending>, kind: &string, id: i64, extra: string, command: &string, args: &string): void {
+    if let Option.Some(dfd) = gSession.proc.dapIn {
+        let seq = gSession.proc.nextSeq()
+        let _p = pendCh.trySend(Pending {
+            seq: seq, kind: kind.clone(), id: id, extra: extra
+        }
+        )
+        sendReqFd(dfd, seq, command, args)
     }
-    return cmdVerb(c)
+}
+
+// One human-readable line for what a command is about to do. Only the cases
+// that can say something the table cannot (which line, which expression);
+// everything else takes the table's verb, so there is no second list of
+// commands here to fall behind the first.
+fn activityText(cmd: &Cmd): string {
+    if cmd.name == "evaluate" {
+        return $"evaluate `{cmd.str("expr")}`"
+    }
+    if cmd.name == "setBreakpoint" {
+        return $"set a breakpoint at line {cmd.int("line", 0 as i64)}"
+    }
+    if cmd.name == "clearBreakpoint" {
+        return $"clear the breakpoint at line {cmd.int("line", 0 as i64)}"
+    }
+    if cmd.name == "setVar" {
+        return $"set {cmd.str("name")} = {cmd.str("value")}"
+    }
+    return cmdVerb(cmd.name)
 }
 
 // Which file a command means, canonical. The breakpoint commands fall back to
@@ -1869,11 +1906,45 @@ fn activityText(c: &string, doc: &Json): string {
 // breakpoint itself is stored under, and two spellings of one path is exactly
 // what would make those counts wrong.
 fn cmdPath(c: &string, doc: &Json): string {
-    var path = absSourcePath(dStr(doc, "path"))
+    var path = absSourcePath(doc.str("path") ?? "")
     if path.len == 0 && (c == "setBreakpoint" || c == "clearBreakpoint") {
         path = absSourcePath(gSession.target.spec.srcPath)
     }
     return path
+}
+
+// The handler for each command in ../commands' table. A known name with no arm
+// here is refused like an unknown one. tests/e2e-commands.ts reads these arms
+// to check that this match and the table agree in both directions.
+fn cmdHandler(name: string): Option<(&Cmd) => void> {
+    match name {
+        "setBreakpoint" => { return Option.Some(cmdBreakpoint) }
+        "clearBreakpoint" => { return Option.Some(cmdBreakpoint) }
+        "run" => { return Option.Some(cmdRun) }
+        "continue" => { return Option.Some(cmdStep) }
+        "stepOver" => { return Option.Some(cmdStep) }
+        "stepIn" => { return Option.Some(cmdStep) }
+        "stepOut" => { return Option.Some(cmdStep) }
+        "pause" => { return Option.Some(cmdStep) }
+        "restart" => { return Option.Some(cmdRestart) }
+        "kill" => { return Option.Some(cmdKill) }
+        "evaluate" => { return Option.Some(cmdEvaluate) }
+        "expand" => { return Option.Some(cmdExpand) }
+        "threadStack" => { return Option.Some(cmdThreadStack) }
+        "frameScopes" => { return Option.Some(cmdFrameScopes) }
+        "setExceptions" => { return Option.Some(cmdSetExceptions) }
+        "complete" => { return Option.Some(cmdComplete) }
+        "readMem" => { return Option.Some(cmdReadMem) }
+        "setVar" => { return Option.Some(cmdSetVar) }
+        "disassemble" => { return Option.Some(cmdDisassemble) }
+        "openSource" => { return Option.Some(cmdOpenSource) }
+        "stdin" => { return Option.Some(cmdStdin) }
+        "resize" => { return Option.Some(cmdResize) }
+        "setConfig" => { return Option.Some(cmdSetConfig) }
+        "importHistory" => { return Option.Some(cmdImportHistory) }
+        "newSession" => { return Option.Some(cmdNewSession) }
+        _ => { return Option.None }
+    }
 }
 
 // Returns whether the command was recognised. A caller that answers over HTTP
@@ -1883,412 +1954,322 @@ fn cmdPath(c: &string, doc: &Json): string {
 // the human "the agent is attempting to frobnicate" about a command that will
 // not run is worse than saying nothing.
 fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
-    // Parse the payload ONCE; every field read below is a cursor hop on this
-    // doc. The old per-field jStr/jI64 helpers re-parsed the message each call.
     let Result.Ok(doc) = Json.parse(payload) else {
         journalCmd("", peerKind, peerLabel, false, "not a dapweb command", payload, "")
         return false
     }
-    let c = dStr(doc, "cmd")
-    if !isKnownCmd(c) {
+    let c = doc.str("cmd") ?? ""
+    var handler: Option<(&Cmd) => void> = Option.None
+    if isKnownCmd(c) {
+        handler = cmdHandler(c.clone())
+    }
+    let Option.Some(run) = handler else {
         journalCmd(c, peerKind, peerLabel, false, "not a dapweb command", payload, "")
         return false
     }
     journalCmd(c, peerKind, peerLabel, true, "", payload, cmdPath(c, doc))
+    let cmd = Cmd {
+        name: c, doc: doc, payload: payload, peerKind: peerKind,
+        bus: bus.clone(), pendCh: pendCh.clone(),
+    }
     // A browser peer's actions are self-evident to whoever performed them; an
     // agent's are not. Announce before acting, so the human watching the UI is
     // never surprised by a program that moves on its own.
-    if peerKind != "browser" {
-        let who = peerLabel
-        let what = activityText(c, doc)
-        logEvent("agent", $"{who} is attempting to {what}")
+    if cmd.peerKind != "browser" {
+        let what = activityText(cmd)
+        logEvent("agent", $"{peerLabel} is attempting to {what}")
         wsPush(bus, Json.obj().str("type", "activity")
-            .str("peer", peerKind).str("who", who).str("cmd", c)
-            .str("text", $"{who} is attempting to {what}").build())
+            .str("peer", cmd.peerKind).str("who", peerLabel).str("cmd", cmd.name)
+            .str("text", $"{peerLabel} is attempting to {what}").build())
     }
-    if c == "setBreakpoint" || c == "clearBreakpoint" {
-        let line = dI64(doc, "line", 0 as i64)
-        let path = cmdPath(c, doc)
-        // Upsert: drop any existing bp at (path, line), then re-add for
-        // "set" (a condition edit is a set on an existing line).
-        var keep: Vec<Bp> = []
-        for bp in gSession.persisted.bps {
-            if bp.line != line || bp.path != path {
-                keep.push(cloneBp(bp))
-            }
-        }
-        gSession.persisted.bps = keep
-        if c == "setBreakpoint" {
-            gSession.persisted.bps.push(Bp {
-                path: path.clone(),
-                line: line,
-                condition: dStr(doc, "condition"),
-                hitCondition: dStr(doc, "hitCondition"),
-                logMessage: dStr(doc, "logMessage"),
-                enabled: dBool(doc, "enabled", true),
-            }
-            )
-        }
-        persistBps()
-        // Echo the resulting state: for a set that is the stored breakpoint, for
-        // a clear a bare (path, line) is all a peer needs to drop its own copy.
-        let ack = Bp {
-            path: path.clone(), line: line,
-            condition: dStr(doc, "condition"),
-            hitCondition: dStr(doc, "hitCondition"),
-            logMessage: dStr(doc, "logMessage"),
-            enabled: dBool(doc, "enabled", true),
-        }
-        wsPush(bus, bpAckMsg(ack, c == "setBreakpoint"))
-        if let Option.Some(dfd) = gSession.proc.dapIn {
-            let seq = gSession.proc.nextSeq()
-            // Register before sending (here and below): D drains pendings
-            // after each recv, so the entry must exist before the adapter
-            // can possibly reply or the response is dropped unmatched.
-            let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "bpLive", id: 0, extra: ""
-            }
-            )
-            sendReqFd(dfd, seq, "setBreakpoints", buildBpArgsForPath(gSession.persisted.bps, path))
-        }
-    } else if c == "run" {
-        // The editor is the source of truth: an inline `config` object rides
-        // the run and is applied just before launch — no staging. A live
-        // session requires force:true (the client confirms with the user),
-        // which kills it and reruns with the new config after teardown.
-        var cfgRaw: string = ""
-        if let Option.Some(v) = doc.get("config") {
-            if v.isObject() {
-                cfgRaw = v.rawStr()
-            }
-        }
-        if gSession.proc.started {
-            var killFd: Option<i32> = Option.None
-            if dBool(doc, "force", false) {
-                killFd = gSession.proc.dapIn
-            }
-            if let Option.Some(dfd) = killFd {
-                var pcfg: Option<string> = Option.None
-                if cfgRaw.len > 0 {
-                    pcfg = Option.Some(cfgRaw)
-                }
-                gSession.proc.pendingRun = Option.Some(PendingRun {
-                    config: pcfg,
-                    stopAtMain: dBool(doc, "stopAtMain", gSession.target.spec.stopAtMain),
-                }
-                )
-                logEvent("run killed", $"forced by {peerKind} peer — relaunching")
-                let seq = gSession.proc.nextSeq()
-                let _p = pendCh.trySend(Pending {
-                    seq: seq, kind: "disc", id: 0, extra: ""
-                }
-                )
-                sendReqFd(dfd, seq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
-            } else {
-                wsPush(bus, configErrMsg("a debug session is already active — run with force:true to kill and relaunch"))
-            }
-        } else {
-            var cfgErr: string = ""
-            if cfgRaw.len > 0 {
-                cfgErr = applyConfig(cfgRaw, "")
-                if cfgErr.len == 0 {
-                    logEvent("target changed", $"{gSession.target.spec.binPath}  (by {peerKind} peer)")
-                    loadBps()
-                    pushHelloState(bus)
-                }
-            }
-            if cfgErr.len > 0 {
-                wsPush(bus, configErrMsg(cfgErr))
-            } else if gSession.target.spec.binPath.len == 0 && gSession.target.spec.request != "attach" {
-                // Booted idle with no target: nudge to the config drawer instead
-                // of spawning the adapter with an empty program path.
-                wsPush(bus, configErrMsg("no program configured — set a debug target (⚙) before running"))
-            } else {
-                gSession.target.stopAtMain = dBool(doc, "stopAtMain", gSession.target.spec.stopAtMain)
-                let _ok = startRun(bus, pendCh)
-            }
-        }
-    } else if c == "continue" || c == "stepOver" || c == "stepIn" || c == "stepOut" || c == "pause" {
-        if c != "pause" {
-            gSession.stop.resume()
-        }
-        if let Option.Some(dfd) = gSession.proc.dapIn {
-            var dapCmd: string = "continue"
-            if c == "stepOver" {
-                dapCmd = "next"
-            } 
-            else if c == "stepIn" {
-                dapCmd = "stepIn"
-            } 
-            else if c == "stepOut" {
-                dapCmd = "stepOut"
-            } 
-            else if c == "pause" {
-                dapCmd = "pause"
-            }
-            let t = dI64(doc, "tid", 1 as i64)
-            if c == "pause" && t < 0 {
-                // Attach flow: Pause can arrive before any stop, so
-                // there's no tid yet — ask for threads and pause the first.
-                let seq = gSession.proc.nextSeq()
-                let _p = pendCh.trySend(Pending {
-                    seq: seq, kind: "thrPause", id: 0, extra: ""
-                }
-                )
-                sendReqFd(dfd, seq, "threads", "{}")
-            } else {
-                var b = Json.obj().int("threadId", t)
-                // instruction-granularity stepping from the asm pane.
-                let gran = dStr(doc, "granularity")
-                if gran.len > 0 {
-                    b = b.str("granularity", gran)
-                }
-                let seq = gSession.proc.nextSeq()
-                sendReqFd(dfd, seq, dapCmd, b.build())
-            }
-        }
-    } else if c == "restart" {
-        gSession.stop.resume()
-        // native restart — adapter re-launches with the same launch
-        // config; gBps and the stop-at-main function bp persist. UI gates
-        // this on supportsRestartRequest (kill+rerun is its fallback). A
-        // config change is a Run (force-kills), not a restart.
-        if let Option.Some(dfd) = gSession.proc.dapIn {
-            let seq = gSession.proc.nextSeq()
-            let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "restartR", id: 0, extra: ""
-            }
-            )
-            sendReqFd(dfd, seq, "restart", Json.obj().build())
-        }
-    } else if c == "kill" {
-        // End the session: adapter tears down the debuggee and exits; the
-        // reader loop's terminated/EOF path re-arms `run` via endCh.
-        logEvent("kill requested", $"(by {peerKind} peer)")
-        if let Option.Some(dfd) = gSession.proc.dapIn {
-            let seq = gSession.proc.nextSeq()
-            let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "disc", id: 0, extra: ""
-            }
-            )
-            sendReqFd(dfd, seq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
-        }
-        // The child session debugs the process; the PARENT is what spawned it.
-        // Disconnecting only the child leaves the program running with nobody
-        // attached, which reads in the UI as "killed" and is not.
-        if let Option.Some(pfd) = gSession.proc.parentIn {
-            sendReqFd(pfd, gSession.proc.oddSeq + 1, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
-        }
-    } else if c == "evaluate" {
-        if let Option.Some(dfd) = gSession.proc.dapIn {
-            let id = dI64(doc, "id", 0 as i64)
-            let frameId = dI64(doc, "frameId", -1 as i64)
-            var b = Json.obj().str("expression", dStr(doc, "expr"))
-                .str("context", dStr(doc, "context"))
-            if frameId >= 0 {
-                b = b.int("frameId", frameId)
-            }
-            let seq = gSession.proc.nextSeq()
-            let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "eval", id: id, extra: ""
-            }
-            )
-            sendReqFd(dfd, seq, "evaluate", b.build())
-        }
-    } else if c == "expand" {
-        if let Option.Some(dfd) = gSession.proc.dapIn {
-            let id = dI64(doc, "id", 0 as i64)
-            let seq = gSession.proc.nextSeq()
-            let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "expand", id: id, extra: ""
-            }
-            )
-            sendReqFd(dfd, seq, "variables", Json.obj().int("variablesReference", dI64(doc, "ref", 0 as i64)).build())
-        }
-    } else if c == "threadStack" {
-        // stack for a clicked thread; the UI then drives frameScopes
-        // for its locals like any other frame selection.
-        if let Option.Some(dfd) = gSession.proc.dapIn {
-            let id = dI64(doc, "id", 0 as i64)
-            let t = dI64(doc, "tid", 1 as i64)
-            let seq = gSession.proc.nextSeq()
-            let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "tst", id: id, extra: t.toString()
-            }
-            )
-            sendReqFd(dfd, seq, "stackTrace", Json.obj().int("threadId", t).int("startFrame", 0).int("levels", 20).build())
-        }
-    } else if c == "frameScopes" {
-        // locals for a user-selected stack frame.
-        if let Option.Some(dfd) = gSession.proc.dapIn {
-            let id = dI64(doc, "id", 0 as i64)
-            let seq = gSession.proc.nextSeq()
-            let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "fsc", id: id, extra: ""
-            }
-            )
-            sendReqFd(dfd, seq, "scopes", Json.obj().int("frameId", dI64(doc, "frameId", 0 as i64)).build())
-        }
-    } else if c == "setExceptions" {
-        // selected exception filter ids. Stored globally so session
-        // init applies them; live-applied when a session is running.
-        var arr = Json.arr()
-        let f = doc.curField(doc.curRoot(), "filters")
-        let n = doc.curLen(f)
-        var i: i64 = 0
-        while i < n {
-            arr = arr.str(doc.curStr(doc.curChild(f, i)) ?? "")
-            i = i + 1
-        }
-        gSession.target.excFilters = Option.Some(arr.build())
-        if let Option.Some(dfd) = gSession.proc.dapIn {
-            let seq = gSession.proc.nextSeq()
-            let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "ebLive", id: 0, extra: ""
-            }
-            )
-            sendReqFd(dfd, seq, "setExceptionBreakpoints", excArgs())
-        }
-    } else if c == "complete" {
-        // debug-console completions.
-        if let Option.Some(dfd) = gSession.proc.dapIn {
-            let id = dI64(doc, "id", 0 as i64)
-            let frameId = dI64(doc, "frameId", -1 as i64)
-            var b = Json.obj().str("text", dStr(doc, "text"))
-                .int("column", dI64(doc, "column", 1 as i64))
-            if frameId >= 0 {
-                b = b.int("frameId", frameId)
-            }
-            let seq = gSession.proc.nextSeq()
-            let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "cmpl", id: id, extra: ""
-            }
-            )
-            sendReqFd(dfd, seq, "completions", b.build())
-        }
-    } else if c == "readMem" {
-        // raw memory window. memoryReference is whatever the UI got
-        // from a value/ipRef; lldb-dap accepts plain hex addresses.
-        if let Option.Some(dfd) = gSession.proc.dapIn {
-            let id = dI64(doc, "id", 0 as i64)
-            let seq = gSession.proc.nextSeq()
-            let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "readmem", id: id, extra: ""
-            }
-            )
-            sendReqFd(dfd, seq, "readMemory", Json.obj().str("memoryReference", dStr(doc, "memoryReference")).int("offset", dI64(doc, "offset", 0 as i64)).int("count", dI64(doc, "count", 256 as i64)).build())
-        }
-    } else if c == "setVar" {
-        // edit a variable. ref = parent container (scope ref for
-        // top-level locals, the variable's own ref for expanded children).
-        if let Option.Some(dfd) = gSession.proc.dapIn {
-            let id = dI64(doc, "id", 0 as i64)
-            let seq = gSession.proc.nextSeq()
-            let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "setv", id: id, extra: ""
-            }
-            )
-            sendReqFd(dfd, seq, "setVariable", Json.obj().int("variablesReference", dI64(doc, "ref", 0 as i64)).str("name", dStr(doc, "name")).str("value", dStr(doc, "value")).build())
-        }
-    } else if c == "disassemble" {
-        // window of instructions around a frame's pc (memoryReference =
-        // the frame's instructionPointerReference from stackTrace).
-        if let Option.Some(dfd) = gSession.proc.dapIn {
-            let id = dI64(doc, "id", 0 as i64)
-            let seq = gSession.proc.nextSeq()
-            let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "disasm", id: id, extra: ""
-            }
-            )
-            sendReqFd(dfd, seq, "disassemble", Json.obj().str("memoryReference", dStr(doc, "memoryReference")).int("instructionOffset", -16).int("instructionCount", 64).bool("resolveSymbols", true).build())
-        }
-    } else if c == "openSource" {
-        // show the file a clicked frame lives in. sourceMsg itself
-        // handles unreadable pseudo-paths (dyld etc.) with a placeholder.
-        let p = dStr(doc, "path")
-        if p.len > 0 {
-            wsPush(bus, sourceMsg(p))
-        }
-    } else if c == "stdin" {
-        let data = dStr(doc, "data")
-        // writeOnce, not write: this runs on a peer's reader task, and parking
-        // it until a debuggee that never reads stdin drains the pty would stall
-        // every command that peer sends after it. A full pty drops input, as the
-        // raw write here always did.
-        if let Option.Some(p) = replace(gSession.proc.pty, Option.None) {
-            let _n = p.writeOnce(data)
-            gSession.proc.pty = Option.Some(p)
-        } else {
-            gSession.proc.stdinBuf = gSession.proc.stdinBuf + data
-        }
-    } else if c == "resize" {
-        let rows = dI64(doc, "rows", 0 as i64)
-        let cols = dI64(doc, "cols", 0 as i64)
-        // winsize fields are u16; anything outside is a bad payload, not a size.
-        if rows > 0 && cols > 0 && rows < 65536 && cols < 65536 {
-            gSession.proc.term = Option.Some(TermSize {
-                rows: rows, cols: cols
-            }
-            )
-            if let Option.Some(p) = replace(gSession.proc.pty, Option.None) {
-                var pty = p
-                let _r = pty.resize(rows as u16, cols as u16)
-                gSession.proc.pty = Option.Some(pty)
-            }
-        }
-    } else if c == "setConfig" {
-        // config = a VS Code launch-configuration object (see applyConfig).
-        // The browser applies configs inline on Run; setConfig is the
-        // programmatic path (`dapweb api` callers). Idle-only — a live session must be
-        // force-run to change target (setConfig never kills a debuggee).
-        if gSession.proc.started {
-            wsPush(bus, configErrMsg("a debug session is active — stop it (or Run with force) to change the target"))
-        } else {
-            let err = applyConfig(payload, "")
-            if err.len > 0 {
-                wsPush(bus, configErrMsg(err))
-            } else {
-                logEvent("target changed", $"{gSession.target.spec.binPath}  (by {peerKind} peer)")
-                    loadBps()
-                wsPush(bus, recordConfig())
-                pushHelloState(bus)
-            }
-        }
-    } else if c == "importHistory" {
-        // One-shot localStorage migration: fold the client's legacy entries
-        // into the server store, then the client stops sending (server is the
-        // sole writer thereafter). Idempotent — dedup collapses re-imports.
-        if let Option.Some(e) = doc.get("entries") {
-            if e.isArray() {
-                gSession.persisted.history = histMergeMany(gSession.persisted.history, e.rawStr(), 10 as i64)
-                persistHistory()
-                wsPush(bus, historyChangedMsg())
-            }
-        }
-    } else if c == "newSession" {
-        // Deliberate fresh start (a reload reconnects to the live session
-        // by design): end any running debuggee via the kill path, drop bps
-        // and the late-join replay snapshots, mint a new id, and re-hello
-        // every peer — each resets its client state on the id change.
-        // Target config survives; the ⚙ drawer changes it.
-        if let Option.Some(dfd) = gSession.proc.dapIn {
-            let seq = gSession.proc.nextSeq()
-            let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "disc", id: 0, extra: ""
-            }
-            )
-            sendReqFd(dfd, seq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
-        }
-        gSession.persisted.bps = []
-        persistBps()
-        gSession.stop.resume()
-        gSession.output = []
-        gSession.server.sessionId = newSessionName(sessionNameSeeds())
-        journalHere()
-        logEvent("session reset", $"new session {gSession.server.sessionId}")
-        pushHelloState(bus)
-    }
+    run(cmd)
     return true
+}
+
+fn cmdBreakpoint(cmd: &Cmd): void {
+    let set = cmd.name == "setBreakpoint"
+    let line = cmd.int("line", 0 as i64)
+    let path = cmdPath(cmd.name, cmd.doc)
+    // Upsert: drop any existing bp at (path, line), then re-add for
+    // "set" (a condition edit is a set on an existing line).
+    var keep: Vec<Bp> = []
+    for bp in gSession.persisted.bps {
+        if bp.line != line || bp.path != path {
+            keep.push(cloneBp(bp))
+        }
+    }
+    gSession.persisted.bps = keep
+    // For a set this is the stored breakpoint; for a clear a bare (path, line)
+    // is all a peer needs to drop its own copy.
+    let bp = Bp {
+        path: path.clone(), line: line,
+        condition: cmd.str("condition"),
+        hitCondition: cmd.str("hitCondition"),
+        logMessage: cmd.str("logMessage"),
+        enabled: cmd.flag("enabled", true),
+    }
+    if set {
+        gSession.persisted.bps.push(cloneBp(bp))
+    }
+    persistBps()
+    wsPush(cmd.bus, bpAckMsg(bp, set))
+    sendPending(cmd.pendCh, "bpLive", 0, "", "setBreakpoints", buildBpArgsForPath(gSession.persisted.bps, path))
+}
+
+// The editor is the source of truth: an inline `config` object rides the run
+// and is applied just before launch, no staging. A live session requires
+// force:true (the client confirms with the user), which kills it and reruns
+// with the new config after teardown.
+fn cmdRun(cmd: &Cmd): void {
+    var cfgRaw: string = ""
+    if let Option.Some(v) = cmd.doc.get("config") {
+        if v.isObject() {
+            cfgRaw = v.rawStr()
+        }
+    }
+    if gSession.proc.started {
+        if !cmd.flag("force", false) || gSession.proc.dapIn.isNone() {
+            wsPush(cmd.bus, configErrMsg("a debug session is already active — run with force:true to kill and relaunch"))
+            return
+        }
+        var pcfg: Option<string> = Option.None
+        if cfgRaw.len > 0 {
+            pcfg = Option.Some(cfgRaw)
+        }
+        gSession.proc.pendingRun = Option.Some(PendingRun {
+            config: pcfg, stopAtMain: cmd.flag("stopAtMain", gSession.target.spec.stopAtMain),
+        }
+        )
+        logEvent("run killed", $"forced by {cmd.peerKind} peer — relaunching")
+        sendPending(cmd.pendCh, "disc", 0, "", "disconnect", Json.obj().bool("terminateDebuggee", true).build())
+        return
+    }
+    if cfgRaw.len > 0 {
+        let err = applyConfig(cfgRaw, "")
+        if err.len > 0 {
+            wsPush(cmd.bus, configErrMsg(err))
+            return
+        }
+        logEvent("target changed", $"{gSession.target.spec.binPath}  (by {cmd.peerKind} peer)")
+        loadBps()
+        pushHelloState(cmd.bus)
+    }
+    if gSession.target.spec.binPath.len == 0 && gSession.target.spec.request != "attach" {
+        // Booted idle with no target: nudge to the config drawer instead
+        // of spawning the adapter with an empty program path.
+        wsPush(cmd.bus, configErrMsg("no program configured — set a debug target (⚙) before running"))
+        return
+    }
+    // After applyConfig: the payload's flag falls back to the NEW config's default.
+    gSession.target.stopAtMain = cmd.flag("stopAtMain", gSession.target.spec.stopAtMain)
+    let _ok = startRun(cmd.bus, cmd.pendCh)
+}
+
+// continue, the three steps, and pause.
+fn cmdStep(cmd: &Cmd): void {
+    let pause = cmd.name == "pause"
+    if !pause {
+        gSession.stop.resume()
+    }
+    let Option.Some(dfd) = gSession.proc.dapIn else {
+        return
+    }
+    let t = cmd.int("tid", 1 as i64)
+    if pause && t < 0 {
+        // Attach flow: Pause can arrive before any stop, so
+        // there's no tid yet — ask for threads and pause the first.
+        sendPending(cmd.pendCh, "thrPause", 0, "", "threads", "{}")
+        return
+    }
+    var dapCmd = cmd.name.clone()
+    if cmd.name == "stepOver" {
+        dapCmd = "next"
+    }
+    var b = Json.obj().int("threadId", t)
+    // instruction-granularity stepping from the asm pane.
+    let gran = cmd.str("granularity")
+    if gran.len > 0 {
+        b = b.str("granularity", gran)
+    }
+    let seq = gSession.proc.nextSeq()
+    sendReqFd(dfd, seq, dapCmd, b.build())
+}
+
+// Native restart: the adapter re-launches with the same launch config; the bps
+// and the stop-at-main function bp persist. The UI gates this on
+// supportsRestartRequest (kill+rerun is its fallback). A config change is a Run
+// (force-kills), not a restart.
+fn cmdRestart(cmd: &Cmd): void {
+    gSession.stop.resume()
+    sendPending(cmd.pendCh, "restartR", 0, "", "restart", "{}")
+}
+
+// End the session: the adapter tears down the debuggee and exits; the reader
+// loop's terminated/EOF path re-arms `run`.
+fn cmdKill(cmd: &Cmd): void {
+    logEvent("kill requested", $"(by {cmd.peerKind} peer)")
+    sendPending(cmd.pendCh, "disc", 0, "", "disconnect", Json.obj().bool("terminateDebuggee", true).build())
+    // The child session debugs the process; the PARENT is what spawned it.
+    // Disconnecting only the child leaves the program running with nobody
+    // attached, which reads in the UI as "killed" and is not.
+    if let Option.Some(pfd) = gSession.proc.parentIn {
+        sendReqFd(pfd, gSession.proc.oddSeq + 1, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
+    }
+}
+
+fn cmdEvaluate(cmd: &Cmd): void {
+    var b = Json.obj().str("expression", cmd.str("expr")).str("context", cmd.str("context"))
+    let frameId = cmd.int("frameId", -1 as i64)
+    if frameId >= 0 {
+        b = b.int("frameId", frameId)
+    }
+    sendPending(cmd.pendCh, "eval", cmd.int("id", 0 as i64), "", "evaluate", b.build())
+}
+
+fn cmdExpand(cmd: &Cmd): void {
+    sendPending(cmd.pendCh, "expand", cmd.int("id", 0 as i64), "", "variables", Json.obj().int("variablesReference", cmd.int("ref", 0 as i64)).build())
+}
+
+// Stack for a clicked thread; the UI then drives frameScopes for its locals
+// like any other frame selection.
+fn cmdThreadStack(cmd: &Cmd): void {
+    let t = cmd.int("tid", 1 as i64)
+    sendPending(cmd.pendCh, "tst", cmd.int("id", 0 as i64), t.toString(), "stackTrace", Json.obj().int("threadId", t).int("startFrame", 0).int("levels", 20).build())
+}
+
+// Locals for a user-selected stack frame.
+fn cmdFrameScopes(cmd: &Cmd): void {
+    sendPending(cmd.pendCh, "fsc", cmd.int("id", 0 as i64), "", "scopes", Json.obj().int("frameId", cmd.int("frameId", 0 as i64)).build())
+}
+
+// Selected exception filter ids. Kept on the target so session init applies
+// them; live-applied when a session is running.
+fn cmdSetExceptions(cmd: &Cmd): void {
+    var arr = Json.arr()
+    let f = cmd.doc.curField(cmd.doc.curRoot(), "filters")
+    for i in 0..cmd.doc.curLen(f) {
+        arr = arr.str(cmd.doc.curStr(cmd.doc.curChild(f, i)) ?? "")
+    }
+    gSession.target.excFilters = Option.Some(arr.build())
+    sendPending(cmd.pendCh, "ebLive", 0, "", "setExceptionBreakpoints", excArgs())
+}
+
+// Debug-console completions.
+fn cmdComplete(cmd: &Cmd): void {
+    var b = Json.obj().str("text", cmd.str("text")).int("column", cmd.int("column", 1 as i64))
+    let frameId = cmd.int("frameId", -1 as i64)
+    if frameId >= 0 {
+        b = b.int("frameId", frameId)
+    }
+    sendPending(cmd.pendCh, "cmpl", cmd.int("id", 0 as i64), "", "completions", b.build())
+}
+
+// Raw memory window. memoryReference is whatever the UI got from a
+// value/ipRef; lldb-dap accepts plain hex addresses.
+fn cmdReadMem(cmd: &Cmd): void {
+    sendPending(cmd.pendCh, "readmem", cmd.int("id", 0 as i64), "", "readMemory", Json.obj().str("memoryReference", cmd.str("memoryReference")).int("offset", cmd.int("offset", 0 as i64)).int("count", cmd.int("count", 256 as i64)).build())
+}
+
+// Edit a variable. ref = parent container (scope ref for top-level locals, the
+// variable's own ref for expanded children).
+fn cmdSetVar(cmd: &Cmd): void {
+    sendPending(cmd.pendCh, "setv", cmd.int("id", 0 as i64), "", "setVariable", Json.obj().int("variablesReference", cmd.int("ref", 0 as i64)).str("name", cmd.str("name")).str("value", cmd.str("value")).build())
+}
+
+// Window of instructions around a frame's pc (memoryReference = the frame's
+// instructionPointerReference from stackTrace).
+fn cmdDisassemble(cmd: &Cmd): void {
+    sendPending(cmd.pendCh, "disasm", cmd.int("id", 0 as i64), "", "disassemble", Json.obj().str("memoryReference", cmd.str("memoryReference")).int("instructionOffset", -16).int("instructionCount", 64).bool("resolveSymbols", true).build())
+}
+
+// Show the file a clicked frame lives in. sourceMsg itself handles unreadable
+// pseudo-paths (dyld etc.) with a placeholder.
+fn cmdOpenSource(cmd: &Cmd): void {
+    let p = cmd.str("path")
+    if p.len > 0 {
+        wsPush(cmd.bus, sourceMsg(p))
+    }
+}
+
+fn cmdStdin(cmd: &Cmd): void {
+    let data = cmd.str("data")
+    // writeOnce, not write: this runs on a peer's reader task, and parking
+    // it until a debuggee that never reads stdin drains the pty would stall
+    // every command that peer sends after it. A full pty drops input, as the
+    // raw write here always did.
+    if let Option.Some(p) = replace(gSession.proc.pty, Option.None) {
+        let _n = p.writeOnce(data)
+        gSession.proc.pty = Option.Some(p)
+    } else {
+        gSession.proc.stdinBuf = gSession.proc.stdinBuf + data
+    }
+}
+
+fn cmdResize(cmd: &Cmd): void {
+    let rows = cmd.int("rows", 0 as i64)
+    let cols = cmd.int("cols", 0 as i64)
+    // winsize fields are u16; anything outside is a bad payload, not a size.
+    if rows <= 0 || cols <= 0 || rows >= 65536 || cols >= 65536 {
+        return
+    }
+    gSession.proc.term = Option.Some(TermSize {
+        rows: rows, cols: cols
+    }
+    )
+    if let Option.Some(p) = replace(gSession.proc.pty, Option.None) {
+        var pty = p
+        let _r = pty.resize(rows as u16, cols as u16)
+        gSession.proc.pty = Option.Some(pty)
+    }
+}
+
+// config = a VS Code launch-configuration object (see applyConfig). The browser
+// applies configs inline on Run; setConfig is the programmatic path (`dapweb
+// api` callers). Idle-only: a live session must be force-run to change target
+// (setConfig never kills a debuggee).
+fn cmdSetConfig(cmd: &Cmd): void {
+    if gSession.proc.started {
+        wsPush(cmd.bus, configErrMsg("a debug session is active — stop it (or Run with force) to change the target"))
+        return
+    }
+    let err = applyConfig(cmd.payload.clone(), "")
+    if err.len > 0 {
+        wsPush(cmd.bus, configErrMsg(err))
+        return
+    }
+    logEvent("target changed", $"{gSession.target.spec.binPath}  (by {cmd.peerKind} peer)")
+    loadBps()
+    wsPush(cmd.bus, recordConfig())
+    pushHelloState(cmd.bus)
+}
+
+// One-shot localStorage migration: fold the client's legacy entries into the
+// server store, then the client stops sending (server is the sole writer
+// thereafter). Idempotent: dedup collapses re-imports.
+fn cmdImportHistory(cmd: &Cmd): void {
+    if let Option.Some(e) = cmd.doc.get("entries") {
+        if e.isArray() {
+            gSession.persisted.history = histMergeMany(gSession.persisted.history, e.rawStr(), 10 as i64)
+            persistHistory()
+            wsPush(cmd.bus, historyChangedMsg())
+        }
+    }
+}
+
+// Deliberate fresh start (a reload reconnects to the live session by design):
+// end any running debuggee via the kill path, drop bps and the late-join replay
+// snapshots, mint a new id, and re-hello every peer; each resets its client
+// state on the id change. Target config survives; the ⚙ drawer changes it.
+fn cmdNewSession(cmd: &Cmd): void {
+    sendPending(cmd.pendCh, "disc", 0, "", "disconnect", Json.obj().bool("terminateDebuggee", true).build())
+    gSession.persisted.bps = []
+    persistBps()
+    gSession.stop.resume()
+    gSession.output = []
+    gSession.server.sessionId = newSessionName(sessionNameSeeds())
+    journalHere()
+    logEvent("session reset", $"new session {gSession.server.sessionId}")
+    pushHelloState(cmd.bus)
 }
 
 // ── session registry ──

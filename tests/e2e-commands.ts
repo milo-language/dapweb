@@ -3,7 +3,7 @@
 // src/commands.milo is now the one list of `{"cmd":...}` names: the dispatcher
 // rejects anything absent from it, the activity announcements phrase themselves
 // from it, /api/commands serves it and `dapweb api spec` prints it. That only
-// stays true if the table and the dispatcher's if-chain agree, so this compares
+// stays true if the table and the dispatcher's cmdHandler match agree, so this compares
 // them in BOTH directions — a table entry nothing dispatches is a documented
 // command that does nothing, and a dispatched case with no entry is a command
 // the dispatcher will now refuse.
@@ -24,14 +24,23 @@ function ok(cond: any, label: string, detail?: any) {
 
 // ── the dispatcher's own list, read out of the source ──
 
-const server = await Bun.file(`${root}/src/web/server.milo`).text();
-const from = server.indexOf("fn dispatchClientCmd(");
-ok(from > 0, "found dispatchClientCmd in server.milo");
-// The chain ends at the next top-level fn; everything between is its body.
-const to = server.indexOf("\nfn ", from + 10);
-const body = server.slice(from, to > 0 ? to : undefined);
-const dispatched = new Set([...body.matchAll(/c == "([A-Za-z]+)"/g)].map((m) => m[1]));
-ok(dispatched.size > 15, `the chain dispatches ${dispatched.size} commands`, [...dispatched]);
+// cmdHandler's match maps each name to its handler fn; read its arms from
+// whichever src/web module holds it, so moving it between files cannot turn
+// this check into a vacuous pass.
+let body = "";
+for (const f of new Bun.Glob("*.milo").scanSync(`${root}/src/web`)) {
+  const src = await Bun.file(`${root}/src/web/${f}`).text();
+  const from = src.indexOf("\nfn cmdHandler(");
+  if (from < 0) continue;
+  ok(body === "", "cmdHandler is defined once", f);
+  // The match ends at the next top-level fn; everything between is its body.
+  const to = src.indexOf("\nfn ", from + 10);
+  body = src.slice(from, to > 0 ? to : undefined);
+}
+ok(body.length > 0, "found cmdHandler in src/web");
+const arms = [...body.matchAll(/^\s*"([A-Za-z]+)" => \{ return Option\.Some\((cmd[A-Za-z]+)\) \}/gm)];
+const dispatched = new Set(arms.map((m) => m[1]));
+ok(dispatched.size > 15, `the match dispatches ${dispatched.size} commands`, [...dispatched]);
 
 // ── the table, as the running server serves it ──
 
