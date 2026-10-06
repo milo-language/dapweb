@@ -91,7 +91,7 @@ from "std/path" import {
     Path
 }
 from "./state" import {
-    gSession, stoppedMsg, threadsMsg
+    gSession, stoppedMsg, threadsMsg, dataBpsJson
 }
 from "../dap/session" import {
     resolveAdapterCmd
@@ -224,6 +224,7 @@ fn apiStateJson(): string {
         .str("adapter", adapterId())
         .int("peers", gSession.peers.count)
         .arr("breakpoints", bps)
+        .raw("dataBreakpoints", dataBpsJson(gSession.dataBps))
     // The same renderers the snapshot uses, so these match what a tab joining
     // now would be sent.
     if let Option.Some(st) = gSession.stop.stop {

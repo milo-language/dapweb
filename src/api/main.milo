@@ -173,6 +173,23 @@ fn currentFrameId(port: i64): i64 {
     return -1
 }
 
+// The top frame's locals scope ref, so `watch <local>` names a variable the way
+// DAP wants it (variablesReference + name) without the caller reading state.
+fn currentScopeRef(port: i64): i64 {
+    match httpRequest(port, "GET", "/api/state", "") {
+        Result.Ok(reply) => {
+            if let Result.Ok(doc) = Json.parse(reply) {
+                if let Option.Some(stopped) = doc.get("stopped") {
+                    return stopped.i64("scopeRef") ?? (-1 as i64)
+                }
+            }
+        }
+        Result.Err(_e) => {
+        }
+    }
+    return -1
+}
+
 // Thread id of the current stop. step/next requires the real thread id (unlike
 // continue, which the adapter applies to all threads), so the CLI reads it from
 // the stop snapshot rather than defaulting to 1 and silently stalling.
@@ -201,6 +218,8 @@ fn usage(): string {
         "  continue | pause         resume / interrupt the debuggee\n" +
         "  step [--over|--in|--out] single step (default: over)\n" +
         "  break --line N [--path P]  set a breakpoint\n" +
+        "  watch <local> | --address A --size N [--access read|write|readWrite]\n" +
+        "                           break when a local of the current stop, or memory, is accessed\n" +
         "  eval <expr>              evaluate in the current stop frame\n" +
         "  run                      launch/relaunch, blocking until the first stop\n" +
         "  kill                     terminate the debuggee\n\n" +
@@ -224,6 +243,9 @@ pub fn apiMain(argv: Vec<string>): i32 {
     p.addI64("port", "", "server port", 0 as i64)
     p.addI64("timeout", "", "await timeout in ms", 5000 as i64)
     p.addI64("line", "", "line number for break", 0 as i64)
+    p.addString("address", "", "memory address for watch", "")
+    p.addI64("size", "", "bytes to watch at --address", 0 as i64)
+    p.addString("access", "", "watch access type: read | write | readWrite", "")
     p.addBool("pretty", "", "indent the JSON reply")
     p.addBool("over", "", "step over (default)")
     p.addBool("in", "", "step into")
@@ -336,6 +358,28 @@ pub fn apiMain(argv: Vec<string>): i32 {
         var aw = awaitFlag.clone()
         if aw.len == 0 {
             aw = "breakpoint"
+        }
+        return postCmd(port, b.build(), aw, timeout, pretty)
+    }
+
+    if cmd == "watch" {
+        var b = Json.obj().str("cmd", "setDataBreakpoint")
+        let address = parsed.getString("address") ?? ""
+        if address.len > 0 {
+            b = b.str("address", address).int("size", parsed.getI64("size"))
+        } else if pos.len >= 2 {
+            b = b.int("ref", currentScopeRef(port)).str("name", pos[1])
+        } else {
+            eprint("error: watch needs a local's name, or --address <a> --size <n>\n")
+            return 1
+        }
+        let access = parsed.getString("access") ?? ""
+        if access.len > 0 {
+            b = b.str("accessType", access)
+        }
+        var aw = awaitFlag.clone()
+        if aw.len == 0 {
+            aw = "dataBreakpoints"
         }
         return postCmd(port, b.build(), aw, timeout, pretty)
     }

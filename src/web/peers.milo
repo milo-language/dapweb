@@ -6,7 +6,7 @@ from "../journal" import {
     journalOut
 }
 from "./state" import {
-    gSession, Bp, Sink, Attribution, helloMsg, sourceMsg, bpSyncMsg
+    gSession, Bp, Sink, Attribution, helloMsg, sourceMsg, bpSyncMsg, dataBpsMsg
 }
 from "std/datetime" import {
     DateTime
@@ -133,6 +133,7 @@ pub fn pushHelloState(bus: &Channel<string>): void {
     for bp in gSession.persisted.bps {
         wsPush(bus, bpSyncMsg(bp))
     }
+    wsPush(bus, dataBpsMsg(gSession.dataBps, Option.None, 0 as i64))
 }
 
 pub fn configErrMsg(err: &string): string {

@@ -35,6 +35,7 @@ cp examples/interactive.c /tmp/dapweb_inter.c
 clang -g -O0 /tmp/dapweb_inter.c -o /tmp/dapweb_inter
 clang -g -O0 examples/nested/main.c examples/nested/shapes.c -o /tmp/dapweb_nested -lm
 clang -g -O0 examples/threads.c -o /tmp/dapweb_threads -lpthread
+clang -g -O0 examples/watch.c -o /tmp/dapweb_watch
 
 pass=0
 fail=0
@@ -105,6 +106,7 @@ serve_suite e2e-threads    $((base + 60)) --program /tmp/dapweb_threads
 serve_suite e2e-security   $((base + 70))
 serve_suite e2e-latejoin   $((base + 80)) --program /tmp/dapweb_nested --source examples/nested/main.c
 serve_suite e2e-goto       $((base + 90)) --program /tmp/dapweb_nested --source examples/nested/main.c
+serve_suite e2e-watch      $((base + 100)) --program /tmp/dapweb_watch --source examples/watch.c
 self_suite  configform
 self_suite  tablabels
 self_suite  inlinevalues

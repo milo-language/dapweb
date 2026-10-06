@@ -52,6 +52,31 @@ pub fn cloneBp(b: &Bp): Bp {
     }
 }
 
+// A data breakpoint (watchpoint). DAP keys it on the adapter's dataId, which
+// lldb-dap spells "ADDR/SIZE". The spec makes a dataId good only for the
+// session that minted it unless dataBreakpointInfo answered canPersist, so the
+// ones without it are dropped when the run ends or restarts.
+pub struct DataBp {
+    dataId: string,
+    label: string, // what was asked to be watched: a variable name or an address
+    description: string, // the adapter's own text ("4 bytes at 100008000 g_total")
+    accessType: string, // read | write | readWrite
+    condition: string,
+    hitCondition: string,
+    canPersist: bool,
+    verified: bool, // from the last setDataBreakpoints response
+    message: string, // the adapter's reason when not verified
+}
+
+pub fn cloneDataBp(d: &DataBp): DataBp {
+    return DataBp {
+        dataId: d.dataId.clone(), label: d.label.clone(), description: d.description.clone(),
+        accessType: d.accessType.clone(), condition: d.condition.clone(),
+        hitCondition: d.hitCondition.clone(), canPersist: d.canPersist,
+        verified: d.verified, message: d.message.clone(),
+    }
+}
+
 // one buffered terminal line for late-join replay.
 pub struct OutLine {
     text: string,
@@ -252,6 +277,9 @@ pub struct Session {
     stop: StopState,
     peers: Peers,
     persisted: Persisted,
+    // Not in Persisted: a dataId is an address in one process, so it never
+    // outlives the server (and usually not the run).
+    dataBps: Vec<DataBp>,
     // recent terminal output (debugger console + program stdout/stderr),
     // replayed to a joining tab so startup chatter and history survive reload /
     // late join. Bounded — a non-pty adapter routes ALL program output here.
@@ -284,6 +312,7 @@ pub var gSession: Session = Session {
     persisted: Persisted {
         history: "", bps: [],
     },
+    dataBps: [],
     output: [],
     server: ServerInfo {
         sessionId: "", listenPort: Option.None, startedAt: 0, noBrowser: false,
@@ -312,6 +341,8 @@ impl Session {
         for bp in self.persisted.bps {
             out.push(seal(bpSyncMsg(bp)).share())
         }
+        // Even when empty: the list replaces the client's whole set.
+        out.push(seal(dataBpsMsg(self.dataBps, Option.None, 0 as i64)).share())
         if let Option.Some(st) = self.stop.stop {
             out.push(seal(stoppedMsg(st)).share())
         }
@@ -395,6 +426,32 @@ pub fn bpSyncMsg(b: &Bp): string {
         .str("logMessage", b.logMessage)
         .bool("enabled", b.enabled)
         .build()
+}
+
+pub fn dataBpsJson(list: &Vec<DataBp>): string {
+    var arr = Json.arr()
+    for d in list {
+        arr = arr.obj(Json.obj().str("dataId", d.dataId).str("label", d.label)
+            .str("description", d.description).str("accessType", d.accessType)
+            .str("condition", d.condition).str("hitCondition", d.hitCondition)
+            .bool("canPersist", d.canPersist).bool("verified", d.verified)
+            .str("message", d.message))
+    }
+    return arr.build()
+}
+
+// The whole data breakpoint set. setDataBreakpoints replaces the set in DAP, so
+// every change goes out as the full list as well. `by` is who changed it (None
+// for a replay), `dropped` how many the end of a run just cleared.
+pub fn dataBpsMsg(list: &Vec<DataBp>, by: Option<Attribution>, dropped: i64): string {
+    var b = Json.obj().str("type", "dataBreakpoints").raw("list", dataBpsJson(list))
+    if let Option.Some(a) = by {
+        b = b.str("by", a.by).str("who", a.who)
+    }
+    if dropped > 0 {
+        b = b.int("dropped", dropped)
+    }
+    return b.build()
 }
 
 // The adapter's capabilities verbatim; the UI digs out .body and gates features on it.

@@ -47,6 +47,8 @@ pub fn commandSpecs(): Vec<CmdSpec> {
     v.push(CmdSpec { name: "kill", args: "", summary: "terminate the debuggee", awaits: "terminated", dap: "disconnect", verb: "terminate the program" })
     v.push(CmdSpec { name: "setBreakpoint", args: "line, path?, condition?, hitCondition?, logMessage?, enabled?", summary: "set or update a breakpoint", awaits: "breakpoint", dap: "setBreakpoints", verb: "set a breakpoint" })
     v.push(CmdSpec { name: "clearBreakpoint", args: "line, path?", summary: "remove a breakpoint", awaits: "breakpoint", dap: "setBreakpoints", verb: "clear a breakpoint" })
+    v.push(CmdSpec { name: "setDataBreakpoint", args: "ref + name | address + size, accessType? (read|write|readWrite, default write), condition?, hitCondition?", summary: "break when a variable or memory is accessed (a watchpoint; ends with the run)", awaits: "dataBreakpoints", dap: "dataBreakpointInfo+setDataBreakpoints", verb: "set a watchpoint" })
+    v.push(CmdSpec { name: "clearDataBreakpoint", args: "dataId", summary: "remove a watchpoint", awaits: "dataBreakpoints", dap: "setDataBreakpoints", verb: "clear a watchpoint" })
     v.push(CmdSpec { name: "setExceptions", args: "filters", summary: "choose which exception filters break", awaits: "", dap: "setExceptionBreakpoints", verb: "change exception breakpoints" })
     v.push(CmdSpec { name: "evaluate", args: "expr, id?, frameId?, context?", summary: "evaluate an expression in a stopped frame", awaits: "evalResult", dap: "evaluate", verb: "evaluate an expression" })
     v.push(CmdSpec { name: "complete", args: "text, column?, id?, frameId?", summary: "completions for a partial expression", awaits: "completions", dap: "completions", verb: "complete an expression" })

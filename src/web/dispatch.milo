@@ -12,7 +12,7 @@ from "../sessions" import {
     newSessionName
 }
 from "./dap_reader" import {
-    Pending, sendReqFd, buildBpArgsForPath, excArgs, startRun
+    Pending, sendReqFd, buildBpArgsForPath, excArgs, startRun, dataBpArgs, dropRunDataBps
 }
 from "./peers" import {
     logEvent, peerCountStr, wsPush, peerPush, wsWriterLoop, sinkRegister, sinkUnregister, pushHelloState, configErrMsg, cmdErrorMsg, bpAckMsg
@@ -21,7 +21,7 @@ from "./persist" import {
     absSourcePath, applyConfig, persistBps, loadBps, persistHistory, recordConfig, historyChangedMsg, sessionNameSeeds, journalHere
 }
 from "./state" import {
-    gSession, Bp, cloneBp, PendingRun, Attribution, attributionFor, sourceMsgBy
+    gSession, Bp, cloneBp, DataBp, cloneDataBp, dataBpsMsg, PendingRun, Attribution, attributionFor, sourceMsgBy
 }
 from "std/json" import {
     Json
@@ -101,6 +101,17 @@ fn activityText(cmd: &Cmd): string {
     if cmd.name == "clearBreakpoint" {
         return $"clear the breakpoint at line {cmd.int("line", 0 as i64)}"
     }
+    if cmd.name == "setDataBreakpoint" {
+        var what = cmd.str("name")
+        if what.len == 0 {
+            what = cmd.str("address")
+        }
+        var access = cmd.str("accessType")
+        if access.len == 0 {
+            access = "write"
+        }
+        return $"watch {what} ({access})"
+    }
     if cmd.name == "setVar" {
         return $"set {cmd.str("name")} = {cmd.str("value")}"
     }
@@ -140,6 +151,8 @@ fn cmdHandler(name: string): Option<(&Cmd) => void> {
     match name {
         "setBreakpoint" => { return Option.Some(cmdBreakpoint) }
         "clearBreakpoint" => { return Option.Some(cmdBreakpoint) }
+        "setDataBreakpoint" => { return Option.Some(cmdSetDataBreakpoint) }
+        "clearDataBreakpoint" => { return Option.Some(cmdClearDataBreakpoint) }
         "run" => { return Option.Some(cmdRun) }
         "continue" => { return Option.Some(cmdStep) }
         "stepOver" => { return Option.Some(cmdStep) }
@@ -247,6 +260,78 @@ fn cmdBreakpoint(cmd: &Cmd): void {
     persistBps()
     wsPush(cmd.bus, bpAckMsg(bp, set, cmd.by))
     sendPending(cmd.pendCh, "bpLive", 0, "", "setBreakpoints", buildBpArgsForPath(gSession.persisted.bps, path))
+}
+
+// Two round trips, chained in D: dataBreakpointInfo turns the variable (ref +
+// name) or the address (asAddress + bytes) into a dataId, then
+// setDataBreakpoints sends the whole set with it added (kinds dbInfo, dbSet).
+// Every peer is sent the new list once the adapter has answered.
+fn cmdSetDataBreakpoint(cmd: &Cmd): void {
+    if gSession.proc.dapIn.isNone() {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "a data breakpoint needs a running program: its address only exists in the live process"))
+        return
+    }
+    if !adapterCan("supportsDataBreakpoints") {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "this debug adapter does not support data breakpoints (supportsDataBreakpoints)"))
+        return
+    }
+    var access = cmd.str("accessType")
+    if access.len == 0 {
+        access = "write"
+    }
+    if access != "read" && access != "write" && access != "readWrite" {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, $"accessType must be read, write or readWrite, not {access}"))
+        return
+    }
+    let ref = cmd.int("ref", 0 as i64)
+    let name = cmd.str("name")
+    let address = cmd.str("address")
+    var info = Json.obj()
+    var label: string = ""
+    if ref > 0 && name.len > 0 {
+        info = info.int("variablesReference", ref).str("name", name)
+        label = name.clone()
+    } else if address.len > 0 {
+        if !adapterCan("supportsDataBreakpointBytes") {
+            wsPush(cmd.bus, cmdErrorMsg(cmd.name, "this debug adapter cannot watch a raw address (supportsDataBreakpointBytes)"))
+            return
+        }
+        let size = cmd.int("size", 0 as i64)
+        if size <= 0 {
+            wsPush(cmd.bus, cmdErrorMsg(cmd.name, "an address watch needs a size in bytes"))
+            return
+        }
+        info = info.str("name", address).bool("asAddress", true).int("bytes", size)
+        label = address.clone()
+    } else {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "say what to watch: ref + name for a variable, or address + size"))
+        return
+    }
+    let extra = Json.obj().str("label", label).str("accessType", access)
+        .str("condition", cmd.str("condition")).str("hitCondition", cmd.str("hitCondition"))
+        .str("by", cmd.by.by).str("who", cmd.by.who).build()
+    sendPending(cmd.pendCh, "dbInfo", 0, extra, "dataBreakpointInfo", info.build())
+}
+
+fn cmdClearDataBreakpoint(cmd: &Cmd): void {
+    let id = cmd.str("dataId")
+    var keep: Vec<DataBp> = []
+    for d in gSession.dataBps {
+        if d.dataId != id {
+            keep.push(cloneDataBp(d))
+        }
+    }
+    if keep.len == gSession.dataBps.len {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, $"no data breakpoint with dataId {id}"))
+        return
+    }
+    gSession.dataBps = keep
+    if gSession.proc.dapIn.isNone() {
+        wsPush(cmd.bus, dataBpsMsg(gSession.dataBps, Option.Some(Attribution { by: cmd.by.by.clone(), who: cmd.by.who.clone() }), 0 as i64))
+        return
+    }
+    let extra = Json.obj().str("by", cmd.by.by).str("who", cmd.by.who).build()
+    sendPending(cmd.pendCh, "dbSet", 0, extra, "setDataBreakpoints", dataBpArgs())
 }
 
 // The editor is the source of truth: an inline `config` object rides the run
@@ -411,6 +496,13 @@ fn cmdSetNextStatement(cmd: &Cmd): void {
 // (force-kills), not a restart.
 fn cmdRestart(cmd: &Cmd): void {
     gSession.stop.resume()
+    // The new process gets new addresses, so the old dataIds go, in the adapter
+    // too: cleared before the restart, on the same fd, in order.
+    let dropped = dropRunDataBps()
+    if dropped > 0 {
+        sendPending(cmd.pendCh, "dbLive", 0, "", "setDataBreakpoints", dataBpArgs())
+        wsPush(cmd.bus, dataBpsMsg(gSession.dataBps, Option.None, dropped))
+    }
     sendPending(cmd.pendCh, "restartR", 0, "", "restart", "{}")
 }
 
@@ -561,6 +653,7 @@ fn cmdNewSession(cmd: &Cmd): void {
     sendPending(cmd.pendCh, "disc", 0, "", "disconnect", Json.obj().bool("terminateDebuggee", true).build())
     gSession.persisted.bps = []
     persistBps()
+    gSession.dataBps = []
     gSession.stop.resume()
     gSession.output = []
     gSession.server.sessionId = newSessionName(sessionNameSeeds())

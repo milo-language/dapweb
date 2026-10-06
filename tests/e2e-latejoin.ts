@@ -1,6 +1,7 @@
 // E2E for the late-join snapshot: a tab that connects mid-stop must end up
 // holding exactly the state a tab that watched the whole session live holds
-// (source, capabilities, breakpoints, stop, threads, memory regions, terminal output),
+// (source, capabilities, breakpoints, data breakpoints, stop, threads, memory regions,
+// terminal output),
 // and /api/state must agree with both.
 // Needs dapweb web on [port] targeting /tmp/dapweb_nested. Usage: bun tests/e2e-latejoin.ts [port]
 
@@ -54,13 +55,14 @@ function ok(cond: any, label: string, detail?: any) {
 // them: hello is a full resync of breakpoints, a breakpoint ack upserts or
 // drops one, and newer stop/threads/regions replace older ones.
 function fold(msgs: any[]) {
-  const st: any = { source: null, caps: null, bps: new Map<string, any>(), stop: null, threads: null, regions: null, output: [] as string[] };
+  const st: any = { source: null, caps: null, bps: new Map<string, any>(), dataBps: [] as any[], stop: null, threads: null, regions: null, output: [] as string[] };
   for (const m of msgs) {
     const bpKey = `${m.path}:${m.line}`;
     const bpVal = () => ({ condition: m.condition, hitCondition: m.hitCondition, logMessage: m.logMessage, enabled: m.enabled });
     switch (m.type) {
       case "hello": st.bps.clear(); break;
       case "bpSync": st.bps.set(bpKey, bpVal()); break;
+      case "dataBreakpoints": st.dataBps = m.list; break;
       case "breakpoint": if (m.set) st.bps.set(bpKey, bpVal()); else st.bps.delete(bpKey); break;
       case "source": st.source = { path: m.path, content: m.content }; break;
       case "capabilities": st.caps = m.raw; break;
@@ -105,6 +107,9 @@ const s1 = await live.wait(m => m.type === "stopped");
 ok(s1.line === 23 && s1.reason === "breakpoint" && s1.atMain === false, `continued to a user breakpoint, not atMain (line ${s1.line}, ${s1.reason}, atMain ${s1.atMain})`);
 await live.wait(m => m.type === "threads");
 await live.wait(m => m.type === "regions");
+// A watchpoint: the list is session state a late tab must be replayed.
+live.send({ cmd: "setDataBreakpoint", ref: s1.scopeRef, name: "total" });
+await live.wait(m => m.type === "dataBreakpoints" && m.list.length === 1);
 await live.settle();
 
 // ── the tab that joins now, mid-stop ──
@@ -127,6 +132,8 @@ ok(same(J.regions, L.regions), "regions match");
 ok(L.caps && same(J.caps, L.caps), "capabilities match");
 ok(L.bps.length === 3, "live tab holds the three breakpoints", L.bps);
 ok(same(J.bps, L.bps), "breakpoints match (path, line, condition, enabled)", { live: L.bps, late: J.bps });
+ok(L.dataBps.length === 1 && L.dataBps[0].label === "total", "live tab holds the watch on total", L.dataBps);
+ok(same(J.dataBps, L.dataBps), "data breakpoints match", { live: L.dataBps, late: J.dataBps });
 ok(L.output.some((o: string) => o.includes("latejoin-marker")), "live tab saw the console output", L.output);
 ok(same(J.output, L.output), "output lines match", { live: L.output, late: J.output });
 ok(late.log.filter(m => m.type === "output").every(m => m.replay === true), "replayed output is flagged replay");
@@ -138,6 +145,7 @@ ok(same(api.stopped, J.stop), "api state stopped == snapshot stop", { api: api.s
 ok(same(api.threads, J.threads), "api state threads == snapshot threads");
 ok(same(api.breakpoints.map((b: any) => `${b.path}:${b.line}`).sort(), J.bps.map(([k]: any) => k).sort()),
    "api state breakpoints == snapshot breakpoints");
+ok(same(api.dataBreakpoints, J.dataBps), "api state dataBreakpoints == snapshot data breakpoints", api.dataBreakpoints);
 
 live.send({ cmd: "kill" });
 await live.wait(m => m.type === "terminated");

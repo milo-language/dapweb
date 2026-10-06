@@ -19,7 +19,7 @@ from "./persist" import {
     applyConfig, loadBps, appendHistory
 }
 from "./state" import {
-    gSession, Bp, OutLine, ChildLaunch, StopInfo, ThreadList, Attribution, sourceMsg, capsMsg, stoppedMsg, threadsMsg, regionsMsg
+    gSession, Bp, DataBp, cloneDataBp, dataBpsMsg, OutLine, ChildLaunch, StopInfo, ThreadList, Attribution, sourceMsg, capsMsg, stoppedMsg, threadsMsg, regionsMsg
 }
 from "json-rpc/frame" import {
     writeFrame as writeFrameFd
@@ -354,6 +354,111 @@ fn buildAllBpArgs(bps: &Vec<Bp>): string {
     return arr.build()
 }
 
+// setDataBreakpoints args: the whole set, since the request replaces it.
+pub fn dataBpArgs(): string {
+    var arr = Json.arr()
+    for d in gSession.dataBps {
+        var o = Json.obj().str("dataId", d.dataId).str("accessType", d.accessType)
+        if d.condition.len > 0 {
+            o = o.str("condition", d.condition)
+        }
+        if d.hitCondition.len > 0 {
+            o = o.str("hitCondition", d.hitCondition)
+        }
+        arr = arr.obj(o)
+    }
+    return Json.obj().arr("breakpoints", arr).build()
+}
+
+// Drop the data breakpoints whose dataId dies with the process (all of them on
+// lldb-dap, which never answers canPersist). Returns how many went.
+pub fn dropRunDataBps(): i64 {
+    var keep: Vec<DataBp> = []
+    for d in gSession.dataBps {
+        if d.canPersist {
+            keep.push(cloneDataBp(d))
+        }
+    }
+    let dropped = gSession.dataBps.len - keep.len
+    gSession.dataBps = keep
+    return dropped
+}
+
+// Who a data breakpoint change came from, carried through Pending.extra since D
+// answers it long after the command's handler returned.
+fn extraBy(rq: &Json): Attribution {
+    return Attribution { by: rq.str("by") ?? "user", who: rq.str("who") ?? "browser" }
+}
+
+// dataBreakpointInfo answered: add the entry to the set, or refuse with the
+// adapter's reason. True when the set changed and must be sent.
+fn adoptDataBpInfo(doc: &Json, rq: &Json, ch: &Channel<string>): bool {
+    let dataId = doc.curStr(doc.curPath("body.dataId")) ?? ""
+    let desc = doc.curStr(doc.curPath("body.description")) ?? ""
+    let label = rq.str("label") ?? ""
+    // A null dataId is how DAP says "cannot watch this"; the description says why.
+    if dataId.len == 0 {
+        var why = desc.clone()
+        if why.len == 0 {
+            why = $"the adapter cannot watch {label}"
+        }
+        wsPush(ch, cmdErrorMsg("setDataBreakpoint", why))
+        return false
+    }
+    let access = rq.str("accessType") ?? "write"
+    let types = doc.curPath("body.accessTypes")
+    let n = doc.curLen(types)
+    if n > 0 {
+        var okType = false
+        var i: i64 = 0
+        while i < n {
+            if (doc.curStr(doc.curChild(types, i)) ?? "") == access {
+                okType = true
+            }
+            i = i + 1
+        }
+        if !okType {
+            wsPush(ch, cmdErrorMsg("setDataBreakpoint", $"the adapter cannot watch {label} for {access} access"))
+            return false
+        }
+    }
+    var keep: Vec<DataBp> = []
+    for d in gSession.dataBps {
+        if d.dataId != dataId {
+            keep.push(cloneDataBp(d))
+        }
+    }
+    keep.push(DataBp {
+        dataId: dataId.clone(), label: label, description: desc,
+        accessType: access, condition: rq.str("condition") ?? "",
+        hitCondition: rq.str("hitCondition") ?? "",
+        canPersist: doc.curBool(doc.curPath("body.canPersist")) ?? false,
+        verified: false, message: "",
+    }
+    )
+    gSession.dataBps = keep
+    return true
+}
+
+// setDataBreakpoints answers in request order, one entry per data breakpoint.
+fn adoptDataBpVerified(doc: &Json): void {
+    let arr = doc.curPath("body.breakpoints")
+    let n = doc.curLen(arr)
+    var out: Vec<DataBp> = []
+    var i: i64 = 0
+    for d in gSession.dataBps {
+        var c = cloneDataBp(d)
+        if i < n {
+            let el = doc.curChild(arr, i)
+            c.verified = doc.curBool(doc.curField(el, "verified")) ?? false
+            c.message = doc.curStr(doc.curField(el, "message")) ?? ""
+        }
+        out.push(c)
+        i = i + 1
+    }
+    gSession.dataBps = out
+}
+
 // setExceptionBreakpoints args from the selected filter ids.
 pub fn excArgs(): string {
     var filters: string = "[]"
@@ -630,6 +735,25 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     wsPush(ch, Json.obj().str("type", "memory").int("id", pid).str("address", "").str("data", "").str("error", msg.doc.curStr(msg.doc.curField(msg.doc.curRoot(), "message")) ?? "").build())
                 } else if kind == "gotoT" || kind == "goto" {
                     wsPush(ch, cmdErrorMsg("setNextStatement", $"{msg.command} failed: {respErrText(msg.doc)}"))
+                } else if kind == "dbInfo" {
+                    wsPush(ch, cmdErrorMsg("setDataBreakpoint", $"dataBreakpointInfo failed: {respErrText(msg.doc)}"))
+                } else if kind == "dbSet" {
+                    // The adapter refused the whole set: take back the entry
+                    // this request added, so the list says what is armed.
+                    if let Result.Ok(rq) = Json.parse(pextra) {
+                        let added = rq.str("dataId") ?? ""
+                        if added.len > 0 {
+                            var keep: Vec<DataBp> = []
+                            for d in gSession.dataBps {
+                                if d.dataId != added {
+                                    keep.push(cloneDataBp(d))
+                                }
+                            }
+                            gSession.dataBps = keep
+                        }
+                    }
+                    wsPush(ch, cmdErrorMsg("setDataBreakpoint", $"setDataBreakpoints failed: {respErrText(msg.doc)}"))
+                    wsPush(ch, dataBpsMsg(gSession.dataBps, Option.None, 0 as i64))
                 } else if kind == "restartR" {
                     // Adapter without restart support (e.g. debugpy): tell the
                     // UI so it falls back to kill+rerun. lldb-dap handles
@@ -679,6 +803,28 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     }
                     )
                 }
+            } else if kind == "dbInfo" {
+                if let Result.Ok(rq) = Json.parse(pextra) {
+                    if adoptDataBpInfo(msg.doc, rq, ch) {
+                        // The added dataId rides along so a refused set can take it back.
+                        let ex = Json.obj().str("by", rq.str("by") ?? "user").str("who", rq.str("who") ?? "browser")
+                            .str("dataId", msg.doc.curStr(msg.doc.curPath("body.dataId")) ?? "").build()
+                        let s = cl.send("setDataBreakpoints", dataBpArgs())
+                        pend.push(Pending {
+                            seq: s, kind: "dbSet", id: 0, extra: ex
+                        }
+                        )
+                    }
+                }
+            } else if kind == "dbSet" {
+                adoptDataBpVerified(msg.doc)
+                var by: Option<Attribution> = Option.None
+                if let Result.Ok(rq) = Json.parse(pextra) {
+                    if (rq.str("by") ?? "").len > 0 {
+                        by = Option.Some(extraBy(rq))
+                    }
+                }
+                wsPush(ch, dataBpsMsg(gSession.dataBps, by, 0 as i64))
             } else if kind == "thrPause" {
                 // Pause with no known tid (attach before first stop): pause
                 // the first thread the adapter reports.
@@ -879,6 +1025,15 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     Result.Err(_e) => {
                     }
                 }
+                // Only canPersist ones survive a run, so this is usually empty.
+                // In flight before configurationDone, as DAP orders it.
+                if gSession.dataBps.len > 0 {
+                    let ds = cl.send("setDataBreakpoints", dataBpArgs())
+                    pend.push(Pending {
+                        seq: ds, kind: "dbSet", id: 0, extra: "{}"
+                    }
+                    )
+                }
                 if sbLeft == 0 {
                     let s = cl.send("setExceptionBreakpoints", excArgs())
                     pend.push(Pending {
@@ -1055,6 +1210,10 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
     gSession.proc.oddSeq = -1 as i64
     gSession.stop.resume()
     gSession.stop.caps = Option.None
+    let droppedDb = dropRunDataBps()
+    if droppedDb > 0 {
+        wsPush(ch, dataBpsMsg(gSession.dataBps, Option.None, droppedDb))
+    }
     while true {
         match pendCh.tryRecv() {
             Option.Some(_p) => {
