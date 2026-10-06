@@ -147,6 +147,15 @@ const base = (p: string) => p.split("/").pop() || p;
 // "module`symbol" pseudo-paths for no-debug-info frames (dyld/libc) — those get
 // the disassembly view, not a bogus source tab.
 const hasSrc = (p: string) => !!p && !p.includes("`");
+// DAP stopped.reason → the pill's "why". Unknown reasons (adapters add their
+// own) still show, verbatim, rather than collapsing to a bare "paused".
+const STOP_WHY: Record<string, string> = {
+  step: "paused after step", breakpoint: "paused on breakpoint", exception: "paused on exception",
+  entry: "paused on entry", goto: "paused after goto",
+  "function breakpoint": "paused on function breakpoint", "data breakpoint": "paused on data breakpoint",
+  "instruction breakpoint": "paused on instruction breakpoint",
+};
+const stopWhy = (reason: string) => STOP_WHY[reason] ?? (reason ? `paused (${reason})` : "paused");
 // Breakpoints are keyed per file; newline can't appear in a path.
 const bpKey = (path: string, line: number) => `${path}\n${line}`;
 
@@ -645,7 +654,10 @@ export default function App() {
         setRegistersRef(m.registersRef || 0);
         setStopSeq((s) => s + 1);
         setPhase("stopped");
-        setStatus({ text: `stopped at line ${m.line}`, short: `stopped:${m.line}`, cls: "stopped" });
+        const where = hasSrc(sp) ? `${base(sp)}:${m.line}` : (f0?.name || "");
+        const why = stopWhy(m.reason || "");
+        const short = where ? `${why} · ${where}` : why;
+        setStatus({ text: m.description ? `${short}: ${m.description}` : short, short, cls: "stopped" });
         // Keep the asm pane live across steps; auto-open it for no-source frames.
         if (f0 && (!hasSrc(f0.path) || disasmOpenRef.current) && f0.ipRef) requestDisasm(f0);
         else setDisasm(null);

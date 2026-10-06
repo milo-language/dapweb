@@ -72,6 +72,7 @@ for (const ch of "milo\r") d.send({ cmd: "stdin", data: ch });
 const stopped = await d.wait(m => m.type === "stopped");
 ok(stopped.line === 6, `stopped at line 6 (got ${stopped.line})`);
 ok(stopped.tid > 0, `tid=${stopped.tid}`);
+ok(stopped.reason === "breakpoint", `breakpoint stop carries reason "breakpoint" (got ${stopped.reason})`);
 ok(stopped.frames.length >= 2 && stopped.frames[0].name.includes("greet"), "frames: greet innermost", stopped.frames);
 const frame0 = stopped.frames[0].id;
 const nameVar = stopped.locals.find((v: any) => v.name === "name");
@@ -101,6 +102,7 @@ if (nameVar.ref > 0) {
 d.send({ cmd: "stepOver", tid: stopped.tid });
 const s2 = await d.wait(m => m.type === "stopped");
 ok(s2.line === 7, `stepOver → line 7 (got ${s2.line})`);
+ok(s2.reason === "step", `step stop carries reason "step" (got ${s2.reason})`);
 
 d.send({ cmd: "continue", tid: s2.tid });
 await d.waitPty("sum=42");

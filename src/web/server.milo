@@ -1359,6 +1359,8 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
     var tid: i64 = -1 as i64
     var framesJs: string = "[]"
     var stopLine: i64 = 0
+    var stopReason: string = "" // DAP stopped.reason of the current stop
+    var stopDesc: string = "" // optional human text the adapter attached
     var frame0: i64 = 0
     var regRef: i64 = 0 // register scope ref for the current stop (0 = adapter has none)
     var lastSrc: string = srcPath.clone() // browser already has the main source
@@ -1567,6 +1569,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                 }
                 gStopMsg = Json.obj().str("type", "stopped")
                     .int("line", stopLine).str("path", lastSrc).int("tid", tid)
+                    .str("reason", stopReason).str("description", stopDesc)
                     .raw("scopeRef", scopeRef)
                     .int("registersRef", regRef)
                     .raw("frames", framesJs)
@@ -1729,6 +1732,8 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, wakeWr: i32, pendCh: Ch
                     logEvent("stopped", $"thread {bodyI64(msg.raw, "threadId", -1 as i64)}  reason {bodyStr(msg.raw, "reason")}")
                 }
                 tid = bodyI64(msg.raw, "threadId", -1 as i64)
+                stopReason = bodyStr(msg.raw, "reason")
+                stopDesc = bodyStr(msg.raw, "description")
                 let stArgs = Json.obj().int("threadId", tid)
                     .int("startFrame", 0).int("levels", 20).build()
                 let s = cl.send("stackTrace", stArgs)
