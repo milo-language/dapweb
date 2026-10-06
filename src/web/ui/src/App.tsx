@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import SourceView, { langFor, BpMeta, BpPopover, HoverVar } from "./SourceView";
 import ConfigDrawer, { DebugConfig, stripJsonc } from "./ConfigDrawer";
 import { tabLabels } from "./tabLabels";
+import { primaryAction } from "./primary";
 
 type Frame = { id: number; name: string; line: number; path: string; ipRef: string };
 type Thread = { id: number; name: string };
@@ -1161,6 +1162,7 @@ export default function App() {
     return out;
   }, [bps, viewPath]);
   const canInstrStep = stopped && !!caps.supportsSteppingGranularity && !!asm;
+  const primary = primaryAction({ phase, hasTarget: hasTarget(cfg, program || undefined), attach: attachMode });
 
   return (
     <div className="app">
@@ -1226,13 +1228,15 @@ export default function App() {
           )}
         </span>
         <span className="toolbar">
-          <button className={phase === "idle" ? "run" : "run live"}
-                  data-tip={phase === "idle" ? "Run: start the program (F5)"
-                                            : "Run: relaunch with whatever the target bar says now"} onClick={run}><Ico g={CI.run} /></button>
-          <button disabled={!stopped} data-tip={stopped ? "Continue (F5)" : "Continue (F5, needs a stopped program)"}
-                  onClick={() => resume("continue")}><Ico g={CI.cont} /></button>
-          <button disabled={phase !== "running"} data-tip="Pause (F6)"
-                  onClick={() => send({ cmd: "pause", tid: tidRef.current })}><Ico g={CI.pause} /></button>
+          <button className="primary" disabled={primary.disabled} data-tip={primary.tip}
+                  onClick={() => {
+                    if (primary.kind === "continue") resume("continue");
+                    else if (primary.kind === "pause") send({ cmd: "pause", tid: tidRef.current });
+                    else run();
+                  }}>
+            <Ico g={primary.kind === "continue" ? CI.cont : primary.kind === "pause" ? CI.pause : CI.run} />
+            {primary.label}
+          </button>
         </span>
         <span className="toolbar">
           <button disabled={!stopped} data-tip="Step over (F10)" onClick={() => resume("stepOver")}><Ico g={CI.stepOver} /></button>

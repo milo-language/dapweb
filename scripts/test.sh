@@ -88,6 +88,7 @@ serve_suite e2e-threads    $((base + 60)) --program /tmp/dapweb_threads
 serve_suite e2e-security   $((base + 70))
 self_suite  configform
 self_suite  tablabels
+self_suite  primary
 self_suite  hermetic
 self_suite  api
 self_suite  e2e-agent
