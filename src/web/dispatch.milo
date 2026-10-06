@@ -3,7 +3,7 @@
 // reader, and the HTTP API's /api/cmd).
 
 from "../commands" import {
-    isKnownCmd, cmdVerb, cmdNames
+    isKnownCmd, cmdVerb, cmdNames, cmdMovesProgram
 }
 from "../journal" import {
     journalCmd
@@ -21,7 +21,7 @@ from "./persist" import {
     absSourcePath, applyConfig, persistBps, loadBps, persistHistory, recordConfig, historyChangedMsg, sessionNameSeeds, journalHere
 }
 from "./state" import {
-    gSession, Bp, cloneBp, PendingRun, sourceMsg
+    gSession, Bp, cloneBp, PendingRun, Attribution, attributionFor, sourceMsgBy
 }
 from "std/json" import {
     Json
@@ -53,6 +53,7 @@ struct Cmd {
     doc: Json, // the payload, parsed once
     payload: string, // setConfig hands the payload itself to applyConfig
     peerKind: string,
+    by: Attribution,
     bus: Channel<string>,
     pendCh: Channel<Pending>,
 }
@@ -182,8 +183,14 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
     }
     journalCmd(c, peerKind, peerLabel, true, "", payload, cmdPath(c, doc))
     let cmd = Cmd {
-        name: c, doc: doc, payload: payload, peerKind: peerKind,
+        name: c, doc: doc, payload: payload, peerKind: peerKind.clone(),
+        by: attributionFor(peerKind, peerLabel),
         bus: bus.clone(), pendCh: pendCh.clone(),
+    }
+    // Before the handler: the stop can be answered on the next turn of D,
+    // which may run as soon as the handler yields.
+    if cmdMovesProgram(cmd.name) {
+        gSession.proc.driver = attributionFor(peerKind, peerLabel)
     }
     // A browser peer's actions are self-evident to whoever performed them; an
     // agent's are not. Announce before acting, so the human watching the UI is
@@ -225,7 +232,7 @@ fn cmdBreakpoint(cmd: &Cmd): void {
         gSession.persisted.bps.push(cloneBp(bp))
     }
     persistBps()
-    wsPush(cmd.bus, bpAckMsg(bp, set))
+    wsPush(cmd.bus, bpAckMsg(bp, set, cmd.by))
     sendPending(cmd.pendCh, "bpLive", 0, "", "setBreakpoints", buildBpArgsForPath(gSession.persisted.bps, path))
 }
 
@@ -470,7 +477,7 @@ fn cmdDisassemble(cmd: &Cmd): void {
 fn cmdOpenSource(cmd: &Cmd): void {
     let p = cmd.str("path")
     if p.len > 0 {
-        wsPush(cmd.bus, sourceMsg(p))
+        wsPush(cmd.bus, sourceMsgBy(p, cmd.by))
     }
 }
 

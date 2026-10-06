@@ -145,6 +145,32 @@ pub struct RunState {
     runTo: Option<Bp>,
     runStartMs: i64, // epochMillis at adapter spawn — run duration
     lastExit: Option<i64>, // debuggee exitCode from the "exited" event
+    // Who last sent a command that moves the program (cmdMovesProgram): the
+    // next stop is theirs. "agent" for any non-browser peer, "user" otherwise,
+    // and "user" before anyone has: a run nobody commanded was started by the
+    // person who launched the server.
+    driver: Attribution,
+}
+
+// Who caused something, as every peer is told it: `by` is "agent" or "user",
+// `who` the peer's label ("browser", "claude (pid 42)").
+pub struct Attribution {
+    by: string,
+    who: string,
+}
+
+pub fn userAttribution(): Attribution {
+    return Attribution { by: "user", who: "browser" }
+}
+
+// The same rule the activity announcement uses: anything not a browser tab is
+// an agent, since a person at a terminal typing `dapweb api` is rare and an
+// unannounced program move is the failure being prevented.
+pub fn attributionFor(peerKind: &string, label: &string): Attribution {
+    if peerKind == "browser" {
+        return Attribution { by: "user", who: label.clone() }
+    }
+    return Attribution { by: "agent", who: label.clone() }
 }
 
 impl RunState {
@@ -194,6 +220,7 @@ pub struct StopInfo {
     registersRef: i64, // register scope ref (0 = adapter has none)
     frames: string,
     locals: string,
+    by: Attribution, // the driver when this stop arrived
 }
 
 pub struct ThreadList {
@@ -246,6 +273,7 @@ pub var gSession: Session = Session {
         oddSeq: -1, stdinBuf: "", adapterStderr: "", srvPid: Option.None,
         srvPort: Option.None, debuggeePid: Option.None, parentIn: Option.None,
         child: Option.None, pendingRun: Option.None, runTo: Option.None, runStartMs: 0, lastExit: Option.None,
+        driver: Attribution { by: "user", who: "browser" },
     },
     stop: StopState {
         caps: Option.None, stop: Option.None, threads: Option.None, regions: Option.None,
@@ -326,23 +354,36 @@ pub fn helloMsg(s: &Session): string {
 }
 
 pub fn sourceMsg(path: &string): string {
-    var content: string = ""
+    return Json.obj().str("type", "source")
+        .str("path", path)
+        .str("content", sourceText(path))
+        .build()
+}
+
+// A source a peer asked for: carries who asked, so a tab following the agent
+// can tell an agent's openSource from its own frame click. The replay and the
+// stop-driven pushes are nobody's request and use sourceMsg.
+pub fn sourceMsgBy(path: &string, by: &Attribution): string {
+    return Json.obj().str("type", "source")
+        .str("path", path)
+        .str("by", by.by).str("who", by.who)
+        .str("content", sourceText(path))
+        .build()
+}
+
+fn sourceText(path: &string): string {
     match readFile(path) {
         Result.Ok(text) => {
-            content = text
+            return text
         }
         Result.Err(_e) => {
             // Frames without debug info (libc, dyld) report symbol pseudo-paths
             // like "/usr/lib/dyld`dyld4::...". Show a friendly placeholder
             // until the disassembly view exists.
-            content = "// no source available for this frame:\n//   " + path.clone()
+            return "// no source available for this frame:\n//   " + path.clone()
             + "\n// (no debug info — try `disassemble --frame` in the Debug Console)"
         }
     }
-    return Json.obj().str("type", "source")
-        .str("path", path)
-        .str("content", content)
-        .build()
 }
 
 // full bp state for a late-joining peer (acks are optimistic client-side).
@@ -366,6 +407,7 @@ pub fn stoppedMsg(st: &StopInfo): string {
         .int("line", st.line).str("path", st.path).int("tid", st.tid)
         .str("reason", st.reason).str("description", st.description)
         .bool("atMain", st.atMain)
+        .str("by", st.by.by).str("who", st.by.who)
         .raw("scopeRef", st.scopeRef)
         .int("registersRef", st.registersRef)
         .raw("frames", st.frames)

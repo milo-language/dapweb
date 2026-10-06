@@ -6,7 +6,7 @@ from "../journal" import {
     journalOut
 }
 from "./state" import {
-    gSession, Bp, Sink, helloMsg, sourceMsg, bpSyncMsg
+    gSession, Bp, Sink, Attribution, helloMsg, sourceMsg, bpSyncMsg
 }
 from "std/datetime" import {
     DateTime
@@ -160,9 +160,10 @@ pub fn terminatedMsg(exitCode: Option<i64>): string {
 // path a receiving browser cannot key it (breakpoints are keyed by path+line),
 // so an agent's breakpoint used to be invisible in an already-open tab until it
 // was reloaded and picked the set up from the bpSync replay.
-pub fn bpAckMsg(b: &Bp, set: bool): string {
+pub fn bpAckMsg(b: &Bp, set: bool, by: &Attribution): string {
     return Json.obj().str("type", "breakpoint")
         .str("path", b.path).int("line", b.line)
+        .str("by", by.by).str("who", by.who)
         .str("condition", b.condition)
         .str("hitCondition", b.hitCondition)
         .str("logMessage", b.logMessage)

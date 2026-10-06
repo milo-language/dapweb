@@ -19,7 +19,7 @@ from "./persist" import {
     applyConfig, loadBps, appendHistory
 }
 from "./state" import {
-    gSession, Bp, OutLine, ChildLaunch, StopInfo, ThreadList, sourceMsg, capsMsg, stoppedMsg, threadsMsg, regionsMsg
+    gSession, Bp, OutLine, ChildLaunch, StopInfo, ThreadList, Attribution, sourceMsg, capsMsg, stoppedMsg, threadsMsg, regionsMsg
 }
 from "json-rpc/frame" import {
     writeFrame as writeFrameFd
@@ -751,6 +751,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     reason: stopReason.clone(), description: stopDesc.clone(), atMain: stopAtMainHit,
                     scopeRef: scopeRef, registersRef: regRef,
                     frames: framesJs.clone(), locals: localsJson(msg.doc),
+                    by: Attribution { by: gSession.proc.driver.by.clone(), who: gSession.proc.driver.who.clone() },
                 }
                 wsPush(ch, stoppedMsg(info))
                 gSession.stop.stop = Option.Some(info)

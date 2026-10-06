@@ -86,6 +86,18 @@ pub fn cmdVerb(c: &string): string {
     return c.clone()
 }
 
+// A command whose answer is a stop is the one that caused the next stop, so a
+// stop is attributed to whoever last sent one of these. Read off `awaits`
+// rather than listed again, so a new stepping command is attributed for free.
+pub fn cmdMovesProgram(c: &string): bool {
+    for s in commandSpecs() {
+        if s.name == c {
+            return s.awaits == "stopped"
+        }
+    }
+    return false
+}
+
 // Comma-separated names, for an error that tells the caller what it may say.
 pub fn cmdNames(): string {
     var out: string = ""
