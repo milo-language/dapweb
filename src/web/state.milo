@@ -339,6 +339,9 @@ pub struct RrHit {
     isStop: bool, // the stop `interval` itself, at a breakpoint
     bp: i64, // index into Rewind.current (hits only)
     bpOrd: i64, // the how-many-th hit of that breakpoint in this interval
+    // Known to be a pass before the stop that ends its interval (rrCountStop's
+    // passes under a landing breakpoint), not a logpoint whose timing is guessed.
+    exact: bool,
 }
 
 // A re-run in progress. Nothing it does reaches a peer until it lands.

@@ -155,6 +155,15 @@ try {
   rc = stopOf(await cmd({ cmd: "reverseContinue" }));
   ok(rc.line === ADD && rc.vars.cents === "475" && rc.vars.total === "7189",
      "and again, on the one before it", brief(rc));
+  // Each landing so far was on the launch itself; a third used to re-count
+  // without the landing's breakpoint and land on order 1007 forever.
+  rc = stopOf(await cmd({ cmd: "reverseContinue" }));
+  ok(rc.line === ADD && rc.vars.cents === "2100" && rc.vars.count === "5",
+     "a third reverse continue keeps going back (order 1006)", brief(rc));
+  await cmd({ cmd: "reverseContinue" });
+  rc = stopOf(await cmd({ cmd: "reverseContinue" }));
+  ok(rc.line === ADD && rc.vars.cents === "705" && rc.vars.count === "3",
+     "five back from the failure is order 1004, whose 7.5 was read as 705 cents", brief(rc));
 
   // ── seek to a trace record ──
   const tr = await (await fetch(`${base}/api/trace`)).json();

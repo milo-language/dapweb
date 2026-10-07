@@ -270,6 +270,36 @@ fn rrEntryAt(stop: i64): i64 {
     return -1
 }
 
+// The entry that moved the program on from stop n, the launch included (stop 0).
+// A landing on the launch must be written into it like any other: left out, the
+// next count re-ran the launch without the landing breakpoint, ran past the
+// stop it was counting to, and every later reverse continue landed on the same
+// pass.
+fn rrEntryFrom(n: i64): i64 {
+    if n == 0 && gSession.replay.log.len > 0 && gSession.replay.log[0].cmd == "run" && gSession.replay.log[0].atStop == 0 {
+        return 0
+    }
+    return rrEntryAt(n)
+}
+
+// The passes of the breakpoint at path:line that the command reaching stop n
+// let by without stopping: N - 1 under a landing's hitCondition N, else 0.
+fn rrLandPasses(n: i64, path: &string, line: i64): i64 {
+    let i = rrEntryFrom(n - 1)
+    if i < 0 {
+        return 0
+    }
+    for b in gSession.replay.log[i].bps {
+        if b.enabled && b.logMessage.len == 0 && b.path == path && b.line == line && b.hitCondition.len > 0 {
+            let want = b.hitCondition.trim().parseInt() ?? 0
+            if want > 1 {
+                return want - 1
+            }
+        }
+    }
+    return 0
+}
+
 // Re-send whatever moved the program on from stop n, under its breakpoints.
 fn rrNext(n: i64): RrStep {
     let i = rrEntryAt(n)
@@ -344,7 +374,7 @@ fn rrFinish(n: i64, ok: bool): RrStep {
     if ok && mode == "land" {
         // The command that reached the landing is kept with the landing
         // breakpoint armed, so a later step back re-reaches it the same way.
-        let i = rrEntryAt(landAt)
+        let i = rrEntryFrom(landAt)
         if i >= 0 {
             let want = rrEffectiveBps(i)
             var e = cloneEntry(gSession.replay.log[i])
@@ -431,7 +461,16 @@ fn rrCountStop(n: i64): void {
     }
     let j = rrCurrentIdxAt(s.path, s.line)
     if j >= 0 {
-        rrPushHit(RrHit { interval: n, isStop: true, bp: j, bpOrd: 0 })
+        // A landing breakpoint (hitCondition N) on the command that reached
+        // this stop let N - 1 passes go by without a logpoint to count them;
+        // they are the stop's own earlier passes, so they are added here.
+        let passes = rrLandPasses(n, s.path, s.line)
+        var ord: i64 = 1
+        while ord <= passes {
+            rrPushHit(RrHit { interval: n - 1, isStop: false, bp: j, bpOrd: ord, exact: true })
+            ord = ord + 1
+        }
+        rrPushHit(RrHit { interval: n, isStop: true, bp: j, bpOrd: 0, exact: false })
     }
 }
 
@@ -454,7 +493,7 @@ pub fn rrOutput(text: &string): bool {
             }
         }
     }
-    rrPushHit(RrHit { interval: interval, isStop: false, bp: j, bpOrd: ord })
+    rrPushHit(RrHit { interval: interval, isStop: false, bp: j, bpOrd: ord, exact: false })
     return true
 }
 
@@ -476,13 +515,13 @@ fn rrStopIs(n: i64, path: &string, line: i64): bool {
 // Without this, reverse continue from a stop on a breakpoint line would land
 // where it already is.
 fn rrPick(k: i64): RrHit {
-    var best = RrHit { interval: -1, isStop: true, bp: -1, bpOrd: 0 }
+    var best = RrHit { interval: -1, isStop: true, bp: -1, bpOrd: 0, exact: false }
     var bestMinor: i64 = -1
     var hits: Vec<RrHit> = []
     var current: Vec<Bp> = []
     if let Option.Some(r) = gSession.replay.rewind {
         for h0 in r.hits {
-            hits.push(RrHit { interval: h0.interval, isStop: h0.isStop, bp: h0.bp, bpOrd: h0.bpOrd })
+            hits.push(RrHit { interval: h0.interval, isStop: h0.isStop, bp: h0.bp, bpOrd: h0.bpOrd, exact: h0.exact })
         }
         current = cloneBps(r.current)
     }
@@ -506,7 +545,9 @@ fn rrPick(k: i64): RrHit {
                 q = q + 1
             }
             let c = cloneBp(current[h.bp])
-            if pos == 1 && rrStopIs(h.interval, c.path, c.line) {
+            if h.exact {
+                minor = pos
+            } else if pos == 1 && rrStopIs(h.interval, c.path, c.line) {
                 asStop = true
             } else if pos == total && rrStopIs(h.interval + 1, c.path, c.line) {
                 asStop = true
@@ -519,9 +560,9 @@ fn rrPick(k: i64): RrHit {
         let later = major > best.interval || (major == best.interval && minor > bestMinor)
         if before && later {
             if asStop {
-                best = RrHit { interval: major, isStop: true, bp: h.bp, bpOrd: 0 }
+                best = RrHit { interval: major, isStop: true, bp: h.bp, bpOrd: 0, exact: false }
             } else {
-                best = RrHit { interval: major, isStop: false, bp: h.bp, bpOrd: h.bpOrd }
+                best = RrHit { interval: major, isStop: false, bp: h.bp, bpOrd: h.bpOrd, exact: false }
             }
             bestMinor = minor
         }
