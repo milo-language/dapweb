@@ -846,6 +846,7 @@ pub fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, b
 
     let deadline = epochMillis() + timeoutMs
     var out: string = ""
+    var failed: string = "" // a refusal whose stop is still to come (stopFollows)
     while epochMillis() < deadline {
         match ch.tryRecv() {
             Option.Some(sm) => {
@@ -855,14 +856,25 @@ pub fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, b
                 }
                 let mt = d.str("type") ?? ""
                 if mt == awaitType {
-                    out = m
+                    out = m.clone()
+                    if failed.len > 0 && mt == "stopped" {
+                        out = Json.obj().bool("ok", false).str("error", failed).raw("stopped", m).build()
+                    }
                     break
+                }
+                if failed.len > 0 {
+                    continue
                 }
                 // A rejected command never produces the awaited reply, so return
                 // the refusal rather than burning the caller's whole timeout and
                 // then reporting a useless {"error":"timeout"}.
                 if mt == "configError" || mt == "cmdError" {
-                    out = Json.obj().bool("ok", false).str("error", d.str("error") ?? "").build()
+                    let err = d.str("error") ?? ""
+                    if awaitType == "stopped" && (d.bool("stopFollows") ?? false) {
+                        failed = err
+                        continue
+                    }
+                    out = Json.obj().bool("ok", false).str("error", err).build()
                     break
                 }
             }
@@ -872,6 +884,9 @@ pub fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, b
         }
     }
     sinkUnregister(clientId)
+    if out.len == 0 && failed.len > 0 {
+        return Json.obj().bool("ok", false).str("error", failed).build()
+    }
     if out.len == 0 {
         return Json.obj().bool("ok", false).str("error", "timeout").str("awaited", awaitType).build()
     }

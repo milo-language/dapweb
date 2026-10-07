@@ -7,7 +7,10 @@
 //   - reverse continue lands on the last breakpoint hit before the current stop,
 //     including one passed while stepping and one before the failure;
 //   - seek to a trace record lands in user code, at the call it answered;
-//   - the refusals: nothing has run yet, the first stop has nothing before it.
+//   - the refusals: nothing has run yet, the first stop has nothing before it;
+//   - after any rewind the adapter holds the breakpoints the session lists:
+//     reverse continue never lands on a cleared line, continue stops at the
+//     ones left, and a rewind that finds nothing replies its error and stop.
 //
 // Self-spawns its server. Needs the milo compiler (MILO, as scripts/build.sh).
 // Usage: bun tests/e2e-replay.ts [binary]
@@ -179,6 +182,58 @@ try {
   // ── refusals ──
   const firstStop = await cmd({ cmd: "stepBack" });
   ok(firstStop.ok === false && /first stop/.test(firstStop.error), "the first stop of a run has nothing before it", firstStop);
+
+  // ── the adapter holds the session's breakpoints after every rewind ──
+  // The user's session: breakpoints set once the run has stopped (as from the
+  // UI), rewinds, two of them cleared. A breakpoint the launch did not have is
+  // armed as a logpoint while reverse continue counts, then as a breakpoint
+  // for the commands sent after it was set; lldb-dap kept it a logpoint, so
+  // the count missed passes, landed early, and the next rewind and continue
+  // ran straight to the abort.
+  await cmd({ cmd: "clearBreakpoint", path: SRC, line: ADD }, "breakpoint");
+  const ORDERS = lineOf("var orders: Vec<Order>");
+  const SPAWN = lineOf("let feeder = Task.spawn");
+  await cmd({ cmd: "setBreakpoint", path: SRC, line: ORDERS }, "breakpoint");
+  const s51 = stopOf(await cmd({ cmd: "run", stopAtMain: false, force: true }));
+  ok(s51.line === ORDERS, "a fresh run stops at the orders list", brief(s51));
+  await cmd({ cmd: "setBreakpoint", path: SRC, line: SPAWN }, "breakpoint");
+  await cmd({ cmd: "setBreakpoint", path: SRC, line: ADD }, "breakpoint");
+  for (let i = 0; i < 4; i++) await cmd({ cmd: "continue" });
+  rc = stopOf(await cmd({ cmd: "reverseContinue" }));
+  ok(rc.line === ADD && rc.vars.count === "1", "reverse continue past breakpoints set mid-run lands on the latest pass (order 1002)", brief(rc));
+  let fw = stopOf(await cmd({ cmd: "continue" }));
+  ok(fw.line === ADD && fw.vars.count === "2", "and continue from there stops at the breakpoint again (order 1003)", brief(fw));
+  await cmd({ cmd: "clearBreakpoint", path: SRC, line: ORDERS }, "breakpoint");
+  await cmd({ cmd: "clearBreakpoint", path: SRC, line: SPAWN }, "breakpoint");
+  const listed = (await state()).breakpoints.map((b: any) => b.line);
+  ok(listed.length === 1 && listed[0] === ADD, "only the add's breakpoint is listed", listed);
+  for (const count of ["1", "0"]) {
+    rc = stopOf(await cmd({ cmd: "reverseContinue" }));
+    ok(rc.line === ADD && rc.vars.count === count, `after the clears reverse continue lands on the add (count ${count})`, brief(rc));
+  }
+  // Nothing is left before: the cleared lines are not reverse continue's to
+  // land on. The API answers with the error and the stop it stayed at, in one
+  // reply: that stop used to arrive afterwards and be taken as the reply to
+  // the caller's next command.
+  const none = Bun.spawnSync([bin, "api", "--port", String(port), "reverse-continue"], { cwd: root });
+  const noneReply = JSON.parse(none.stdout.toString());
+  ok(noneReply.ok === false && /no breakpoint was hit/.test(noneReply.error) && noneReply.stopped?.line === ADD,
+     "`dapweb api reverse-continue` with only cleared lines before replies the error and where it stayed", noneReply);
+  const next = Bun.spawnSync([bin, "api", "--port", String(port), "continue"], { cwd: root });
+  fw = stopOf(JSON.parse(next.stdout.toString()));
+  ok(fw.line === ADD && fw.vars.count === "1", "the next `dapweb api continue` replies its own stop, at the listed breakpoint (order 1002)", brief(fw));
+
+  // Run again, to the abort, and back: every landing is the one breakpoint
+  // listed, and continue after the rewinds stops at it.
+  let a = stopOf(await cmd({ cmd: "run", stopAtMain: false, force: true }));
+  for (let i = 0; i < 8 && a.line === ADD; i++) a = stopOf(await cmd({ cmd: "continue" }));
+  ok(a.reason === "exception" || a.reason === "signal", "the new run passes the add eight times, then aborts", brief(a));
+  for (const count of ["7", "6", "5", "4", "3"]) {
+    rc = stopOf(await cmd({ cmd: "reverseContinue" }));
+    ok(rc.line === ADD && rc.vars.count === count, `reverse continue from the abort lands on the add (count ${count})`, brief(rc));
+  }
+  fw = stopOf(await cmd({ cmd: "continue" }));
+  ok(fw.line === ADD && fw.vars.count === "4", "continue after the rewinds stops at the breakpoint still listed", brief(fw));
 
   console.log(`\ne2e-replay: ${pass} checks passed`);
   cleanup();

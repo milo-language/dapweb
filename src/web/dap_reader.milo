@@ -744,7 +744,10 @@ fn rrApplyStep(cl: &mut DapClient, pend: &mut Vec<Pending>, ch: &Channel<string>
     rrSendReqs(&mut cl, &mut pend, step.reqs)
     if step.error.len > 0 {
         logEvent("rewind failed", step.error)
-        wsPush(ch, cmdErrorMsg(why, step.error))
+        // stopFollows: the stop it gave up at is shown next. An API caller
+        // awaiting "stopped" takes both as one reply; returning on the error
+        // alone left that stop to be read as the reply to its NEXT command.
+        wsPush(ch, Json.obj().str("type", "cmdError").str("cmd", why).str("error", step.error).bool("stopFollows", step.show).build())
         wsPush(ch, replayStateMsg(gSession))
     }
     if step.relaunch {
