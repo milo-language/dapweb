@@ -655,7 +655,9 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
    two readings of the same event are obviously the same event. */
 /* Always in the layout, empty when no agent is acting: appearing and vanishing
    used to move the status and the follow toggle each time an agent ran a command. */
+/* A fixed line box: an empty span is 0px tall and centres lower than a full one. */
 .agent-note { margin-left: 10px; font-size: 11px; color: var(--agent); width: 220px; flex: none;
+              height: 16px; line-height: 16px;
               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agent-note + .status, .follow-chip + .status { margin-left: 12px; }
 /* Pushes the agent cluster (toggle, note) and the status pill to the right. */
@@ -831,3 +833,31 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
 /* Replay sessions: the mode word in the target chip, and the backwards buttons. */
 .target-chip.replay .target-mode { color: var(--agent); font-weight: 700; }
 .toolbar.reverse button:not(:disabled) .ci { color: var(--agent); }
+
+/* Overflow menu for the machine-level controls (disassembly, instruction steps). */
+.more-wrap { position: relative; display: inline-flex; }
+.more-pop { left: 0; right: auto; min-width: 290px; }
+.menu-check { display: inline-block; width: 16px; color: var(--accent); }
+
+/* Narrower windows. Every slot has a fixed width per breakpoint, never per
+   state, so within a window size nothing moves when the program stops, exits
+   or an agent acts. The order of what gives way: the wordmark's letters, then
+   the agent note and status width, then the primary button's label (the glyph
+   and its tip still say Run, Continue or Pause). The tiers are sized for a
+   replay session, whose two backwards buttons take another 82px. */
+@media (max-width: 1519px) {
+  .logo span { display: none; }
+  .targetbar { min-width: 170px; }
+  .agent-note { width: 110px; }
+  .status { width: 150px; }
+}
+@media (max-width: 1239px) {
+  header { gap: 8px; padding: 6px 10px; }
+  .toolbar + .toolbar { padding-left: 8px; }
+  .targetbar { min-width: 140px; }
+  /* The console logs every agent command too; follow-agent still flashes the line. */
+  .agent-note { display: none; }
+  .status { width: 120px; }
+  .toolbar button.primary { width: 40px; padding: 0; }
+  .primary-label { display: none; }
+}

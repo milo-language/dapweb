@@ -1,6 +1,6 @@
 // The header's transport controls: Run/Pause/Continue, stepping, restart/stop,
-// and the two disassembly toggles.
-import React from "react";
+// and an overflow menu with the disassembly toggles and instruction steps.
+import React, { useState } from "react";
 import type { Phase } from "./primary";
 import { primaryAction } from "./primary";
 import { send } from "./rpc";
@@ -14,7 +14,7 @@ const CI = {
   run: 0xead3, cont: 0xeacf, pause: 0xead1,
   stepOver: 0xead6, stepInto: 0xead4, stepOut: 0xead5,
   restart: 0xead2, stop: 0xead7, chip: 0xec19,
-  stepBack: 0xeb8f, reverseCont: 0xeb8e,
+  stepBack: 0xeb8f, reverseCont: 0xeb8e, more: 0xea7c,
 };
 
 // The two backwards controls of a replay session. Passed only when the session
@@ -39,12 +39,15 @@ export function Transport({ primary, phase, asm, inlineAsm, canInstrStep, canDis
   onDisasm: () => void; onInlineAsm: () => void; reverse?: Reverse;
 }) {
   const stopped = phase === "stopped";
+  const [more, setMore] = useState(false);
+  // Instruction steps are pressed in runs, so they leave the menu open.
+  const stepI = (cmd: string) => resume(cmd, "instruction");
   return (
     <>
       <span className="toolbar">
         <button className="primary" disabled={primary.disabled} data-tip={primary.tip} onClick={onPrimary}>
           <Ico g={primary.kind === "continue" ? CI.cont : primary.kind === "pause" ? CI.pause : CI.run} />
-          {primary.label}
+          <span className="primary-label">{primary.label}</span>
         </button>
       </span>
       {reverse && (
@@ -59,29 +62,44 @@ export function Transport({ primary, phase, asm, inlineAsm, canInstrStep, canDis
         <button disabled={!stopped} data-tip="Step over (F10)" onClick={() => resume("stepOver")}><Ico g={CI.stepOver} /></button>
         <button disabled={!stopped} data-tip="Step into (F11)" onClick={() => resume("stepIn")}><Ico g={CI.stepInto} /></button>
         <button disabled={!stopped} data-tip="Step out (Shift+F11)" onClick={() => resume("stepOut")}><Ico g={CI.stepOut} /></button>
-        {/* Always present, disabled without disassembly: appearing on the toggle
-            moved every button to their right. */}
-        <button disabled={!asm || !canInstrStep}
-                data-tip={asm ? "Step one instruction, over calls" : "Step one instruction (turn on disassembly first)"}
-                onClick={() => resume("stepOver", "instruction")}><Ico g={CI.stepOver} sub="i" /></button>
-        <button disabled={!asm || !canInstrStep}
-                data-tip={asm ? "Step one instruction, into calls" : "Step one instruction (turn on disassembly first)"}
-                onClick={() => resume("stepIn", "instruction")}><Ico g={CI.stepInto} sub="i" /></button>
       </span>
       <span className="toolbar">
         <button disabled={phase !== "running" && phase !== "stopped"}
                 data-tip="Restart: same target, from the top, breakpoints persist (Ctrl+Shift+F5)" onClick={restart}><Ico g={CI.restart} /></button>
         <button disabled={phase !== "running" && phase !== "stopped"}
                 data-tip="Stop: terminate the program (Shift+F5)" onClick={() => send({ cmd: "kill" })}><Ico g={CI.stop} /></button>
-        <button disabled={!canDisasm}
-                className={asm && !inlineAsm ? "asm-on" : ""}
-                data-tip={stopped ? "Disassembly: show machine code beside the source"
-                               : "Disassembly (available while stopped, adapter must support it)"}
-                onClick={onDisasm}><Ico g={CI.chip} /></button>
-        <button disabled={!canDisasm}
-                className={inlineAsm ? "asm-on" : ""}
-                data-tip="Inline disassembly: show each source line's machine code under it"
-                onClick={onInlineAsm}><Ico g={CI.chip} sub="s" /></button>
+        {/* The machine-level controls live behind one button: the header has no
+            width for four icons most sessions never press. Always present, so
+            nothing moves; blue while either disassembly view is on. */}
+        <span className="more-wrap">
+          <button className={asm ? "asm-on" : ""} aria-label="more controls" aria-expanded={more}
+                  data-tip={more ? undefined : "Disassembly and instruction steps"}
+                  onClick={() => setMore((v) => !v)}><Ico g={CI.more} /></button>
+          {more && (
+            <>
+              <div className="menu-backdrop" onClick={() => setMore(false)} />
+              <div className="menu-pop more-pop">
+                <button className="menu-item" disabled={!canDisasm} onClick={() => { setMore(false); onDisasm(); }}>
+                  <span><span className="menu-check">{asm && !inlineAsm ? "✓" : ""}</span>Disassembly</span>
+                  <span className="menu-hint">{canDisasm ? "beside the source" : "while stopped"}</span>
+                </button>
+                <button className="menu-item" disabled={!canDisasm} onClick={() => { setMore(false); onInlineAsm(); }}>
+                  <span><span className="menu-check">{inlineAsm ? "✓" : ""}</span>Inline disassembly</span>
+                  <span className="menu-hint">under each line</span>
+                </button>
+                <div className="menu-sep" />
+                <button className="menu-item" disabled={!asm || !canInstrStep} onClick={() => stepI("stepOver")}>
+                  <span><span className="menu-check" />Step instruction, over calls</span>
+                  <span className="menu-hint">{asm ? "" : "disassembly first"}</span>
+                </button>
+                <button className="menu-item" disabled={!asm || !canInstrStep} onClick={() => stepI("stepIn")}>
+                  <span><span className="menu-check" />Step instruction, into calls</span>
+                  <span className="menu-hint">{asm ? "" : "disassembly first"}</span>
+                </button>
+              </div>
+            </>
+          )}
+        </span>
       </span>
     </>
   );
