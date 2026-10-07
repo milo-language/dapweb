@@ -124,6 +124,11 @@ try {
   // Forward again from the earlier stop is the same program: stop 5 again.
   const again = stopOf(await cmd({ cmd: "stepOver" }));
   ok(same(again, seen[4]), "stepping forward again reaches the same stop 5", { got: brief(again), want: brief(seen[4]) });
+  // The agent's CLI verb is the same command.
+  const cli = Bun.spawnSync([bin, "api", "--port", String(port), "step-back"], { cwd: root });
+  const cliStop = stopOf(JSON.parse(cli.stdout.toString()));
+  ok(cli.exitCode === 0 && same(cliStop, seen[3]), "`dapweb api step-back` goes back too", { code: cli.exitCode, got: brief(cliStop) });
+  await cmd({ cmd: "stepOver" });
 
   // ── reverse continue ──
   // From stop 5 (a step past the add), the last breakpoint hit is stop 4.

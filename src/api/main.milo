@@ -225,6 +225,9 @@ fn usage(): string {
         "                           break when a local of the current stop, or memory, is accessed\n" +
         "  eval <expr>              evaluate in the current stop frame\n" +
         "  run                      launch/relaunch, blocking until the first stop\n" +
+        "  step-back                go back to the previous stop (replay sessions)\n" +
+        "  reverse-continue         go back to the last breakpoint hit (replay sessions)\n" +
+        "  seek --record N          stop in user code where trace record N is answered (replay sessions)\n" +
         "  kill                     terminate the debuggee\n\n" +
         "target selection (all commands except list):\n" +
         "  --session <id>   pick a session by id prefix     --port <n>   pick by port\n" +
@@ -246,6 +249,7 @@ pub fn apiMain(argv: Vec<string>): i32 {
     p.addI64("port", "", "server port", 0)
     p.addI64("timeout", "", "await timeout in ms", 5000)
     p.addI64("line", "", "line number for break", 0)
+    p.addI64("record", "", "trace record for seek", 0)
     p.addString("address", "", "memory address for watch", "")
     p.addI64("size", "", "bytes to watch at --address", 0)
     p.addString("access", "", "watch access type: read | write | readWrite", "")
@@ -402,6 +406,32 @@ pub fn apiMain(argv: Vec<string>): i32 {
             at = "evalResult"
         }
         return postCmd(port, b.build(), at, timeout, pretty)
+    }
+
+    // A rewind relaunches the program and replays it, which takes a second or
+    // two: the default 5s await is short for a long recording.
+    if cmd == "step-back" || cmd == "reverse-continue" || cmd == "seek" {
+        var at = awaitFlag.clone()
+        if at.len == 0 {
+            at = "stopped"
+        }
+        var t = timeout
+        if t == 5000 {
+            t = 60000
+        }
+        var b = Json.obj().str("cmd", "stepBack")
+        if cmd == "reverse-continue" {
+            b = Json.obj().str("cmd", "reverseContinue")
+        }
+        if cmd == "seek" {
+            let rec = parsed.getI64("record")
+            if rec <= 0 {
+                eprint("error: seek needs --record <n> (see the Timeline tab, or `milo trace <file>`)\n")
+                return 1
+            }
+            b = Json.obj().str("cmd", "seek").int("record", rec)
+        }
+        return postCmd(port, b.build(), at, t, pretty)
     }
 
     if cmd == "kill" {
