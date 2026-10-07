@@ -12,7 +12,7 @@ from "../sessions" import {
     newSessionName
 }
 from "./bpargs" import {
-    buildBpArgsForPath
+    buildBpArgsForPath, bpArgsTransition
 }
 from "./rewind" import {
     rrOn, rrRewinding, rrLog, rrPrevStop, rrCannotReach, rrBegin, rrAbort, rrLaunchStopAtMain
@@ -27,7 +27,7 @@ from "./persist" import {
     absSourcePath, applyConfig, persistBps, loadBps, persistHistory, recordConfig, historyChangedMsg, sessionNameSeeds, journalHere
 }
 from "./state" import {
-    gSession, Bp, cloneBp, DataBp, cloneDataBp, dataBpsMsg, PendingRun, Attribution, attributionFor, sourceMsgBy, replayStateMsg
+    gSession, Bp, cloneBp, cloneBps, DataBp, cloneDataBp, dataBpsMsg, PendingRun, Attribution, attributionFor, sourceMsgBy, replayStateMsg
 }
 from "std/json" import {
     Json
@@ -255,6 +255,7 @@ fn cmdBreakpoint(cmd: &Cmd): void {
         wsPush(cmd.bus, cmdErrorMsg(cmd.name, "a breakpoint needs a path: no source is configured and nothing is stopped"))
         return
     }
+    let before = cloneBps(gSession.persisted.bps)
     // Upsert: drop any existing bp at (path, line), then re-add for
     // "set" (a condition edit is a set on an existing line).
     var keep: Vec<Bp> = []
@@ -278,7 +279,10 @@ fn cmdBreakpoint(cmd: &Cmd): void {
     }
     persistBps()
     wsPush(cmd.bus, bpAckMsg(bp, set, cmd.by))
-    sendPending(cmd.pendCh, "bpLive", 0, "", "setBreakpoints", buildBpArgsForPath(gSession.persisted.bps, path))
+    // A logpoint turned back into a breakpoint must be re-created, not updated.
+    for a in bpArgsTransition(before, gSession.persisted.bps, path) {
+        sendPending(cmd.pendCh, "bpLive", 0, "", "setBreakpoints", a)
+    }
 }
 
 // Two round trips, chained in D: dataBreakpointInfo turns the variable (ref +

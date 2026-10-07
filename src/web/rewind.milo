@@ -17,7 +17,7 @@
 // Every name here starts with rr: Milo merges same-named functions across modules.
 
 from "./bpargs" import {
-    buildBpArgsForPath, bpEnabledAt
+    buildBpArgsForPath, bpEnabledAt, bpArgsTransition
 }
 from "./state" import {
     gSession, Bp, cloneBp, cloneBps, RrEntry, cloneEntry, RrStop, cloneStop, RrHit, Rewind
@@ -217,9 +217,8 @@ fn rrBpSync(from: &Vec<Bp>, to: &Vec<Bp>): Vec<RrReq> {
     }
     var out: Vec<RrReq> = []
     for p in paths {
-        let want = buildBpArgsForPath(to, p)
-        if buildBpArgsForPath(from, p) != want {
-            out.push(RrReq { command: "setBreakpoints", args: want, kind: "bpLive" })
+        for a in bpArgsTransition(from, to, p) {
+            out.push(RrReq { command: "setBreakpoints", args: a.clone(), kind: "bpLive" })
         }
     }
     return out

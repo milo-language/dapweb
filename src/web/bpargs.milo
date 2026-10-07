@@ -2,7 +2,7 @@
 // (dispatch) and the rewind engine, which arms lists other than the user's own.
 
 from "./state" import {
-    gSession, Bp
+    gSession, Bp, cloneBp
 }
 from "std/json" import {
     Json
@@ -47,4 +47,42 @@ pub fn buildBpArgsForPath(bps: &Vec<Bp>, path: &string): string {
         .obj("source", Json.obj().str("path", path))
         .arr("breakpoints", arr)
         .build()
+}
+
+fn bpSameAt(bps: &Vec<Bp>, b: &Bp): bool {
+    for o in bps {
+        if o.enabled && o.path == b.path && o.line == b.line {
+            return o.condition == b.condition && o.hitCondition == b.hitCondition && o.logMessage == b.logMessage
+        }
+    }
+    return true
+}
+
+// The setBreakpoints bodies that take the adapter from `from` to `to` in one
+// file, in order ([] when nothing changes). lldb-dap updates a breakpoint that
+// stays on its line in place, and that update does not take a logMessage away:
+// the line stays a logpoint and never stops again (a reverse continue's count
+// left the user's breakpoint like that, and the next continue ran to the end).
+// So a line whose breakpoint changes is removed by a first request and created
+// anew by the second.
+pub fn bpArgsTransition(from: &Vec<Bp>, to: &Vec<Bp>, path: &string): Vec<string> {
+    var out: Vec<string> = []
+    let want = buildBpArgsForPath(to, path)
+    if buildBpArgsForPath(from, path) == want {
+        return out
+    }
+    var kept: Vec<Bp> = []
+    var changed = false
+    for b in to {
+        if b.path == path && b.enabled && !bpSameAt(from, b) {
+            changed = true
+        } else {
+            kept.push(cloneBp(b))
+        }
+    }
+    if changed {
+        out.push(buildBpArgsForPath(kept, path))
+    }
+    out.push(want)
+    return out
 }
