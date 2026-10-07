@@ -65,15 +65,20 @@ pub fn peerPush(ch: &Channel<Shared>, msg: Shared): void {
 }
 
 // W: sole socket writer. Parks on its channel until sinkUnregister closes it,
-// then drains what is left. R joins this task before releasing the socket fd:
-// otherwise a frame still queued here lands on a closed fd or on whatever
-// connection reused that fd number.
-pub fn wsWriterLoop(fd: i32, ch: Channel<Shared>): void {
-    // Borrowed view of the conn: its Drop skips teardown (R owns the real one).
-    var conn = WsConn.view(fd, 0, false)
-    var rx = ch
-    for m in rx {
-        let _r = conn.sendShared(m)
+// then drains what is left. It runs as a scoped task of R (handleDebugWs) and
+// borrows R's connection: Task.scope cannot return, and so `conn` cannot close,
+// until this loop has ended. The compiler holds that, not a join R must remember.
+pub fn wsWriterLoop(conn: &WsConn, ch: &Channel<Shared>): void {
+    // recv, not `for m in ch`: a for-in needs to own the channel, and this one is borrowed.
+    while true {
+        match ch.recv() {
+            Result.Ok(m) => {
+                let _r = conn.sendShared(m)
+            }
+            Result.Err(_e) => {
+                break
+            }
+        }
     }
 }
 

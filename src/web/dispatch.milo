@@ -895,52 +895,47 @@ pub fn apiRunCmd(body: string, awaitType: string, timeoutMs: i64, who: string, b
 
 // ── R: the WS-reader task (entry point per debug WebSocket) ──
 
-pub fn handleDebugWs(ws: WsConn, peerKind: string, bus: &Channel<string>, pendCh: &Channel<Pending>): void {
-    var conn = ws
-
+pub fn handleDebugWs(conn: WsConn, peerKind: string, bus: &Channel<string>, pendCh: &Channel<Pending>): void {
     let ch = Channel<Shared>.new(256)!
-    let wfd = conn.fd
-    // Channel handles are refcounted and @send: the writer task outlives this
-    // frame, so it gets its own retained handle (as does the registry's Sink).
-    let writerCh = ch.clone()
-    let writer = Task.spawn(move(): void => {
-        wsWriterLoop(wfd, writerCh)
-    }
-    )
+    // The writer W is a scoped task borrowing `conn` and `ch`: Task.scope returns only
+    // after W has finished, so no frame can reach the socket after `conn` drops (the
+    // bug the old raw-fd writer had whenever the join was missed).
+    Task.scope((s) => {
+        s.spawn(() => wsWriterLoop(conn, ch))
 
-    // join the shared session. Register with the broadcaster, then replay
-    // current state directly onto our own sink — no yield point in between,
-    // so the replay is ordered before any subsequent broadcast fanout.
-    let clientId = gSession.peers.nextClient
-    gSession.peers.nextClient = gSession.peers.nextClient + 1
-    sinkRegister(clientId, ch)
-    gSession.peers.count = gSession.peers.count + 1
-    logEvent("peer connected", $"{peerKind}  {peerCountStr()}")
+        // join the shared session. Register with the broadcaster, then replay
+        // current state directly onto our own sink — no yield point in between,
+        // so the replay is ordered before any subsequent broadcast fanout.
+        let clientId = gSession.peers.nextClient
+        gSession.peers.nextClient = gSession.peers.nextClient + 1
+        sinkRegister(clientId, ch)
+        gSession.peers.count = gSession.peers.count + 1
+        logEvent("peer connected", $"{peerKind}  {peerCountStr()}")
 
-    for m in gSession.snapshot() {
-        peerPush(ch, m.clone())
-    }
+        for m in gSession.snapshot() {
+            peerPush(ch, m.clone())
+        }
 
-    while true {
-        var payload: string = ""
-        match conn.recv() {
-            Result.Ok(m) => {
-                payload = m.payload
+        while true {
+            var payload: string = ""
+            match conn.recv() {
+                Result.Ok(m) => {
+                    payload = m.payload
+                }
+                Result.Err(_e) => {
+                    break
+                }
             }
-            Result.Err(_e) => {
-                break
+
+            if let Option.Some(bad) = dispatchClientCmd(payload, peerKind.clone(), peerKind.clone(), bus, pendCh) {
+                wsPush(bus, configErrMsg($"unknown command {bad}"))
             }
         }
 
-        if let Option.Some(bad) = dispatchClientCmd(payload, peerKind.clone(), peerKind.clone(), bus, pendCh) {
-            wsPush(bus, configErrMsg($"unknown command {bad}"))
-        }
-    }
-
-    // Leave the shared session; sinkUnregister closes our channel, which ends
-    // the writer. Wait for it to exit before `conn` drops and closes the socket.
-    sinkUnregister(clientId)
-    writer.join()
+        // Leave the shared session; sinkUnregister closes our channel, which ends
+        // the writer once the queued frames are out. The scope then joins it.
+        sinkUnregister(clientId)
+    })
     gSession.peers.count = gSession.peers.count - 1
     gSession.peers.lastActivityMs = epochMillis()
     logEvent("peer disconnected", $"{peerKind}  {peerCountStr()}")
