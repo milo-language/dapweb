@@ -19,6 +19,20 @@ function decodeCStr(bytes: Uint8Array | null): string {
   return s.length >= 2 ? s : "";
 }
 
+// Heap text is usually not NUL-terminated (a string's bytes sit in a buffer with
+// a length elsewhere), so accept a printable run that stops at anything else.
+// Three characters minimum: two printable bytes are common in pointer data.
+function decodeTextPrefix(bytes: Uint8Array | null): string {
+  if (!bytes) return "";
+  let s = "";
+  for (const b of bytes) {
+    if (b < 0x20 || b > 0x7e) break;
+    s += String.fromCharCode(b);
+    if (s.length >= 40) { s += "…"; break; }
+  }
+  return s.length >= 3 ? s : "";
+}
+
 // A per-slot annotation for an 8-byte group: what this word *is* — a typed
 // local (from DWARF), a saved frame pointer / return address, or a pointer into
 // a named region. `follow` (present on typed pointers) opens the struct view.
@@ -74,7 +88,7 @@ export function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, lo
       for (let i = 7; i >= 0; i--) ptr = (ptr << 8n) | BigInt(mem.bytes[off + i]);
       if (ptr < 0x10000n || ptr >= 0x800000000000n) continue;
       const preg = classify ? classify("0x" + ptr.toString(16)) : null;
-      if ((preg === "const" || preg === "data" || preg === "code") && !ips.has(ptr.toString()))
+      if ((preg === "const" || preg === "data" || preg === "code" || preg === "heap") && !ips.has(ptr.toString()))
         s.add("0x" + ptr.toString(16));
     }
     return s;
@@ -84,7 +98,11 @@ export function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, lo
     let live = true;
     const missing = [...peekTargets].filter((t) => !peeks.has(t)).slice(0, 24);
     if (!missing.length) return;
-    Promise.all(missing.map(async (t) => [t, decodeCStr(await readMemAt(t, 48))] as const))
+    Promise.all(missing.map(async (t) => {
+      const bytes = await readMemAt(t, 48);
+      const heap = classify ? classify(t) === "heap" : false;
+      return [t, heap ? decodeTextPrefix(bytes) : decodeCStr(bytes)] as const;
+    }))
       .then((pairs) => {
         if (!live) return;
         setPeeks((prev) => { const n = new Map(prev); for (const [t, str] of pairs) n.set(t, str); return n; });
@@ -191,14 +209,16 @@ export function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, lo
           <span className="memaddr">0x{(baseAddr + BigInt(off)).toString(16).padStart(12, "0")}</span>
           <span className="membytes">{groups}</span>
           <span className="memascii">{ascii}</span>
+          {/* One column, not one cell per word: a cell per word put a right-hand
+              word's label far out at the edge and the column read as a zigzag.
+              With both words labelled, each says which it is (+0 / +8). */}
           <span className="memannos">
-            {annos.map((a, wi) => (
+            {annos.map((a, wi) => a && (
               <span key={wi} className="annocell"
-                    title={a ? (a.follow ? `follow ${a.follow.name} → ${a.follow.target}  (typed as ${a.follow.type})` : (a.full || a.text)) : undefined}>
-                {a && (
-                  <span className={"anno" + (a.cls ? " " + a.cls : "") + (a.follow ? " annofollow" : "")}
-                        onClick={a.follow ? () => doFollow(a.follow!) : undefined}>{a.text}</span>
-                )}
+                    title={a.follow ? `follow ${a.follow.name} → ${a.follow.target}  (typed as ${a.follow.type})` : (a.full || a.text)}>
+                {annos.filter(Boolean).length > 1 && <span className="annoff">+{wi * 8}</span>}
+                <span className={"anno" + (a.cls ? " " + a.cls : "") + (a.follow ? " annofollow" : "")}
+                      onClick={a.follow ? () => doFollow(a.follow!) : undefined}>{a.text}</span>
               </span>
             ))}
           </span>
