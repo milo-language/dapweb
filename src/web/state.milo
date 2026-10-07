@@ -17,8 +17,8 @@ from "std/json" import {
 from "std/io" import {
     readFile
 }
-from "std/pty" import {
-    Pty
+from "./ptychild" import {
+    DebuggeePty
 }
 from "std/process" import {
     Child
@@ -147,9 +147,9 @@ pub struct RunState {
     // R's write fd into the adapter; Some exactly while a run is live.
     dapIn: Option<i32>,
     // The live debuggee pty, for stdin and resize.
-    pty: Option<Pty>,
-    // A closed pty kept for its child pid until the child is reaped: see reapPtyChild.
-    ptyGone: Option<Pty>,
+    pty: Option<DebuggeePty>,
+    // A closed pty kept for its child pid until the child is reaped: see closePty.
+    ptyGone: Option<DebuggeePty>,
     // The browser sizes its terminal on mount, before any pty exists, so the
     // last size asked for is kept and applied at spawn.
     term: Option<TermSize>,

@@ -7,3 +7,4 @@ node_modules
 src/web/ui/dist/
 docs/shots/
 examples/replay-demo/out/
+src/web/_ptyreap_probe_*

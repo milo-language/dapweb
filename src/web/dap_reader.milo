@@ -46,8 +46,8 @@ from "std/path" import {
 from "std/process" import {
     Child, processAlive, terminateProcess, capture
 }
-from "std/pty" import {
-    Pty
+from "./ptychild" import {
+    DebuggeePty
 }
 from "std/runtime" import {
     Task
@@ -277,27 +277,16 @@ fn ptyPumpLoop(reader: OwnedFd, master: i32, ch: Channel<string>): void {
     }
 }
 
-// The one way a Pty leaves proc.pty for good: Pty has no Drop, so overwriting or
-// clearing the slot without this leaks the master.
-fn closePty(p: Pty): void {
+// The one way a pty leaves proc.pty other than reap(): it has no Drop, so
+// overwriting or clearing the slot without this leaks the master. Its child is
+// reaped when the next one is closed, or at run end. Unreaped, it stays a zombie,
+// and a zombie passes processAlive, so reapDebuggee would wait its full 500ms on
+// every run (and every step back relaunches).
+fn closePty(p: DebuggeePty): void {
     var pty = p
-    pty.close()
-    // The debuggee runInTerminal launched is our child: kept until reaped.
+    pty.closeMaster()
     if let Option.Some(old) = replace(gSession.proc.ptyGone, Option.Some(pty)) {
-        reapPtyChild(old)
-    }
-}
-
-// Reap a pty's child once the adapter is done with it (it killed it, or the run
-// ended). Unreaped, it stays a zombie, and a zombie passes processAlive, so
-// reapDebuggee waited its full 500ms on every run (and every step back
-// relaunches). SIGKILL is a no-op on a zombie and cannot be ignored by a live
-// child, so the wait after it returns at once.
-fn reapPtyChild(p: Pty): void {
-    if p.pid() > 0 {
-        reaperForget(p.pid() as i64)
-        p.kill()
-        let _st = p.wait()
+        old.reap()
     }
 }
 
@@ -636,63 +625,55 @@ fn handleRunInTerminal(cl: &mut DapClient, doc: &Json, reqSeq: i64, ch: &Channel
         }
     }
 
-    match Pty.open() {
+    var rows: i64 = 0
+    var cols: i64 = 0
+    if let Option.Some(t) = gSession.proc.term {
+        rows = t.rows
+        cols = t.cols
+    }
+    match DebuggeePty.spawn(program, args, rows, cols) {
         Result.Ok(p) => {
             var pty = p
-            // Before spawn, not after: the forked child sets the slave's size
-            // from the Pty's own rows/cols, and would overwrite a parent-side
-            // resize that raced it.
-            if let Option.Some(t) = gSession.proc.term {
-                let _r = pty.resize(t.rows as u16, t.cols as u16)
-            }
-            match pty.spawn(program, args) {
-                Result.Ok(pid) => {
-                    logEvent("debuggee spawned", $"pid {pid}")
-                    // Ours to reap: an adapter that routes the debuggee through
-                    // our pty is not the process's parent and cannot be relied on
-                    // to end it (js-debug's server does not).
-                    gSession.proc.debuggeePid = Option.Some(pid as i64)
-                    reaperTrack(pid as i64, "g")
-                    cl.respond(reqSeq, "runInTerminal", Json.obj().int("processId", pid as i64).build())
-                    let master = pty.masterFd
-                    let reader = match OwnedFd.dup(master) {
-                        Result.Ok(r) => {
-                            r
-                        }
-                        Result.Err(_e) => {
-                            eprint("[srv] pty dup failed\n")
-                            closePty(pty)
-                            return -1
-                        }
-                    }
-                    // direct global set (same scheduler thread) — and flush
-                    // any keystrokes typed while the adapter was launching.
-                    if gSession.proc.stdinBuf.len > 0 {
-                        let _n = pty.writeOnce(gSession.proc.stdinBuf)
-                        gSession.proc.stdinBuf = ""
-                    }
-                    // A restart replaces the pty: the old one's pump keeps its own
-                    // dup until the dead child EOFs it, so its master can go now.
-                    if let Option.Some(old) = replace(gSession.proc.pty, Option.Some(pty)) {
-                        closePty(old)
-                    }
-                    // Channel handles are refcounted: the pump task outlives this
-                    // call, so it gets its own retained handle rather than ours.
-                    let ptyCh = ch.clone()
-                    Task.spawn(move(): void => {
-                        ptyPumpLoop(reader, master, ptyCh)
-                    }
-                    )
-                    return master
+            let pid = pty.pid()
+            logEvent("debuggee spawned", $"pid {pid}")
+            // Ours to reap: an adapter that routes the debuggee through
+            // our pty is not the process's parent and cannot be relied on
+            // to end it (js-debug's server does not).
+            gSession.proc.debuggeePid = Option.Some(pid as i64)
+            cl.respond(reqSeq, "runInTerminal", Json.obj().int("processId", pid as i64).build())
+            let master = pty.fd()
+            let reader = match OwnedFd.dup(master) {
+                Result.Ok(r) => {
+                    r
                 }
-                Result.Err(e) => {
-                    eprint($"[srv] pty spawn failed: {e}\n")
+                Result.Err(_e) => {
+                    eprint("[srv] pty dup failed\n")
+                    closePty(pty)
                     return -1
                 }
             }
+            // direct global set (same scheduler thread) — and flush
+            // any keystrokes typed while the adapter was launching.
+            if gSession.proc.stdinBuf.len > 0 {
+                let _n = pty.writeOnce(gSession.proc.stdinBuf)
+                gSession.proc.stdinBuf = ""
+            }
+            // A restart replaces the pty: the old one's pump keeps its own
+            // dup until the dead child EOFs it, so its master can go now.
+            if let Option.Some(old) = replace(gSession.proc.pty, Option.Some(pty)) {
+                closePty(old)
+            }
+            // Channel handles are refcounted: the pump task outlives this
+            // call, so it gets its own retained handle rather than ours.
+            let ptyCh = ch.clone()
+            Task.spawn(move(): void => {
+                ptyPumpLoop(reader, master, ptyCh)
+            }
+            )
+            return master
         }
         Result.Err(e) => {
-            eprint($"[srv] pty open failed: {e}\n")
+            eprint($"[srv] pty spawn failed: {e}\n")
             return -1
         }
     }
@@ -1577,25 +1558,26 @@ fn reapDebuggee(): void {
     if let Option.Some(dpid) = gSession.proc.debuggeePid {
         let pid = dpid as i32
         // A debuggee launched in our pty is our own child: reaped, not waited
-        // out (see reapPtyChild).
+        // out. reap() consumes the handle, so it comes out of its slot in the
+        // same step and nothing can signal the reaped pid later.
         var ptyChild = false
-        if let Option.Some(p) = gSession.proc.pty {
-            ptyChild = p.pid() == pid
+        if let Option.Some(p) = replace(gSession.proc.pty, Option.None) {
+            if p.pid() == pid {
+                ptyChild = true
+                p.reap()
+            } else {
+                gSession.proc.pty = Option.Some(p)
+            }
         }
-        if let Option.Some(g) = gSession.proc.ptyGone {
-            ptyChild = ptyChild || g.pid() == pid
+        if let Option.Some(g) = replace(gSession.proc.ptyGone, Option.None) {
+            if ptyChild || g.pid() == pid {
+                ptyChild = true
+                g.reap()
+            } else {
+                gSession.proc.ptyGone = Option.Some(g)
+            }
         }
         if ptyChild {
-            if let Option.Some(p) = gSession.proc.pty {
-                if p.pid() == pid {
-                    reaperForget(dpid)
-                    p.kill()
-                    let _st = p.wait()
-                }
-            }
-            if let Option.Some(g) = replace(gSession.proc.ptyGone, Option.None) {
-                reapPtyChild(g)
-            }
             gSession.proc.debuggeePid = Option.None
             return
         }
@@ -1656,7 +1638,7 @@ pub fn killOwnedForExit(): void {
         closePty(p)
     }
     if let Option.Some(g) = replace(gSession.proc.ptyGone, Option.None) {
-        reapPtyChild(g)
+        g.reap()
     }
     killAdapterSrv()
 }

@@ -1,0 +1,79 @@
+// The debuggee's pty and the child process it owns. The only std/pty user in
+// dapweb (scripts/test.sh enforces that), because std's Pty lets any holder
+// kill() or wait() its child, including after the child was reaped and its pid
+// handed to an unrelated process. Here the child can be signalled and waited
+// only by reap(), which consumes the handle: once reaped, no handle is left
+// that could signal that pid again, and the move checker rejects any attempt.
+
+from "./reaper" import {
+    reaperTrack, reaperForget
+}
+from "std/pty" import {
+    Pty
+}
+
+pub struct DebuggeePty {
+    _pty: Pty,
+}
+
+impl DebuggeePty {
+    // Open a pty sized rows x cols (0 keeps the default) and spawn the program
+    // on it, in its own session (setsid) with the pty as controlling terminal.
+    // The reaper owns the pid from here until reap().
+    fn spawn(program: &string, args: &Vec<string>, rows: i64, cols: i64): Result<DebuggeePty, string> {
+        var pty = Pty.open()?
+        // Before spawn, not after: the forked child sets the slave's size from
+        // the Pty's own rows/cols, and would overwrite a parent-side resize that
+        // raced it.
+        if rows > 0 && cols > 0 {
+            let _r = pty.resize(rows as u16, cols as u16)
+        }
+        match pty.spawn(program, args) {
+            Result.Ok(pid) => {
+                reaperTrack(pid as i64, "g")
+                return Result.Ok(DebuggeePty {
+                    _pty: pty
+                })
+            }
+            Result.Err(e) => {
+                pty.close()
+                return Result.Err(e)
+            }
+        }
+    }
+
+    // The master, for the reader's dup and to tell ptys apart.
+    fn fd(self: &Self): i32 {
+        return self._pty.fd()
+    }
+
+    fn pid(self: &Self): i32 {
+        return self._pty.pid()
+    }
+
+    fn writeOnce(self: &Self, s: &string): i64 {
+        return self._pty.writeOnce(s)
+    }
+
+    fn resize(self: &mut Self, rows: u16, cols: u16): i32 {
+        return self._pty.resize(rows, cols)
+    }
+
+    // Idempotent. The child stays ours (and unreaped) until reap().
+    fn closeMaster(self: &mut Self): void {
+        self._pty.close()
+    }
+
+    // SIGKILL and wait the child, then close the master. SIGKILL is a no-op on a
+    // zombie and cannot be ignored by a live child, so the wait returns at once.
+    // The pid leaves the reaper's list first: after the wait it may be reused.
+    fn reap(self: Self): void {
+        var p = self._pty
+        if p.pid() > 0 {
+            reaperForget(p.pid() as i64)
+            p.kill()
+            let _st = p.wait()
+        }
+        p.close()
+    }
+}
