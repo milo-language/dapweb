@@ -225,6 +225,7 @@ export function TargetBar({ cfg, history: cfgHist, readCfg, writeCfg, onEnter }:
   const slash = prog.lastIndexOf("/");
   const chipMain = slash >= 0 ? prog.slice(slash + 1) : prog;
   const chipArgs = attachMode ? "" : ((cfg.args as string[]) || []).join(" ");
+  const replay = attachMode ? "" : ((cfg as any).replay as string) || "";
 
   const summary = attachMode ? "" : binSummary(inf?.binfo);
   const warns = attachMode || !inf || !probePath ? [] : binWarnings(inf.binfo, inf.hostArch, effKind);
@@ -232,9 +233,13 @@ export function TargetBar({ cfg, history: cfgHist, readCfg, writeCfg, onEnter }:
 
   return (
     <span className="targetbar">
-      <button className={"target-chip" + (attachMode ? " attach" : "")} onClick={openPicker}
-              data-tip={(prog ? prog + (chipArgs ? " " + chipArgs : "") + "  ·  " : "") + "change target (⌘K)"}>
-        <span className="target-mode">{attachMode ? "attach" : "launch"}</span>
+      {/* A replay session says so where the mode is named: it is a mode of the
+          launch (the program runs on a recording), and the header has no width
+          to spare for a chip of its own. */}
+      <button className={"target-chip" + (attachMode ? " attach" : "") + (replay ? " replay" : "")} onClick={openPicker}
+              data-tip={(replay ? `replaying the recording ${replay}: every run is the same run, so you can step backwards  ·  ` : "")
+                + (prog ? prog + (chipArgs ? " " + chipArgs : "") + "  ·  " : "") + "change target (⌘K)"}>
+        <span className="target-mode">{attachMode ? "attach" : replay ? "replay" : "launch"}</span>
         <span className="target-main">{chipMain || <em>choose a program</em>}</span>
         {chipArgs && <span className="target-args">{chipArgs}</span>}
         <span className="target-caret">▾</span>

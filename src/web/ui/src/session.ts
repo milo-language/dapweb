@@ -33,6 +33,15 @@ export type Stop = {
   frames: Frame[]; locals: Var[];
 };
 
+// Where a replay session is on its timeline (replayStateMsg in state.milo).
+// `prev` is the stop step back goes to (0 = none); `rewinding` names the command
+// a rewind in progress serves.
+export type ReplayPos = {
+  at: number; stops: number; prev: number; seekedTo: number; lastMs: number;
+  rewinding: string; target: number; mode: string;
+};
+export const noReplayPos: ReplayPos = { at: 0, stops: 0, prev: 0, seekedTo: 0, lastMs: 0, rewinding: "", target: 0, mode: "" };
+
 export type SessionState = {
   sessionId: string;
   program: string;
@@ -68,6 +77,8 @@ export type SessionState = {
   threads: Thread[];
   tlocs: Map<number, { label: string; pc: string }>;  // each thread's top frame
   regions: Region[];
+  replay: string;            // the trace a replay session runs on, "" for a live one
+  rr: ReplayPos;
 };
 
 export const initialSession: SessionState = {
@@ -78,6 +89,7 @@ export const initialSession: SessionState = {
   stop: null, stopSeq: 0,
   curTid: -1, frames: [], selFrame: 0, stopLine: 0, stopPath: "",
   locals: [], scopeRef: 0, threads: [], tlocs: new Map(), regions: [],
+  replay: "", rr: noReplayPos,
 };
 
 export type LocalAction =
@@ -141,6 +153,7 @@ export function sessionReducer(s: SessionState, m: SessionAction): SessionState 
         program: m.program ?? "", sourcePath: m.sourcePath || "",
         adapterCmd: m.adapterCmd || "", adapterId: m.adapterId || "debugger",
         config: m.config || {}, history: m.history || [], configError: "",
+        replay: m.replay || "", ...(m.replay ? {} : { rr: noReplayPos }),
         // The bp set and the files are re-sent after every hello (bpSync, source),
         // so these start empty rather than merging into a stale copy.
         bps: new Map(), files: new Map(),
@@ -183,6 +196,13 @@ export function sessionReducer(s: SessionState, m: SessionAction): SessionState 
     }
     case "regions":
       return { ...s, regions: m.regions || [] };
+    case "replayState":
+      return {
+        ...s, rr: {
+          at: m.at ?? 0, stops: m.stops ?? 0, prev: m.prev ?? 0, seekedTo: m.seekedTo ?? 0, lastMs: m.lastMs ?? 0,
+          rewinding: m.rewinding || "", target: m.target ?? 0, mode: m.mode || "",
+        },
+      };
     case "terminated":
       return {
         ...s, ...NO_STOP, phase: "done",

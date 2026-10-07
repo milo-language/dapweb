@@ -398,7 +398,26 @@ export default function App() {
       else if (m.type === "ptyData") termPut(termRef.current, "prog", m.data);
       // A command the server accepted but could not carry out (a goto the
       // adapter refused): say why where the user is looking for output.
-      else if (m.type === "cmdError") consoleAppend(`${m.cmd}: ${m.error}\n`, "err");
+      else if (m.type === "cmdError") {
+        consoleAppend(`${m.cmd}: ${m.error}\n`, "err");
+        // A refused step back never stops; the controls must not stay locked.
+        if (m.cmd === "stepBack" || m.cmd === "reverseContinue" || m.cmd === "seek") settle();
+      }
+      // A rewind relaunches the program and replays it to an earlier stop; the
+      // output it prints on the way is the output up to that stop, so the
+      // terminal starts over with it.
+      else if (m.type === "rewind") {
+        if (m.clear) termClear(termRef.current);
+        // A fresh process: the asm pane a no-source stop (the abort) opened
+        // would otherwise stay over the source the rewind lands in.
+        setDisasm(null);
+      }
+      else if (m.type === "replayState") {
+        if (m.rewinding) {
+          const what = m.rewinding === "seek" ? "seeking" : m.mode === "count" ? "counting breakpoint hits" : `rewinding to stop ${m.target}`;
+          setStatus({ text: `${what}: re-running the recording`, short: "rewinding…", cls: "running rewinding" });
+        }
+      }
       else if (m.type === "restartFailed") {
         pendingRestart.current = true;
         send({ cmd: "kill" });
@@ -627,7 +646,7 @@ export default function App() {
   const debugKeyRef = useRef<(e: KeyboardEvent) => boolean>(() => false);
   debugKeyRef.current = (e) => {
     const live = phase === "running" || phase === "stopped";
-    const k = (e.shiftKey ? "S-" : "") + (e.ctrlKey || e.metaKey ? "C-" : "") + e.key;
+    const k = (e.altKey ? "A-" : "") + (e.shiftKey ? "S-" : "") + (e.ctrlKey || e.metaKey ? "C-" : "") + e.key;
     switch (k) {
       case "F5": if (phase === "stopped") resume("continue"); else if (!live) run(); else return false; return true;
       case "S-F5": if (live) send({ cmd: "kill" }); return live;
@@ -636,6 +655,10 @@ export default function App() {
       case "F10": if (phase === "stopped") resume("stepOver"); return phase === "stopped";
       case "F11": if (phase === "stopped") resume("stepIn"); return phase === "stopped";
       case "S-F11": if (phase === "stopped") resume("stepOut"); return phase === "stopped";
+      // Backwards is the forward key with Alt. Shift+F10 would have mirrored F10,
+      // but browsers on Windows and Linux open the context menu on it.
+      case "A-F10": if (reverse?.canStepBack) reverse.onStepBack(); return !!reverse;
+      case "A-F5": if (reverse?.canReverse) reverse.onReverse(); return !!reverse;
     }
     return false;
   };
@@ -668,6 +691,20 @@ export default function App() {
     else { setInlineAsm(true); const f = asmFrame(); if (f) requestDisasm(f); }
   };
   const canInstrStep = stopped && !!caps.supportsSteppingGranularity && !!disasm;
+  // Replay sessions only. A run that has ended can still be stepped back into.
+  const rr = S.rr;
+  const backPhase = (phase === "stopped" || phase === "done") && !busy && !rr.rewinding;
+  const goBack = (cmd: string, what: string) => {
+    resumeSoon({ text: `${what}: re-running the recording…`, short: "rewinding…", cls: "running rewinding" });
+    send({ cmd });
+  };
+  const reverse = S.replay ? {
+    canStepBack: backPhase && rr.prev > 0,
+    canReverse: backPhase && rr.stops > 0,
+    rewinding: !!rr.rewinding,
+    onStepBack: () => goBack("stepBack", "stepping back"),
+    onReverse: () => goBack("reverseContinue", "reverse continue"),
+  } : undefined;
   const targetSet = hasTarget(cfg, program || undefined);
   const primary = primaryAction({ phase, hasTarget: targetSet, attach: attachMode });
 
@@ -689,7 +726,7 @@ export default function App() {
                      else if (primary.kind === "pause") send({ cmd: "pause", tid: tidRef.current });
                      else run();
                    }}
-                   resume={resume} restart={restart} onDisasm={toggleDisasm} onInlineAsm={toggleInlineAsm} />
+                   resume={resume} restart={restart} onDisasm={toggleDisasm} onInlineAsm={toggleInlineAsm} reverse={reverse} />
         {/* One toggle, two honest names: attaching to a process that is already
             running cannot stop at main, so there it means "hold it where it is". */}
         <label className="stopmain" data-tip={attachMode

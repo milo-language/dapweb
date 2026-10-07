@@ -827,3 +827,7 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
 .tm-main { flex: none; font-size: 12px; font-weight: 600; color: var(--fg); }
 .tm-dim { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .tm-note { padding: 14px; font-size: 12px; color: var(--muted); }
+
+/* Replay sessions: the mode word in the target chip, and the backwards buttons. */
+.target-chip.replay .target-mode { color: var(--agent); font-weight: 700; }
+.toolbar.reverse button:not(:disabled) .ci { color: var(--agent); }

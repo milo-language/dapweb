@@ -14,6 +14,15 @@ const CI = {
   run: 0xead3, cont: 0xeacf, pause: 0xead1,
   stepOver: 0xead6, stepInto: 0xead4, stepOut: 0xead5,
   restart: 0xead2, stop: 0xead7, chip: 0xec19,
+  stepBack: 0xeb8f, reverseCont: 0xeb8e,
+};
+
+// The two backwards controls of a replay session. Passed only when the session
+// is one: hello says so before anything runs, so the group never appears or
+// vanishes under the user's cursor mid-session.
+export type Reverse = {
+  canStepBack: boolean; canReverse: boolean; rewinding: boolean;
+  onStepBack: () => void; onReverse: () => void;
 };
 const Ico = ({ g, sub }: { g: number; sub?: string }) => (
   <>
@@ -23,11 +32,11 @@ const Ico = ({ g, sub }: { g: number; sub?: string }) => (
 );
 
 export function Transport({ primary, phase, asm, inlineAsm, canInstrStep, canDisasm, onPrimary, resume, restart,
-                            onDisasm, onInlineAsm }: {
+                            onDisasm, onInlineAsm, reverse }: {
   primary: ReturnType<typeof primaryAction>; phase: Phase; asm: boolean; inlineAsm: boolean;
   canInstrStep: boolean; canDisasm: boolean; onPrimary: () => void;
   resume: (cmd: string, granularity?: string) => void; restart: () => void;
-  onDisasm: () => void; onInlineAsm: () => void;
+  onDisasm: () => void; onInlineAsm: () => void; reverse?: Reverse;
 }) {
   const stopped = phase === "stopped";
   return (
@@ -38,6 +47,14 @@ export function Transport({ primary, phase, asm, inlineAsm, canInstrStep, canDis
           {primary.label}
         </button>
       </span>
+      {reverse && (
+        <span className="toolbar reverse">
+          <button disabled={!reverse.canReverse} data-tip="Reverse continue: back to the last time a breakpoint was hit (Alt+F5)"
+                  onClick={reverse.onReverse}><Ico g={CI.reverseCont} /></button>
+          <button disabled={!reverse.canStepBack} data-tip="Step back: to the previous stop, re-run from the recording (Alt+F10)"
+                  onClick={reverse.onStepBack}><Ico g={CI.stepBack} /></button>
+        </span>
+      )}
       <span className="toolbar">
         <button disabled={!stopped} data-tip="Step over (F10)" onClick={() => resume("stepOver")}><Ico g={CI.stepOver} /></button>
         <button disabled={!stopped} data-tip="Step into (F11)" onClick={() => resume("stepIn")}><Ico g={CI.stepInto} /></button>
