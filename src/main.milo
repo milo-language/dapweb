@@ -33,6 +33,9 @@ from "web/server" import {
 from "api/main" import {
     apiMain
 }
+from "web/reaper" import {
+    reaperMain
+}
 from "start" import {
     startMain
 }
@@ -62,6 +65,11 @@ fn main(): i32 {
     // Before the parser: `--version` is not a subcommand, and the trailing-args
     // parser would forward it to one.
     let argv = args()
+    // The server's watchdog (web/reaper.milo); not a user command, so it skips
+    // the parser and the help text.
+    if argv.len == 2 && argv[1] == "__reaper" {
+        return reaperMain()
+    }
     var vi: i64 = 1
     while vi < argv.len {
         if argv[vi] == "--version" || argv[vi] == "-V" {

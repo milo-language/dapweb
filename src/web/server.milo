@@ -73,7 +73,7 @@ from "../journal" import {
     journalDisable, journalRows, journalSessions, journalBreakpoints, logFilter
 }
 from "std/signal" import {
-    ignoreSignal, SIGPIPE
+    ignoreSignal, installSignalPipe, SIGPIPE, SIGTERM, SIGINT, SIGHUP
 }
 from "std/argparse" import {
     ArgParser
@@ -109,7 +109,7 @@ from "./persist" import {
     absSourcePath, adapterId, applyConfig, mergeCliDefaults, loadHistory, loadBps, recordConfig, firstHistoryConfig, sessionNameSeeds, registerSession, unregisterSession
 }
 from "./dap_reader" import {
-    Pending, sendReqFd
+    Pending, sendReqFd, disconnectArgs, endRunForExit, killOwnedForExit
 }
 from "./dispatch" import {
     apiRunCmd, handleDebugWs
@@ -326,7 +326,39 @@ fn reaperLoop(tickMs: i64, pendCh: Channel<Pending>): void {
             seq: seq, kind: "disc", id: 0, extra: ""
         }
         )
-        sendReqFd(dfd, seq, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
+        sendReqFd(dfd, seq, "disconnect", disconnectArgs())
+    }
+}
+
+// ── Exit (SIGTERM/SIGINT/SIGHUP) ──
+
+var gExiting = false
+
+// One green task per signal, woken through std/signal's self-pipe. Ends the run
+// (detach or kill, see endRunForExit) and leaves the session registry before
+// exiting. A second signal while that is in progress exits at once: the reaper
+// still ends what we launched.
+fn exitOnSignals(pendCh: &Channel<Pending>): void {
+    for sig in [SIGTERM, SIGINT, SIGHUP] {
+        let fd = installSignalPipe(sig)
+        let signum: i32 = sig
+        if fd < 0 {
+            continue
+        }
+        let pc = pendCh.clone()
+        Task.spawn(move(): void => {
+            for _c in fdChannel(fd) {
+                if gExiting {
+                    exit(1)
+                }
+                gExiting = true
+                logEvent("server exiting", $"signal {signum}")
+                endRunForExit(pc)
+                unregisterSession()
+                exit(0)
+            }
+        }
+        )
     }
 }
 
@@ -728,6 +760,7 @@ pub fn webMain(argv: Vec<string>): i32 {
         )
     }
 
+    exitOnSignals(pendCh)
     match listenLocal(port) {
         Result.Ok(listener) => {
             var l = listener
@@ -776,6 +809,7 @@ pub fn webMain(argv: Vec<string>): i32 {
     // drive the scheduler so the accept/broadcast/reaper loops keep running.
     // The server blocks here until the process is signalled.
     schedulerRunToCompletion()
+    killOwnedForExit()
     unregisterSession()
     return 0
 }

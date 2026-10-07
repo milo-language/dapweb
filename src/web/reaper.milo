@@ -1,0 +1,198 @@
+// The reaper: a watchdog process that kills what this server launched once the
+// server is gone, however it went (SIGKILL and crashes included).
+//
+// Why a process and not a handler: a server killed with SIGKILL runs no code,
+// and the kernel does not clean up for us. The debuggee is its own session
+// leader on the pty, so its group is orphaned from birth and no
+// orphaned-process-group SIGHUP/SIGCONT ever comes; the pty hangup's SIGHUP
+// does come, but while lldb's debugserver still traces the process, which
+// swallows it, and the tracer then exits leaving the debuggee stopped (state T,
+// parent 1) forever. Linux's PR_SET_PDEATHSIG has no macOS equivalent.
+//
+// The reaper is `dapweb __reaper`, a child whose stdin is a pipe only the
+// server holds the write end of (every child the server spawns closes fds >= 3
+// before exec). The server writes one line per pid it starts or stops owning;
+// the reaper acts on its stdin's EOF, which the kernel delivers when the server
+// exits for any reason. It cannot leak: it has nothing else to wait on.
+//
+// Lines: "g <pid>" a debuggee we spawned as its own session leader (the pty
+// child), killed with its whole group; "k <pid>" a launched debuggee that is
+// not ours (behind a TCP adapter), killed by pid; "a <pid>" an adapter, given a
+// grace period to act on its own EOF first (that is how lldb-dap detaches from
+// an ATTACHED process, which must survive); "- <pid>" forget it.
+//
+// A pid is forgotten before it is reaped, never after, so the reaper is never
+// holding a pid the kernel could hand to an unrelated process while we live.
+
+from "std/io" import {
+    readLine
+}
+from "std/os" import {
+    sysKill
+}
+from "std/process" import {
+    Child, Command, Stdio, exePath, processAlive
+}
+from "std/signal" import {
+    ignoreSignal, SIGHUP, SIGINT, SIGTERM
+}
+from "std/time" import {
+    sleepBlockingMs
+}
+
+// What an adapter gets to act on its EOF before SIGKILL: lldb-dap detaching an
+// attached process takes well under this.
+let ADAPTER_GRACE_MS: i64 = 2000
+
+struct Tracked {
+    pid: i64,
+    kind: string,
+}
+
+var gReaper: Option<Child> = Option.None
+var gTracked: Vec<Tracked> = []
+
+// Own `pid` until reaperForget: the reaper kills it if the server dies first.
+pub fn reaperTrack(pid: i64, kind: string): void {
+    if pid <= 0 {
+        return
+    }
+    for t in gTracked {
+        if t.pid == pid {
+            return
+        }
+    }
+    gTracked.push(Tracked {
+        pid: pid, kind: kind.clone()
+    }
+    )
+    reaperSend($"{kind} {pid}\n")
+}
+
+// Call BEFORE reaping (wait) the pid, or before letting go of a pid that is not
+// our child: from then on the number may be reused.
+pub fn reaperForget(pid: i64): void {
+    var found = false
+    var i: i64 = 0
+    while i < gTracked.len {
+        if gTracked[i].pid == pid {
+            let _r = gTracked.remove(i)
+            found = true
+        } else {
+            i = i + 1
+        }
+    }
+    if found {
+        reaperSend($"- {pid}\n")
+    }
+}
+
+fn reaperSend(line: string): void {
+    if let Option.Some(c) = gReaper {
+        if c.writeStdinStr(line) == line.len {
+            return
+        }
+    }
+    // No reaper yet, or it died (EPIPE: SIGPIPE is ignored): start one and hand
+    // it everything we own, which already includes this line's effect.
+    if let Option.Some(old) = replace(gReaper, Option.None) {
+        var o = old
+        o.close()
+        let _w = o.wait()
+    }
+    let exe = match exePath() {
+        Result.Ok(p) => {
+            p
+        }
+        Result.Err(e) => {
+            eprint($"[srv] reaper not started: {e}\n")
+            return
+        }
+    }
+    match Command.new(exe).arg("__reaper").stdout(Stdio.Null).stderr(Stdio.Inherit).spawn() {
+        Result.Ok(c) => {
+            var all: string = ""
+            for t in gTracked {
+                all = all + $"{t.kind} {t.pid}\n"
+            }
+            if all.len > 0 {
+                let _n = c.writeStdinStr(all)
+            }
+            gReaper = Option.Some(c)
+        }
+        Result.Err(e) => {
+            eprint($"[srv] reaper not started: {e}\n")
+        }
+    }
+}
+
+// `dapweb __reaper`: read ownership lines to EOF, then kill what is still owned.
+pub fn reaperMain(): i32 {
+    // Ctrl-C and a closed terminal signal the whole foreground group, the reaper
+    // included; it has to outlive the server to do its job, and still ends at EOF.
+    ignoreSignal(SIGINT)
+    ignoreSignal(SIGHUP)
+    ignoreSignal(SIGTERM)
+    var owned: Vec<Tracked> = []
+    while true {
+        let Option.Some(line) = readLine() else {
+            break
+        }
+        if line.len < 3 {
+            continue
+        }
+        let pid = line.substr(2, line.len).trim().parseInt() ?? 0
+        if pid <= 0 {
+            continue
+        }
+        let kind = line.substr(0, 1)
+        var i: i64 = 0
+        while i < owned.len {
+            if owned[i].pid == pid {
+                let _r = owned.remove(i)
+            } else {
+                i = i + 1
+            }
+        }
+        if kind != "-" {
+            owned.push(Tracked {
+                pid: pid, kind: kind
+            }
+            )
+        }
+    }
+    // Debuggees first, with SIGKILL: a traced process cannot have it swallowed by
+    // its tracer, and a stopped one is not woken by anything weaker.
+    var adapters: Vec<i64> = []
+    for t in owned {
+        if t.kind == "g" {
+            let _g = sysKill(0 - (t.pid as i32), 9)
+            let _p = sysKill(t.pid as i32, 9)
+        } else if t.kind == "k" {
+            let _p = sysKill(t.pid as i32, 9)
+        } else {
+            adapters.push(t.pid)
+        }
+    }
+    // Polled, and a pid dropped as soon as it is gone, so a reused number is never
+    // signalled: the window between exit and our check is one tick.
+    var waited: i64 = 0
+    while adapters.len > 0 && waited < ADAPTER_GRACE_MS {
+        var i: i64 = 0
+        while i < adapters.len {
+            if processAlive(adapters[i] as i32) {
+                i = i + 1
+            } else {
+                let _r = adapters.remove(i)
+            }
+        }
+        if adapters.len > 0 {
+            sleepBlockingMs(50)
+            waited = waited + 50
+        }
+    }
+    for pid in adapters {
+        let _p = sysKill(pid as i32, 9)
+    }
+    return 0
+}

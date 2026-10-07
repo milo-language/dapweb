@@ -25,6 +25,9 @@ from "./peers" import {
 from "./persist" import {
     applyConfig, loadBps, appendHistory
 }
+from "./reaper" import {
+    reaperTrack, reaperForget
+}
 from "./state" import {
     gSession, Bp, DataBp, cloneDataBp, dataBpsMsg, OutLine, ChildLaunch, StopInfo, ThreadList, Attribution, PendingRun, sourceMsg, capsMsg, stoppedMsg, threadsMsg, regionsMsg, replayStateMsg
 }
@@ -292,6 +295,7 @@ fn closePty(p: Pty): void {
 // child, so the wait after it returns at once.
 fn reapPtyChild(p: Pty): void {
     if p.pid() > 0 {
+        reaperForget(p.pid() as i64)
         p.kill()
         let _st = p.wait()
     }
@@ -648,6 +652,7 @@ fn handleRunInTerminal(cl: &mut DapClient, doc: &Json, reqSeq: i64, ch: &Channel
                     // our pty is not the process's parent and cannot be relied on
                     // to end it (js-debug's server does not).
                     gSession.proc.debuggeePid = Option.Some(pid as i64)
+                    reaperTrack(pid as i64, "g")
                     cl.respond(reqSeq, "runInTerminal", Json.obj().int("processId", pid as i64).build())
                     let master = pty.masterFd
                     let reader = match OwnedFd.dup(master) {
@@ -1257,6 +1262,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     let dpid = bodyI64(msg.doc, "systemProcessId", 0)
                     if dpid > 0 {
                         gSession.proc.debuggeePid = Option.Some(dpid)
+                        reaperTrack(dpid, "k")
                     }
                 }
             } else if msg.event == "exited" {
@@ -1381,6 +1387,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
         }
     }
 
+    reaperForget(cl.child.pid() as i64)
     cl.close()
     var durSecs = (epochMillis() - gSession.proc.runStartMs) / 1000
     if let Option.Some(code) = gSession.proc.lastExit {
@@ -1496,6 +1503,7 @@ fn parseListenPort(s: &string): i64 {
 // teardown (closing our sockets leaves it listening forever).
 fn spawnTcpAdapter(prog: &string, args: &Vec<string>): Result<i64> {
     var child = Child.spawn(prog, args, false)?
+    reaperTrack(child.pid() as i64, "a")
     let errFd = child.takeStderr()
     if errFd.fd() >= 0 {
         // same pre-handshake crash capture as stdio adapters
@@ -1551,6 +1559,7 @@ fn killAdapterSrv(): void {
             waited = waited + 50
         }
         let _k = c.signal(15)
+        reaperForget(c.pid() as i64)
         let _w = c.wait()
     }
     gSession.proc.srv = Option.None
@@ -1579,6 +1588,7 @@ fn reapDebuggee(): void {
         if ptyChild {
             if let Option.Some(p) = gSession.proc.pty {
                 if p.pid() == pid {
+                    reaperForget(dpid)
                     p.kill()
                     let _st = p.wait()
                 }
@@ -1599,8 +1609,56 @@ fn reapDebuggee(): void {
             let _k = terminateProcess(pid)
             logEvent("debuggee reaped", $"pid {dpid} outlived the adapter (SIGTERM)")
         }
+        reaperForget(dpid)
     }
     gSession.proc.debuggeePid = Option.None
+}
+
+// The disconnect for a run ending without a user's say-so (server exit, idle
+// TTL): a launched program dies with it, an attached one was running before us
+// and is only detached.
+pub fn disconnectArgs(): string {
+    return Json.obj().bool("terminateDebuggee", gSession.target.spec.request != "attach").build()
+}
+
+// Server exit by signal: end the run the way a stop from the UI would, so the
+// adapter disconnects cleanly (detaching an attached process, which a killed
+// adapter would leave stopped), then end by handle whatever we launched that
+// is still there. Parks while D's teardown runs, so call it from a green task.
+pub fn endRunForExit(pendCh: &Channel<Pending>): void {
+    if let Option.Some(dfd) = gSession.proc.dapIn {
+        let seq = gSession.proc.nextSeq()
+        let _p = pendCh.trySend(Pending {
+            seq: seq, kind: "disc", id: 0, extra: ""
+        }
+        )
+        sendReqFd(dfd, seq, "disconnect", disconnectArgs())
+        if let Option.Some(pfd) = gSession.proc.parentIn {
+            sendReqFd(pfd, gSession.proc.oddSeq + 1, "disconnect", disconnectArgs())
+        }
+        var waited: i64 = 0
+        while gSession.proc.started && waited < 3000 {
+            sleepMs(50)
+            waited = waited + 50
+        }
+    }
+    killOwnedForExit()
+}
+
+// What is left after a disconnect that did not finish (a hung adapter, a run
+// still launching): the pty child by its handle, a TCP adapter server by its
+// Child. Blocking, so it also works once the scheduler has stopped. The stdio
+// adapter's Child lives in D's task; our exit closes its stdin and the reaper
+// gives it its grace period.
+pub fn killOwnedForExit(): void {
+    reapDebuggee()
+    if let Option.Some(p) = replace(gSession.proc.pty, Option.None) {
+        closePty(p)
+    }
+    if let Option.Some(g) = replace(gSession.proc.ptyGone, Option.None) {
+        reapPtyChild(g)
+    }
+    killAdapterSrv()
 }
 
 // spawn the DAP adapter for the current config and drive the handshake.
@@ -1681,6 +1739,9 @@ pub fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
             gSession.proc.runStartMs = epochMillis()
             gSession.proc.lastExit = Option.None
             logEvent("run started", $"{gSession.target.spec.binPath}  {label} pid {cl.child.pid()}")
+            // TCP clients have no process (pid -1); a spawned TCP server is tracked
+            // in spawnTcpAdapter.
+            reaperTrack(cl.child.pid() as i64, "a")
             let dfd = cl.child.stdinFd()
             gSession.proc.dapIn = Option.Some(dfd)
             // Drain + capture adapter stderr (stdio spawns only; TCP has no child

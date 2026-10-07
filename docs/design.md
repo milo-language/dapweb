@@ -71,6 +71,18 @@ Server:
 - **Teardown sleeps block on purpose** (`sleepBlockingMs` in `killAdapterSrv` and
   `reapDebuggee`): they run with half-torn-down state, and a parking sleep would let a
   peer's command act on it.
+- **What the server launched dies with it, however it dies.** The kernel does not do
+  it: the pty child is its own session leader (its group is orphaned from birth, so no
+  orphaned-group SIGHUP+SIGCONT), and the pty hangup's SIGHUP arrives while
+  debugserver still traces the process and is swallowed; the tracer then exits and the
+  debuggee stays stopped (T, parent 1) forever. SIGTERM/SIGINT/SIGHUP end the run
+  through a disconnect (`endRunForExit`), then by handle. SIGKILL and crashes are
+  covered by `dapweb __reaper` (`src/web/reaper.milo`): a child told each pid we own
+  over a pipe only the server writes, which at EOF SIGKILLs debuggees and gives
+  adapters 2s to act on their own EOF first. An ATTACHED process is never on its list:
+  lldb-dap detaches it at EOF (and the exit/idle disconnect sends
+  `terminateDebuggee: false`). `scripts/test.sh` fails the run (`no-orphans`) if any
+  `/tmp/dapweb_*` debuggee is left stopped or orphaned.
 - **Idle-TTL reaper is a green task on `sleepMs`**; the scheduler bounds its kevent wait by
   the nearest timer, so no OS ticker thread is needed.
 - **id-correlated broadcasts**: replies ride the shared bus, so every peer must ignore ids
