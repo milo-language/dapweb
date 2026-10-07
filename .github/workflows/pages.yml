@@ -29,7 +29,7 @@ jobs:
         run: |
           mkdir -p _site/img
           cp docs/site/index.html docs/site/install.sh _site/
-          cp docs/images/agent-drives.gif docs/images/how-it-works.svg _site/img/
+          cp docs/images/agent-drives.gif docs/images/debug-backwards.gif docs/images/how-it-works.svg _site/img/
           cp src/web/ui/og.png src/web/ui/favicon.svg _site/img/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

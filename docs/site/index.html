@@ -167,6 +167,18 @@
   </div>
 </section>
 
+<section id="backwards">
+  <div class="wrap">
+    <h2>Debug backwards.</h2>
+    <p class="sub">Record a Milo program once, then start at the failure and go back: Reverse Continue lands on the last time a breakpoint was hit, Step Back on the stop before. Every run of the recording computes the same thing, so the stop you go back to has the same locals it had the first time.</p>
+    <div class="shot">
+      <img src="img/debug-backwards.gif" width="1240" height="700" loading="lazy"
+           alt="A replay session: the program fails its ledger check, a breakpoint goes on the add, and five reverse continues walk back to order 1004, where cents is 705 because 7.5 was read as 7 dollars and 5 cents">
+    </div>
+    <p class="shot-cap">Five reverse continues from the failure find the order that was parsed wrong. <span class="pan">Swipe the recording to see the locals.</span></p>
+  </div>
+</section>
+
 <section id="languages">
   <div class="wrap">
     <h2>Any language with a debugger.</h2>
