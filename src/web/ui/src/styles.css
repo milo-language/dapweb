@@ -861,3 +861,31 @@ button.asm-on, button.radix-on { border-color: var(--accent); color: var(--accen
   .toolbar button.primary { width: 40px; padding: 0; }
   .primary-label { display: none; }
 }
+
+/* Replay sessions: the Timeline tab's trace records (TraceView). */
+.tl-split { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.tl-seg { display: flex; gap: 4px; padding: 4px 10px; flex: none; border-bottom: 1px solid var(--border); }
+.tl-seg button { font-size: 11px; padding: 1px 9px; color: var(--muted); }
+.tl-seg button.on { color: var(--fg); border-color: var(--muted); }
+.trace { display: flex; flex-direction: column; flex: 1; min-height: 0; font-size: 11px; }
+.trace-head { display: flex; gap: 14px; padding: 4px 10px; flex: none; color: var(--fg); white-space: nowrap; }
+.trace-help { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.trace-list { flex: 1; min-height: 0; overflow: auto; }
+.trace-row { position: absolute; left: 0; right: 0; display: grid; align-items: center;
+             grid-template-columns: 90px 150px minmax(0, 1.2fr) 64px minmax(0, 2fr) 170px;
+             gap: 10px; padding: 0 10px; border-left: 2px solid transparent; }
+.trace-row:hover { background: var(--row-hover); }
+.trace-row.here { background: color-mix(in srgb, var(--agent) 14%, transparent); border-left-color: var(--agent); }
+.trace-row.sub .trace-kind { padding-left: 14px; }
+.trace-seq, .trace-kind, .trace-arg, .trace-size, .trace-preview { font-family: var(--mono); white-space: nowrap;
+                                                                 overflow: hidden; text-overflow: ellipsis; }
+.trace-seq, .trace-size { color: var(--muted); }
+.trace-size { text-align: right; }
+.trace-preview { color: var(--muted); }
+.trace-row.group .trace-kind { color: var(--muted); }
+.trace-fold { cursor: pointer; }
+.trace-fold:hover { color: var(--fg); }
+.trace-act { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
+.trace-act button { font-size: 10px; padding: 0 7px; height: 18px; opacity: 0.55; }
+.trace-row:hover .trace-act button:not(:disabled), .trace-row.here .trace-act button:not(:disabled) { opacity: 1; }
+.trace-here { color: var(--agent); font-size: 10px; }

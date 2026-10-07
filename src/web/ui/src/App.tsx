@@ -705,6 +705,13 @@ export default function App() {
     onStepBack: () => goBack("stepBack", "stepping back"),
     onReverse: () => goBack("reverseContinue", "reverse continue"),
   } : undefined;
+  const trace = S.replay ? {
+    seekedTo: rr.seekedTo, rewinding: !!rr.rewinding || busy,
+    onSeek: (record: number) => {
+      resumeSoon({ text: `seeking to trace record ${record}: re-running the recording…`, short: "rewinding…", cls: "running rewinding" });
+      send({ cmd: "seek", record });
+    },
+  } : undefined;
   const targetSet = hasTarget(cfg, program || undefined);
   const primary = primaryAction({ phase, hasTarget: targetSet, attach: attachMode });
 
@@ -832,7 +839,7 @@ export default function App() {
                    frame0Ref={frame0Ref} caps={caps} stopped={stopped} locals={locals} frames={frames}
                    stopSeq={stopSeq} registersRef={registersRef} setVar={setVar} viewMemory={viewMemory}
                    watchAddr={caps.supportsDataBreakpoints && caps.supportsDataBreakpointBytes ? watchAddr : undefined}
-                   mem={mem} memAddr={memAddr} setMemAddr={setMemAddr} memErr={memErr} regions={regions} />
+                   mem={mem} memAddr={memAddr} setMemAddr={setMemAddr} memErr={memErr} regions={regions} trace={trace} />
       {showConfig ? (
         <>
           <div className="drawer-backdrop" onClick={() => setShowConfig(false)} />

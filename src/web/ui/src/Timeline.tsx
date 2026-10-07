@@ -4,11 +4,35 @@
 import React, { useEffect, useRef, useState } from "react";
 import { base, hasSrc } from "./session";
 import { RecordedStop, parseStopRows, mergeStops, timelineQuery } from "./recordedStops";
+import { TraceView } from "./TraceView";
 
 const hhmmss = (ms: number) => new Date(ms).toTimeString().slice(0, 8);
 const where = (s: { path: string; line: number }) => (hasSrc(s.path) ? `${base(s.path)}:${s.line}` : s.path || "?");
 
-export function Timeline({ sessionId, stopSeq, openFile }: {
+// A replay session's Timeline opens on the trace, the timeline it can move along;
+// the stops journal is one click away.
+export type TraceProps = { seekedTo: number; rewinding: boolean; onSeek: (record: number) => void };
+
+export function Timeline({ trace, ...p }: {
+  sessionId: string;
+  stopSeq: number;
+  openFile: (path: string, line?: number) => void;
+  trace?: TraceProps;
+}) {
+  const [view, setView] = useState<"trace" | "stops">("trace");
+  if (!trace) return <StopsTimeline {...p} />;
+  return (
+    <div className="tl-split">
+      <div className="tl-seg">
+        <button className={view === "trace" ? "on" : ""} onClick={() => setView("trace")}>Trace records</button>
+        <button className={view === "stops" ? "on" : ""} onClick={() => setView("stops")}>Stops</button>
+      </div>
+      {view === "trace" ? <TraceView {...trace} /> : <StopsTimeline {...p} />}
+    </div>
+  );
+}
+
+function StopsTimeline({ sessionId, stopSeq, openFile }: {
   sessionId: string;
   stopSeq: number;  // bumped per live stop: the cue to fetch what was just recorded
   openFile: (path: string, line?: number) => void;

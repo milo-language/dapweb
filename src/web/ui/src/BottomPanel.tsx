@@ -12,7 +12,7 @@ import { RegistersPanel } from "./RegistersPanel";
 import { StackView } from "./StackView";
 import { BinInfoView } from "./BinInfoView";
 import type { SetVarFn } from "./VarList";
-import { Timeline } from "./Timeline";
+import { Timeline, TraceProps } from "./Timeline";
 
 export type BottomTab = "term" | "mem" | "stack" | "regs" | "bin" | "timeline";
 
@@ -25,6 +25,7 @@ export function BottomPanel(p: {
   setVar: SetVarFn; viewMemory: (a: string) => void; watchAddr?: (addr: string, size: number) => void;
   mem: { addr: string; bytes: Uint8Array } | null; memAddr: string; setMemAddr: (a: string) => void; memErr: string;
   sessionId: string; openFile: (path: string, line?: number) => void;
+  trace?: TraceProps;
 }) {
   const { tab, setTab, memLinks, binTab, binInfo, dbgLabel, termRef, caps, stopped, frames, stopSeq, viewMemory } = p;
   const [bottomH, setBottomH] = useState(240);
@@ -116,7 +117,7 @@ export function BottomPanel(p: {
           nothing is lost, and a hidden tab does no fetch per stop. */}
       {tab === "timeline" && (
         <div className="tabpane tlpane">
-          <Timeline sessionId={p.sessionId} stopSeq={stopSeq} openFile={p.openFile} />
+          <Timeline sessionId={p.sessionId} stopSeq={stopSeq} openFile={p.openFile} trace={p.trace} />
         </div>
       )}
       {tab === "bin" && binTab && (

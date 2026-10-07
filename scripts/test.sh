@@ -162,6 +162,7 @@ self_suite  threadlabel
 self_suite  session-reducer
 self_suite  follow
 self_suite  recordedstops
+self_suite  tracerows
 self_suite  hermetic
 self_suite  api
 self_suite  e2e-agent
