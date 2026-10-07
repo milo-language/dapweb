@@ -208,7 +208,8 @@ fn parseRequest(raw: string): Request {
 // Read and parse one request head; None if the peer sent nothing.
 pub fn readRequest(fd: i32): Option<Request> {
     var chunk: [u8; 8192] = [0; 8192]
-    let n = recvFd(fd, chunk, 8192)
+    var n: i64 = 0
+    unsafe { n = recvFd(fd, chunk, 8192) }
     if n <= 0 {
         return Option.None
     }
@@ -220,7 +221,8 @@ pub fn readRequest(fd: i32): Option<Request> {
     // before judging them: requestAllowed would otherwise refuse a request
     // whose Host has not arrived yet. Capped so a client cannot grow it forever.
     while !raw.contains("\r\n\r\n") && raw.len < 65536 {
-        let more = recvFd(fd, chunk, 8192)
+        var more: i64 = 0
+        unsafe { more = recvFd(fd, chunk, 8192) }
         if more <= 0 {
             break
         }
@@ -239,7 +241,8 @@ pub fn readBody(fd: i32, req: &Request): string {
     let want = req.header("content-length").parseInt() ?? 0
     while body.len < want {
         var more: [u8; 8192] = [0; 8192]
-        let n = recvFd(fd, more, 8192)
+        var n: i64 = 0
+        unsafe { n = recvFd(fd, more, 8192) }
         if n <= 0 {
             break
         }
@@ -310,7 +313,7 @@ pub fn sendHttp(fd: i32, status: i32, contentType: &string, body: &string): void
     // Accepted fds are non-blocking under the green runtime: a single write()
     // stops at the socket buffer (~half a MB of app.js got dropped this way).
     // sendFd parks until the whole response is out.
-    let _n = sendFd(fd, resp, resp.len)
+    unsafe { let _n = sendFd(fd, resp, resp.len) }
 }
 
 // UI assets are embedded, so the binary is self-contained: a downloaded release

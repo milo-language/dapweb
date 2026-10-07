@@ -642,7 +642,7 @@ fn handleRunInTerminal(cl: &mut DapClient, doc: &Json, reqSeq: i64, ch: &Channel
             gSession.proc.debuggeePid = Option.Some(pid as i64)
             cl.respond(reqSeq, "runInTerminal", Json.obj().int("processId", pid as i64).build())
             let master = pty.fd()
-            let reader = match OwnedFd.dup(master) {
+            let reader = match OwnedFd.dup(pty) {
                 Result.Ok(r) => {
                     r
                 }
@@ -1500,7 +1500,7 @@ fn spawnTcpAdapter(prog: &string, args: &Vec<string>): Result<i64> {
     var child = Child.spawn(prog, args, false)?
     reaperTrack(child.pid() as i64, "a")
     let errFd = child.takeStderr()
-    if errFd.fd() >= 0 {
+    if errFd.isOpen() {
         // same pre-handshake crash capture as stdio adapters
         Task.spawn(move(): void => {
             adapterStderrPump(errFd)
@@ -1745,7 +1745,7 @@ pub fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
             // The pump owns the descriptor from here (takeStderr leaves -1 behind,
             // so Child.close() skips it): it is closed exactly once, by its reader.
             if let Option.Some(errFd) = cl.child.takeStderr() {
-                if errFd.fd() >= 0 {
+                if errFd.isOpen() {
                     Task.spawn(move(): void => {
                         adapterStderrPump(errFd)
                     }

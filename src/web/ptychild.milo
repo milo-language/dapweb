@@ -11,9 +11,19 @@ from "./reaper" import {
 from "std/pty" import {
     Pty
 }
+from "std/io" import {
+    AsFd
+}
 
 pub struct DebuggeePty {
     _pty: Pty,
+}
+
+impl AsFd for DebuggeePty {
+    @unsafe
+    fn rawFd(self: &Self): i32 {
+        unsafe { return self._pty.rawFd() }
+    }
 }
 
 impl DebuggeePty {
@@ -42,9 +52,9 @@ impl DebuggeePty {
         }
     }
 
-    // The master, for the reader's dup and to tell ptys apart.
+    // The master's number, to tell ptys apart. Dup it through AsFd (`OwnedFd.dup(p)`).
     fn fd(self: &Self): i32 {
-        return self._pty.fd()
+        unsafe { return self._pty.rawFd() }
     }
 
     fn pid(self: &Self): i32 {

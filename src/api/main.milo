@@ -17,7 +17,10 @@ from "std/sysinfo" import {
     pid as selfPid
 }
 from "std/pty" import {
-    fdIsTerminal
+    isTerminal
+}
+from "std/io" import {
+    Stdin
 }
 from "std/json" import {
     Json, jsonPretty
@@ -94,7 +97,7 @@ fn agentLabel(): string {
             return "claude"
         }
     }
-    if fdIsTerminal(0) {
+    if isTerminal(Stdin {}) {
         return "cli"
     }
     return "agent"

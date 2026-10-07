@@ -26,9 +26,6 @@ from "std/fs" import {
 from "std/process" import {
     Command, Stdio, exePath
 }
-from "std/io" import {
-    fdChannel
-}
 from "std/path" import {
     Path
 }
@@ -192,10 +189,9 @@ fn runCapture(cmd: Command): Result<string> {
         Result.Ok(child) => {
             var ch = child
             var out: string = ""
-            if ch.stdoutFd() >= 0 {
-                for chunk in fdChannel(ch.stdoutFd()) {
-                    out = out + chunk
-                }
+            // Stdio.Pipe above, so the Child has a stdout pipe to stream.
+            for chunk in ch.stdout() {
+                out = out + chunk
             }
             match ch.wait() {
                 Result.Ok(code) => {

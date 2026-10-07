@@ -62,14 +62,14 @@ impl DapConn {
 
     fn stdinFd(self: &Self): i32 {
         if let Option.Some(c) = self.child {
-            return c.stdinFd()
+            unsafe { return c.stdinFd() }
         }
         return self.sockFd
     }
 
     fn stdoutFd(self: &Self): i32 {
         if let Option.Some(c) = self.child {
-            return c.stdoutFd()
+            unsafe { return c.stdoutFd() }
         }
         return self.sockFd
     }
@@ -157,7 +157,9 @@ impl DapClient {
         let Result.Ok(s) = TcpStream.connect(ip, port as u16) else {
             return Result.Err("cannot connect to DAP adapter at " + host.clone() + ":" + port.toString())
         }
-        let fd = s.rawFd()
+        var fd: i32 = -1
+        // DapConn keeps `s` in `sock`, so the number stays owned while it is used.
+        unsafe { fd = s.rawFd() }
         let child = DapConn {
             child: Option.None, sock: Option.Some(s), sockFd: fd
         }
