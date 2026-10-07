@@ -140,6 +140,39 @@ milo_unit() {
     rm -f "$out"
 }
 
+# A debuggee a dead server left behind: stopped (T, or Linux's tracing-stop t) or
+# orphaned to init, running an executable under /tmp/dapweb_ (where every suite
+# puts its debuggees). One "pid exe" line each. A server's death must take what it
+# launched with it; a leaked one stays forever, so this is checked, not hoped for.
+leaked_debuggees() {
+    ps -A -o pid=,ppid=,stat=,args= | awk '
+        ($3 ~ /[Tt]/ || $2 == 1) && $4 ~ /^(\/private)?\/tmp\/dapweb_/ { print $1, $4 }'
+}
+
+# Leaks from before this run (or from another one on the box) are not ours.
+orphans_before=$(leaked_debuggees | awk '{ print $1 }' | tr '\n' ' ')
+
+no_orphans() {
+    echo ""
+    echo "── no-orphans"
+    # A server's shutdown (or its reaper) can still be finishing as the last suite
+    # exits; a real leak never goes away, so waiting cannot hide one.
+    i=0
+    while :; do
+        new=$(leaked_debuggees | awk -v before=" $orphans_before " 'index(before, " " $1 " ") == 0')
+        [ -z "$new" ] || [ $i -ge 50 ] && break
+        i=$((i + 1)); sleep 0.1
+    done
+    if [ -n "$new" ]; then
+        echo "$new" | sed 's/^/  leaked: /'
+        echo "  FAIL no-orphans: $(echo "$new" | wc -l | tr -d ' ') debuggee(s) outlived their server"
+        fail=$((fail + 1)); failed="$failed no-orphans"
+    else
+        echo "  ok no debuggee outlived its server"
+        pass=$((pass + 1))
+    fi
+}
+
 no_unsafe
 milo_unit
 serve_suite e2e            $((base +  0)) --program /tmp/dapweb_inter --source /tmp/dapweb_inter.c
@@ -170,6 +203,7 @@ self_suite  e2e-timeline
 self_suite  e2e-replay
 self_suite  e2e-config
 self_suite  e2e-attach
+self_suite  e2e-lifecycle
 self_suite  e2e-runtime
 self_suite  e2e-infer
 self_suite  e2e-commands
@@ -177,6 +211,8 @@ self_suite  e2e-start
 self_suite  e2e-history
 self_suite  journal
 self_suite  update
+
+no_orphans
 
 rm -rf "$state"
 echo ""
