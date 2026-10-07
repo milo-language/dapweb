@@ -122,6 +122,48 @@ the program's own output:
 
 ![an agent driving the session](docs/images/agent-activity.gif)
 
+## Debug backwards
+
+A program that failed is usually past the line that broke it. In a replay
+session dapweb runs a recorded Milo program, so you can start at the failure
+and go back: **Reverse Continue** (Alt+F5) returns to the last time a
+breakpoint was hit, **Step Back** (Alt+F10) to the previous stop, and the
+Timeline tab lists every call the recording made, each one a place to jump to.
+
+![debugging backwards: run to the failed check, set a breakpoint on the add, reverse continue until order 1004, whose 7.5 parsed as 705 cents](docs/images/debug-backwards.gif)
+
+Try it on the demo, a ledger that does not balance:
+
+```sh
+examples/replay-demo/record.sh     # build with -g --debug, run once with MILO_RECORD
+./dapweb --replay examples/replay-demo/out/orders.mrr examples/replay-demo/out/orders
+```
+
+Press **Run**: the program stops on its failed `assert`. Click the gutter on
+`total = total + cents` to set a breakpoint, then **Reverse Continue** a few
+times. Each one lands on the order before, until order 1004, where Locals shows
+`cents = 705`: its amount `7.5` was read as 7 dollars and 5 cents. An agent
+does the same with `dapweb api reverse-continue`, `step-back` and `seek`.
+
+How it works: `MILO_RECORD` makes the program write down every answer it got
+from the outside world (file and socket reads, the clock, which green task the
+scheduler woke), and `MILO_REPLAY` hands those answers back, so every run of
+the recording computes exactly the same thing. dapweb logs each command that
+moved the program and counts its stops. Going back to stop k relaunches the
+program on the recording and re-sends the commands that reached it, so the
+stop you land on is the same stop, with the same locals and the same output.
+
+Limitations:
+
+- Step Back goes to the previous **stop**, not the previous line: the steps and
+  breakpoints you took are the timeline.
+- A stop made by Pause or by a watchpoint cannot be replayed (it depends on
+  timing or on hardware), so the run cannot go back past one.
+- Milo programs only, built with `-g --debug` (DWARF, and every local where
+  the source says it is).
+- Each step back re-runs the recording from the start, so it takes as long as
+  the run up to that stop did.
+
 ## Features
 
 - **Multi-peer sessions**: you, your agent, and anyone else's terminal attached
