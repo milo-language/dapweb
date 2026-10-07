@@ -12,6 +12,7 @@
 // Usage: bun tests/e2e-runtime.ts [binary]
 
 import { freePort } from "./freeport";
+import { own } from "./own";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const xdg = `/tmp/dapweb_runtime_test_${process.pid}`;
@@ -27,10 +28,10 @@ const kids: { kill: () => void }[] = [];
 function cleanup() { for (const k of kids) { try { k.kill(); } catch {} } }
 
 const port = await freePort();
-const srv = Bun.spawn([bin, "web", "--port", String(port), "--quiet"], {
+const srv = own(Bun.spawn([bin, "web", "--port", String(port), "--quiet"], {
   cwd: root, stdout: "pipe", stderr: "pipe",
   env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },
-});
+}));
 kids.push(srv);
 const base = `http://localhost:${port}`;
 for (let i = 0; i < 60; i++) {
@@ -46,8 +47,8 @@ ok(adapters.map((a) => a.kind).join(",") === "lldb,python,node,go,java", "/api/a
 ok(adapters.every((a) => typeof a.installed === "boolean" && a.installHint && a.label), "every entry has installed, label and hint", adapters);
 const installed = (k: string) => !!adapters.find((a) => a.kind === k)?.installed;
 
-const node = Bun.spawn(["node", "-e", "let n = 0; setInterval(function tick() { n++; }, 200)"], { stdout: "ignore", stderr: "ignore" });
-const py = Bun.spawn(["python3", "-c", "import time\nwhile True:\n    time.sleep(0.2)"], { stdout: "ignore", stderr: "ignore" });
+const node = own(Bun.spawn(["node", "-e", "let n = 0; setInterval(function tick() { n++; }, 200)"], { stdout: "ignore", stderr: "ignore" }));
+const py = own(Bun.spawn(["python3", "-c", "import time\nwhile True:\n    time.sleep(0.2)"], { stdout: "ignore", stderr: "ignore" }));
 kids.push(node, py);
 await sleep(400);
 
@@ -108,7 +109,7 @@ if (dlv) {
   await Bun.write(`${dir}/main.go`, "package main\n\nimport \"time\"\n\nfunc spin(i int) int { return i + 1 }\n\nfunc main() {\n\tfor i := 0; ; i = spin(i) {\n\t\ttime.Sleep(200 * time.Millisecond)\n\t}\n}\n");
   const b = Bun.spawnSync(["go", "build", "-gcflags=all=-N -l", "-o", "spin", "."], { cwd: dir });
   ok(b.exitCode === 0, "go test program builds", b.stderr.toString());
-  const g = Bun.spawn([`${dir}/spin`], { stdout: "ignore", stderr: "ignore" });
+  const g = own(Bun.spawn([`${dir}/spin`], { stdout: "ignore", stderr: "ignore" }));
   kids.push(g);
   await sleep(300);
   const gp = ((await get("/api/processes")).processes as any[]).find((p) => p.pid === g.pid);

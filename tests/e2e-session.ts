@@ -3,6 +3,7 @@
 // stay attached. Part 1 runs against the provided server; part 2 spawns its
 // own dapweb-web with a short TTL.
 // Needs dapweb-web on [port] targeting /tmp/dapweb_nested. Usage: bun tests/e2e-session.ts [port]
+import { own } from "./own";
 
 const port = process.argv[2] ?? "8092";
 const ttlPort = Number(port) + 3;
@@ -114,7 +115,7 @@ n2.ws.close();
 
 // ── part 2: idle TTL reaps a peerless session ──
 
-const srv = Bun.spawn([
+const srv = own(Bun.spawn([
   "./dapweb", "web", "--program", "/tmp/dapweb_nested",
   "--port", String(ttlPort), "--idle-ttl", "2",
 ], {
@@ -122,7 +123,7 @@ const srv = Bun.spawn([
   // Must NOT auto-open a browser: a real tab reconnects (M9b) and stays a
   // peer, so gPeers never reaches 0 and the idle reaper never fires.
   env: { ...process.env, DAPWEB_NO_OPEN: "1" },
-});
+}));
 // wait for the listener
 for (let i = 0; i < 50; i++) {
   try { const p = new Peer(); await p.connect(ttlPort); p.ws.close(); break; }

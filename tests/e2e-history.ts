@@ -6,6 +6,7 @@
 // Usage: bun tests/e2e-history.ts [binary]   (needs /tmp/dapweb_nested built)
 
 import { freePort } from "./freeport";
+import { own } from "./own";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const xdg = `/tmp/dapweb_hist_test_${process.pid}`;
@@ -43,10 +44,10 @@ class Peer {
 
 async function spawnSrv(args: string[]): Promise<any> {
   const p = await freePort();
-  const srv = Bun.spawn([bin, "web", "--port", String(p), "--quiet", ...args], {
+  const srv = own(Bun.spawn([bin, "web", "--port", String(p), "--quiet", ...args], {
     cwd: root, stdout: "pipe", stderr: "pipe",
     env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },
-  });
+  }));
   for (let i = 0; i < 60; i++) {
     try { const t = new Peer(); await t.connect(p); t.ws.close(); return { srv, port: p }; }
     catch { await sleep(100); }

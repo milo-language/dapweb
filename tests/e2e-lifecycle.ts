@@ -8,6 +8,7 @@
 // Usage: bun tests/e2e-lifecycle.ts [binary]
 
 import { freePort } from "./freeport";
+import { own } from "./own";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const tag = `/tmp/dapweb_lifecycle_${process.pid}`;
@@ -65,10 +66,10 @@ function cleanup() {
 
 async function spawnSrv(extra: string[]): Promise<{ srv: any; port: number }> {
   const port = await freePort();
-  const srv = Bun.spawn([bin, "web", "--port", String(port), "--quiet", ...extra], {
+  const srv = own(Bun.spawn([bin, "web", "--port", String(port), "--quiet", ...extra], {
     cwd: root, stdout: "ignore", stderr: "ignore",
     env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },
-  });
+  }));
   spawned.push(srv.pid);
   for (let i = 0; i < 60; i++) {
     try { const t = new Peer(); await t.connect(port); t.ws.close(); return { srv, port }; }
@@ -122,7 +123,7 @@ if (scope.trim() !== "0") {
   await Bun.write(`${spin}.c`, "#include <unistd.h>\nint main(void) { for (int i = 0; i < 600; i++) sleep(1); return 0; }\n");
   compile([`${spin}.c`, "-o", spin]);
   for (const sig of ["SIGTERM", "SIGKILL"] as const) {
-    const target = Bun.spawn([spin], { stdout: "ignore", stderr: "ignore" });
+    const target = own(Bun.spawn([spin], { stdout: "ignore", stderr: "ignore" }));
     spawned.push(target.pid);
     const { srv, port } = await spawnSrv([]);
     const a = new Peer(); await a.connect(port);

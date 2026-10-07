@@ -7,6 +7,7 @@
 // Usage: bun tests/e2e-agent.ts [binary]   (needs /tmp/dapweb_nested built)
 
 import { freePort } from "./freeport";
+import { own } from "./own";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const xdg = `/tmp/dapweb_agent_test_${process.pid}`;
@@ -29,10 +30,10 @@ function ok(cond: any, label: string, detail?: any) {
 const servers: any[] = [];
 async function serve(extra: string[] = []) {
   const p = await freePort();
-  const srv = Bun.spawn([bin, "web", "--program", prog, "--port", String(p), "--quiet", ...extra], {
+  const srv = own(Bun.spawn([bin, "web", "--program", prog, "--port", String(p), "--quiet", ...extra], {
     cwd: root, env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },
     stdout: "pipe", stderr: "ignore",
-  });
+  }));
   servers.push(srv);
   for (let i = 0; i < 100; i++) {
     try { if ((await fetch(`http://localhost:${p}/api/state`)).ok) break; } catch {}
@@ -79,11 +80,11 @@ try {
 
     // A different program must not inherit them: the store is keyed by program.
     const otherPort = await freePort();
-    const other = Bun.spawn([bin, "web", "--program", "/tmp/dapweb_inter", "--port", String(otherPort),
+    const other = own(Bun.spawn([bin, "web", "--program", "/tmp/dapweb_inter", "--port", String(otherPort),
                              "--quiet"], {
       cwd: root, env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },
       stdout: "ignore", stderr: "ignore",
-    });
+    }));
     servers.push(other);
     for (let i = 0; i < 100; i++) {
       try { if ((await fetch(`http://localhost:${otherPort}/api/state`)).ok) break; } catch {}
@@ -214,5 +215,5 @@ try {
   console.log(`\ne2e-agent: ${pass}/${pass} passed`);
 } finally {
   for (const s of servers) { try { s.kill(); } catch {} }
-  await Bun.spawn(["rm", "-rf", xdg]).exited;
+  await own(Bun.spawn(["rm", "-rf", xdg])).exited;
 }

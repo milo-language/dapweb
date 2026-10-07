@@ -18,6 +18,12 @@ cd "$(cd "$(dirname "$0")/.." && pwd -P)"
 [ -x ./dapweb ] || { echo "no ./dapweb — run scripts/build.sh first" >&2; exit 1; }
 
 filter="${1:-}"
+
+# The serve_suite server in flight dies with this script, Ctrl-C included. The
+# INT/TERM/HUP traps turn a signal into an exit so the EXIT trap runs.
+srv=""
+trap '[ -n "$srv" ] && kill "$srv" 2>/dev/null' EXIT
+trap 'exit 130' INT TERM HUP
 # Two servers must never collide on a dev box running this twice, and
 # e2e-session spawns a second server at port+3, so suites are 10 apart.
 base="${DAPWEB_TEST_PORT_BASE:-$((8600 + $$ % 100 * 10))}"
@@ -84,11 +90,12 @@ serve_suite() {
     done
     if ! kill -0 "$srv" 2>/dev/null; then
         echo "  FAIL $name: its server exited at startup (port $port taken?), see /tmp/dapweb_test_$name.log"
-        fail=$((fail + 1)); failed="$failed $name"; return 0
+        fail=$((fail + 1)); failed="$failed $name"; srv=""; return 0
     fi
     run_checked "$name" "$port" ./dapweb
     kill "$srv" 2>/dev/null || true
     wait "$srv" 2>/dev/null || true
+    srv=""
 }
 
 # A suite that spawns its own server: it only needs the binary path.
@@ -140,17 +147,33 @@ milo_unit() {
     rm -f "$out"
 }
 
-# A debuggee a dead server left behind: stopped (T, or Linux's tracing-stop t) or
-# orphaned to init, running an executable under /tmp/dapweb_ (where every suite
-# puts its debuggees). One "pid exe" line each. A server's death must take what it
-# launched with it; a leaked one stays forever, so this is checked, not hoped for.
-leaked_debuggees() {
+# What a run must not leave behind, one "pid what" line each; a leak stays forever,
+# so this is checked, not hoped for.
+#  - a debuggee a dead server left: stopped (T, or Linux's tracing-stop t) or
+#    orphaned to init, running an executable under /tmp/dapweb_ (where every suite
+#    puts its debuggees);
+#  - a server or reaper of THIS build orphaned to init: a suite that exits (or
+#    fails) without killing what it spawned. `dapweb start` servers are detached
+#    on purpose, so ppid 1 alone says nothing; the executable says whose it is.
+this_bin="$(pwd -P)/dapweb"
+exe_of() {
+    if [ -e "/proc/$1/exe" ]; then readlink "/proc/$1/exe"
+    else lsof -a -p "$1" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -1; fi
+}
+leaked() {
     ps -A -o pid=,ppid=,stat=,args= | awk '
-        ($3 ~ /[Tt]/ || $2 == 1) && $4 ~ /^(\/private)?\/tmp\/dapweb_/ { print $1, $4 }'
+        ($3 ~ /[Tt]/ || $2 == 1) && $4 ~ /^(\/private)?\/tmp\/dapweb_/ { print $1, $4; next }
+        $2 == 1 && $4 ~ /dapweb$/ && ($5 == "web" || $5 == "__reaper") { print $1, "server", $4, $5 }' |
+    while read -r pid what rest; do
+        # resolved only for the few orphaned dapweb candidates, never for debuggees
+        if [ "$what" != server ] || [ "$(exe_of "$pid")" = "$this_bin" ]; then
+            echo "$pid $what $rest"
+        fi
+    done
 }
 
 # Leaks from before this run (or from another one on the box) are not ours.
-orphans_before=$(leaked_debuggees | awk '{ print $1 }' | tr '\n' ' ')
+orphans_before=$(leaked | awk '{ print $1 }' | tr '\n' ' ')
 
 no_orphans() {
     echo ""
@@ -159,16 +182,16 @@ no_orphans() {
     # exits; a real leak never goes away, so waiting cannot hide one.
     i=0
     while :; do
-        new=$(leaked_debuggees | awk -v before=" $orphans_before " 'index(before, " " $1 " ") == 0')
+        new=$(leaked | awk -v before=" $orphans_before " 'index(before, " " $1 " ") == 0')
         [ -z "$new" ] || [ $i -ge 50 ] && break
         i=$((i + 1)); sleep 0.1
     done
     if [ -n "$new" ]; then
         echo "$new" | sed 's/^/  leaked: /'
-        echo "  FAIL no-orphans: $(echo "$new" | wc -l | tr -d ' ') debuggee(s) outlived their server"
+        echo "  FAIL no-orphans: $(echo "$new" | wc -l | tr -d ' ') process(es) outlived the suite or server that started them"
         fail=$((fail + 1)); failed="$failed no-orphans"
     else
-        echo "  ok no debuggee outlived its server"
+        echo "  ok nothing outlived the suite or server that started it"
         pass=$((pass + 1))
     fi
 }
@@ -204,6 +227,7 @@ self_suite  e2e-replay
 self_suite  e2e-config
 self_suite  e2e-attach
 self_suite  e2e-lifecycle
+self_suite  ptyreap
 self_suite  e2e-runtime
 self_suite  e2e-infer
 self_suite  e2e-commands

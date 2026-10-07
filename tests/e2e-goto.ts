@@ -6,6 +6,7 @@
 // Needs dapweb web on [port] targeting /tmp/dapweb_nested. Usage: bun tests/e2e-goto.ts [port]
 
 import { freePort } from "./freeport";
+import { own } from "./own";
 const port = process.argv[2] ?? "8092";
 const root = import.meta.dir + "/..";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -87,11 +88,11 @@ async function stubServer(goto: boolean) {
   const p = await freePort();
   const log = `/tmp/dapweb_goto_stub_${process.pid}_${p}.jsonl`;
   await Bun.write(log, "");
-  const srv = Bun.spawn([process.argv[3] ?? "./dapweb", "web", "--port", String(p), "--quiet"], {
+  const srv = own(Bun.spawn([process.argv[3] ?? "./dapweb", "web", "--port", String(p), "--quiet"], {
     cwd: root, stdout: "ignore", stderr: "ignore",
     env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: `/tmp/dapweb_goto_xdg_${process.pid}`,
            STUB_LOG: log, ...(goto ? { STUB_GOTO: "1" } : {}) },
-  });
+  }));
   const base = `http://localhost:${p}`;
   for (let i = 0; i < 60; i++) {
     try { if ((await fetch(`${base}/api/state`)).ok) break; } catch {}

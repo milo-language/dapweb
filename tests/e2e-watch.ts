@@ -8,6 +8,7 @@
 // Needs dapweb web on [port] targeting /tmp/dapweb_watch. Usage: bun tests/e2e-watch.ts [port] [dapweb]
 
 import { freePort } from "./freeport";
+import { own } from "./own";
 const port = process.argv[2] ?? "8092";
 const bin = process.argv[3] ?? "./dapweb";
 const root = import.meta.dir + "/..";
@@ -84,8 +85,8 @@ const ev = await cmd({ cmd: "evaluate", id: 7, expr: "&g_total", frameId: s1.fra
 const addr = String(ev.value).split(" ").pop()!;
 ok(/^0x[0-9a-f]+$/i.test(addr), `&g_total evaluates to an address (${addr})`, ev);
 {
-  const p = Bun.spawn([bin, "api", "watch", "--port", String(port), "--address", addr, "--size", "4"],
-                      { cwd: root, stdout: "pipe", stderr: "pipe" });
+  const p = own(Bun.spawn([bin, "api", "watch", "--port", String(port), "--address", addr, "--size", "4"],
+                      { cwd: root, stdout: "pipe", stderr: "pipe" }));
   const out = await new Response(p.stdout).text();
   await p.exited;
   const r = JSON.parse(out || "{}");
@@ -100,8 +101,8 @@ const g = await cmd({ cmd: "evaluate", id: 8, expr: "g_total", frameId: s2.frame
 ok(g.value === "1", `and g_total holds the new value (${g.value})`, g);
 {
   // `watch <name>` means a local of the current stop.
-  const p = Bun.spawn([bin, "api", "watch", "local", "--port", String(port), "--access", "read"],
-                      { cwd: root, stdout: "pipe", stderr: "pipe" });
+  const p = own(Bun.spawn([bin, "api", "watch", "local", "--port", String(port), "--access", "read"],
+                      { cwd: root, stdout: "pipe", stderr: "pipe" }));
   const r = JSON.parse((await new Response(p.stdout).text()) || "{}");
   await p.exited;
   const w = r.list?.find((d: any) => d.label === "local");
@@ -123,10 +124,10 @@ live.ws.close();
   const p = await freePort();
   const log = `/tmp/dapweb_watch_stub_${process.pid}_${p}.jsonl`;
   await Bun.write(log, "");
-  const srv = Bun.spawn([bin, "web", "--port", String(p), "--quiet"], {
+  const srv = own(Bun.spawn([bin, "web", "--port", String(p), "--quiet"], {
     cwd: root, stdout: "ignore", stderr: "ignore",
     env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: `/tmp/dapweb_watch_xdg_${process.pid}`, STUB_LOG: log },
-  });
+  }));
   const base = `http://localhost:${p}`;
   for (let i = 0; i < 60; i++) {
     try { if ((await fetch(`${base}/api/state`)).ok) break; } catch {}

@@ -7,6 +7,7 @@
 // somebody else's session.
 //
 // Usage: bun tests/e2e-start.ts [binary]   (needs /tmp/dapweb_nested built)
+import { own, ownPid } from "./own";
 
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
@@ -19,16 +20,14 @@ function ok(cond: any, label: string, detail?: any) {
   else { console.error(`  FAIL ${label}`, detail !== undefined ? JSON.stringify(detail).slice(0, 400) : ""); process.exit(1); }
 }
 
-const started: number[] = [];
 async function run(args: string[]): Promise<{ code: number; out: string }> {
-  const p = Bun.spawn([bin, ...args], {
+  const p = own(Bun.spawn([bin, ...args], {
     cwd: root, stdout: "pipe", stderr: "pipe",
     env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },
-  });
+  }));
   const out = await new Response(p.stdout).text();
   return { code: await p.exited, out: out.trim() };
 }
-const cleanup = () => { for (const pid of started) { try { process.kill(pid); } catch {} } };
 
 // ── a session an agent made, that a human can open ──
 
@@ -40,7 +39,8 @@ ok(s1?.ok === true, "start prints one JSON line with ok:true", first.out);
 ok(typeof s1?.sessionId === "string" && s1.sessionId.length > 0, "it carries a session id", s1);
 ok(s1?.url === `http://localhost:${s1?.port}`, "and the url a human opens", s1);
 ok(s1?.program === prog, "and the program it is on", s1);
-if (s1?.pid) started.push(s1.pid);
+// `start` detaches the server: not our child, so owned by pid.
+if (s1?.pid) ownPid(s1.pid);
 
 // the server is actually up and is the one we were told about
 const state = await (await fetch(`http://localhost:${s1.port}/api/state`)).json();
@@ -73,9 +73,8 @@ const second = await run(["start", "--program", prog]);
 const s2 = JSON.parse(second.out);
 ok(s2.ok === true && s2.port !== s1.port, "a second start picks a different port", { a: s1.port, b: s2.port });
 ok(s2.sessionId !== s1.sessionId, "and is a distinct session", { a: s1.sessionId, b: s2.sessionId });
-if (s2?.pid) started.push(s2.pid);
+if (s2?.pid) ownPid(s2.pid);
 
-cleanup();
 await Bun.$`rm -rf ${xdg}`.quiet();
 console.log(`\ne2e-start: ${pass} assertions passed`);
 process.exit(0);

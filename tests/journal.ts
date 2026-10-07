@@ -3,6 +3,7 @@
 // Usage: bun tests/journal.ts [binary]
 
 import { freePort } from "./freeport";
+import { own } from "./own";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const xdg = `/tmp/dapweb_journal_test_${process.pid}`;
@@ -37,9 +38,9 @@ int main(void) {
 
 const env = { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg, DAPWEB_JOURNAL_MAX_BYTES: String(CAP) };
 const port = await freePort();
-const srv = Bun.spawn([bin, "web", "--program", exe, "--source", src, "--port", String(port), "--quiet"], {
+const srv = own(Bun.spawn([bin, "web", "--program", exe, "--source", src, "--port", String(port), "--quiet"], {
   cwd: root, env, stdout: "ignore", stderr: "ignore",
-});
+}));
 await sleep(2500);
 
 const cmd = (body: any, awaitType?: string) =>
@@ -124,8 +125,8 @@ try {
   {
     const port2 = await freePort();
     const xdg2 = xdg + "_off";
-    const s2 = Bun.spawn([bin, "web", "--program", exe, "--port", String(port2), "--quiet", "--no-journal"],
-      { cwd: root, env: { ...env, XDG_STATE_HOME: xdg2 }, stdout: "ignore", stderr: "ignore" });
+    const s2 = own(Bun.spawn([bin, "web", "--program", exe, "--port", String(port2), "--quiet", "--no-journal"],
+      { cwd: root, env: { ...env, XDG_STATE_HOME: xdg2 }, stdout: "ignore", stderr: "ignore" }));
     await sleep(2000);
     await fetch(`http://localhost:${port2}/api/cmd`, { method: "POST", body: JSON.stringify({ cmd: "setBreakpoint", path: src, line: 5 }) });
     s2.kill();

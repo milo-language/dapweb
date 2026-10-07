@@ -5,6 +5,7 @@
 // Usage: bun tests/api.ts [binary]   (needs a debuggable /tmp/dapweb_api_demo)
 
 import { freePort } from "./freeport";
+import { own } from "./own";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const xdg = `/tmp/dapweb_api_test_${process.pid}`;
@@ -36,19 +37,19 @@ int main(void) {
 }
 
 const port = await freePort();
-const srv = Bun.spawn([bin, "web", "--program", exe, "--port", String(port), "--quiet"], {
+const srv = own(Bun.spawn([bin, "web", "--program", exe, "--port", String(port), "--quiet"], {
   cwd: root,
   env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },
   stdout: "ignore", stderr: "ignore",
-});
+}));
 await sleep(2500);
 
 // Run `dapweb api <args>` and parse the last stdout line as JSON (typed commands
 // print one JSON object; `list` prints a table, handled separately).
 async function api(args: string[]): Promise<{ code: number; out: string; json: any }> {
-  const p = Bun.spawn([bin, "api", "--port", String(port), ...args], {
+  const p = own(Bun.spawn([bin, "api", "--port", String(port), ...args], {
     cwd: root, env: { ...process.env, XDG_STATE_HOME: xdg }, stdout: "pipe", stderr: "pipe",
-  });
+  }));
   const out = (await new Response(p.stdout).text()).trim();
   const code = await p.exited;
   let json: any = null;
@@ -59,7 +60,7 @@ async function api(args: string[]): Promise<{ code: number; out: string; json: a
 try {
   // list finds the session by reading the registry (no --port needed)
   {
-    const p = Bun.spawn([bin, "api", "list"], { cwd: root, env: { ...process.env, XDG_STATE_HOME: xdg }, stdout: "pipe" });
+    const p = own(Bun.spawn([bin, "api", "list"], { cwd: root, env: { ...process.env, XDG_STATE_HOME: xdg }, stdout: "pipe" }));
     const out = (await new Response(p.stdout).text()).trim();
     await p.exited;
     ok(out.includes(String(port)) && out.includes("dapweb_api_demo"), "list shows the live session", out);
@@ -132,9 +133,9 @@ try {
   // reading a different reply than the agent got.
   {
     const compact = await api(["state"]);
-    const p = Bun.spawn([bin, "api", "--port", String(port), "state", "--pretty"], {
+    const p = own(Bun.spawn([bin, "api", "--port", String(port), "state", "--pretty"], {
       cwd: root, env: { ...process.env, XDG_STATE_HOME: xdg }, stdout: "pipe", stderr: "pipe",
-    });
+    }));
     const out = (await new Response(p.stdout).text()).trim();
     await p.exited;
     ok(out.includes("\n") && out.startsWith("{\n  \""), "--pretty indents the reply", out.slice(0, 80));
@@ -145,5 +146,5 @@ try {
   console.log(`\n${pass} checks passed`);
 } finally {
   srv.kill();
-  await Bun.spawn(["rm", "-rf", xdg]).exited;
+  await own(Bun.spawn(["rm", "-rf", xdg])).exited;
 }

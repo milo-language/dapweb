@@ -11,6 +11,7 @@
 // Usage: bun tests/e2e-commands.ts [binary]
 
 import { freePort } from "./freeport";
+import { own } from "./own";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const xdg = `/tmp/dapweb_cmds_test_${process.pid}`;
@@ -45,10 +46,10 @@ ok(dispatched.size > 15, `the match dispatches ${dispatched.size} commands`, [..
 // ── the table, as the running server serves it ──
 
 const port = await freePort();
-const srv = Bun.spawn([bin, "web", "--port", String(port), "--quiet", "--program", "/tmp/dapweb_nested"], {
+const srv = own(Bun.spawn([bin, "web", "--port", String(port), "--quiet", "--program", "/tmp/dapweb_nested"], {
   cwd: root, stdout: "pipe", stderr: "pipe",
   env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },
-});
+}));
 let spec: any = null;
 for (let i = 0; i < 60; i++) {
   try { spec = await (await fetch(`http://localhost:${port}/api/commands`)).json(); break; } catch { await sleep(100); }
@@ -100,8 +101,8 @@ ok((await post('{"cmd":"run"}')).ok === true, "and a real command still succeeds
 
 // The CLI has to make it branchable, or a script cannot tell either.
 const cli = async (args: string[]) => {
-  const p = Bun.spawn([bin, ...args], { cwd: root, stdout: "pipe", stderr: "pipe",
-    env: { ...process.env, XDG_STATE_HOME: xdg } });
+  const p = own(Bun.spawn([bin, ...args], { cwd: root, stdout: "pipe", stderr: "pipe",
+    env: { ...process.env, XDG_STATE_HOME: xdg } }));
   return { code: await p.exited, out: (await new Response(p.stdout).text()).trim() };
 };
 const bad = await cli(["api", "--port", String(port), "request", '{"cmd":"nope"}']);

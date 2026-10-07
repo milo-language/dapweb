@@ -5,6 +5,7 @@
 // Usage: bun tests/e2e-infer.ts [binary]
 
 import { freePort } from "./freeport";
+import { own } from "./own";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const xdg = `/tmp/dapweb_infer_test_${process.pid}`;
@@ -19,10 +20,10 @@ function ok(cond: any, label: string, detail?: any) {
 }
 
 const port = await freePort();
-srv = Bun.spawn([bin, "web", "--port", String(port), "--quiet"], {
+srv = own(Bun.spawn([bin, "web", "--port", String(port), "--quiet"], {
   cwd: root, stdout: "pipe", stderr: "pipe",
   env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg },
-});
+}));
 const base = `http://localhost:${port}`;
 for (let i = 0; i < 60; i++) {
   try { if ((await fetch(`${base}/api/state`)).ok) break; } catch {}

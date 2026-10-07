@@ -9,6 +9,7 @@
 
 import { freePort } from "./freeport";
 import { realpathSync } from "node:fs";
+import { own } from "./own";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const tmp = `/tmp/dapweb_update_test_${process.pid}`;
@@ -47,7 +48,7 @@ function env(extra: Record<string, string>) {
   return { ...process.env, DAPWEB_NO_OPEN: "1", DAPWEB_NO_UPDATE_CHECK: "", DAPWEB_UPDATE_BASE: base, ...extra };
 }
 async function run(exe: string, args: string[], extra: Record<string, string> = {}) {
-  const p = Bun.spawn([exe, ...args], { cwd: root, stdout: "pipe", stderr: "pipe", env: env(extra) });
+  const p = own(Bun.spawn([exe, ...args], { cwd: root, stdout: "pipe", stderr: "pipe", env: env(extra) }));
   const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
   return { code: await p.exited, out: out.trim(), err: err.trim() };
 }
@@ -77,9 +78,9 @@ ok((await run(bin, ["update", "--check"], { DAPWEB_UPDATE_URL: `${base}/version.
 
 async function web(xdg: string, extra: Record<string, string>) {
   const port = await freePort();
-  const p = Bun.spawn([bin, "web", "--port", String(port), "--no-browser", "--quiet"], {
+  const p = own(Bun.spawn([bin, "web", "--port", String(port), "--no-browser", "--quiet"], {
     cwd: root, stdout: "pipe", stderr: "pipe", env: env({ XDG_STATE_HOME: xdg, ...extra }),
-  });
+  }));
   live.push(p);
   let out = "";
   (async () => { for await (const c of p.stdout) out += new TextDecoder().decode(c); })();

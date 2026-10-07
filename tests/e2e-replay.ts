@@ -14,6 +14,7 @@
 
 import { freePort } from "./freeport";
 import { mkdirSync, copyFileSync, rmSync, readFileSync, existsSync } from "fs";
+import { own } from "./own";
 
 const bin = process.argv[2] ?? "./dapweb";
 const root = (import.meta.dir + "/..").replace("/tests/..", "");
@@ -67,10 +68,10 @@ try {
 
   // ── a replay session ──
   const port = await freePort();
-  srv = Bun.spawn([bin, "web", "--port", String(port), "--quiet", "--no-browser",
+  srv = own(Bun.spawn([bin, "web", "--port", String(port), "--quiet", "--no-browser",
                    "--program", `${tmp}/out/orders`, "--source", "examples/replay-demo/orders.milo", "--replay", trace], {
     cwd: root, env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: `${tmp}/xdg` }, stdout: "ignore", stderr: "inherit",
-  });
+  }));
   for (let i = 0; i < 100; i++) {
     try { if ((await fetch(`http://localhost:${port}/api/state`)).ok) break; } catch {}
     await sleep(100);

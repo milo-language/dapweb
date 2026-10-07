@@ -9,6 +9,7 @@
 
 import { freePort } from "./freeport";
 import { parseStopRows } from "../src/web/ui/src/recordedStops";
+import { own } from "./own";
 const bin = process.argv[2] ?? "./dapweb";
 const root = import.meta.dir + "/..";
 const xdg = `/tmp/dapweb_timeline_test_${process.pid}`;
@@ -62,10 +63,10 @@ function cleanup() {
 
 try {
   const port = await freePort();
-  srv = Bun.spawn([bin, "web", "--program", "/tmp/dapweb_nested", "--source", "examples/nested/main.c",
+  srv = own(Bun.spawn([bin, "web", "--program", "/tmp/dapweb_nested", "--source", "examples/nested/main.c",
                    "--port", String(port), "--quiet"], {
     cwd: root, env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg }, stdout: "ignore", stderr: "ignore",
-  });
+  }));
   for (let i = 0; i < 100; i++) {
     try { if ((await fetch(`http://localhost:${port}/api/state`)).ok) break; } catch {}
     await sleep(100);
