@@ -1287,11 +1287,12 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 }
                 // lldb-dap reports an exec as reason "entry", and dapweb never asks
                 // lldb for stopOnEntry (it stops at main with a breakpoint). So this
-                // is the debuggee replacing itself: a milo record/replay run re-execs
-                // to turn ASLR off when the debugger left it on (Linux CI's lldb).
-                // Not a user stop: resume before the rewind count sees it, or the
-                // count differs between runs that exec and runs that don't.
-                if stopReason == "entry" && gSession.target.spec.adapterKind == "lldb" {
+                // is the debuggee replacing itself: a milo replay run re-execs to turn
+                // ASLR off when the debugger left it on (Linux CI's lldb). Not a user
+                // stop: resume before the rewind count sees it, or the count differs
+                // between runs that exec and runs that don't. Replay sessions only:
+                // other adapters (and the test stub) report a real entry stop this way.
+                if rrOn() && stopReason == "entry" && gSession.target.spec.adapterKind == "lldb" {
                     let _c = cl.send("continue", Json.obj().int("threadId", tid).build())
                     continue
                 }
