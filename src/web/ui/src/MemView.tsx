@@ -216,7 +216,9 @@ export function MemView({ mem, addr, setAddr, err, enabled, onLoad, classify, lo
             {annos.map((a, wi) => a && (
               <span key={wi} className="annocell"
                     title={a.follow ? `follow ${a.follow.name} → ${a.follow.target}  (typed as ${a.follow.type})` : (a.full || a.text)}>
-                {annos.filter(Boolean).length > 1 && <span className="annoff">+{wi * 8}</span>}
+                {/* The slot is there on every row, empty when one word is labelled,
+                    so the labels' text starts at the same x on every row. */}
+                <span className="annoff">{annos.filter(Boolean).length > 1 ? `+${wi * 8}` : ""}</span>
                 <span className={"anno" + (a.cls ? " " + a.cls : "") + (a.follow ? " annofollow" : "")}
                       onClick={a.follow ? () => doFollow(a.follow!) : undefined}>{a.text}</span>
               </span>
