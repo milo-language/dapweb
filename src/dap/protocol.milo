@@ -1,20 +1,19 @@
 // DAP-specific message glue. The wire framing (Content-Length header + body,
-// identical to LSP) comes from the json-rpc package, which owns that format for
-// both protocols; this file binds it to the adapter's input fd.
+// identical to LSP) is the json-rpc package's format; reads go through its
+// readFrameWith. Writes are framed here because the package's writeFrame takes a
+// descriptor number, and dapweb only ever holds the handle that owns one.
 
-from "json-rpc/frame" import { writeFrame as writeFramedTo }
+from "std/io" import { OwnedFd }
 
-// Frame and write a JSON payload to the adapter's input fd. Collapses back to the
-// i64 contract its callers already check (`< 0` is the failure): ShortWrite is
-// the only thing the package can report on this path, and no caller has a
-// second thing it could do about it.
-pub fn writeFrame(fd: i32, payload: &string): i64 {
-    match writeFramedTo(fd, payload) {
-        Result.Ok(n) => {
-            return n
-        }
-        Result.Err(_e) => {
-            return -1
-        }
+// Frame and write a JSON payload to the adapter's input. < 0 is the failure,
+// including a short write. One write(2), never parked: two green tasks (D's even
+// seqs, R's odd ones) write to the same pipe, and a write that parked midway
+// would let the other's frame land inside this one.
+pub fn writeFrame(w: &OwnedFd, payload: &string): i64 {
+    let msg = $"Content-Length: {payload.len}\r\n\r\n" + payload
+    let n = w.writeOnce(msg)
+    if n < msg.len {
+        return -1
     }
+    return n
 }

@@ -11,7 +11,7 @@ from "std/process" import {
     Child
 }
 from "std/io" import {
-    OwnedFd
+    OwnedFd, FdReader
 }
 from "std/net" import {
     TcpStream, resolve
@@ -20,7 +20,7 @@ from "std/json" import {
     Json
 }
 from "json-rpc/frame" import {
-    readFrame, frameErrorMessage
+    readFrameWith, frameErrorMessage, FrameError
 }
 from "protocol" import {
     writeFrame
@@ -41,18 +41,39 @@ pub struct DapMsg {
 }
 
 // The adapter end of a session: a spawned adapter (a Child we own and reap) or a
-// socket to a TCP adapter, one fd for both directions with no process of ours behind
-// it. std's Child cannot be built around a socket (its fields are private), so the
-// socket is its own field. The method names mirror Child's so call sites read the same.
+// socket to a TCP adapter, with no process of ours behind it. Either way the session
+// talks through two owned handles: the child's stdin and stdout pipes, taken from
+// the Child, or two dups of the one socket (the TcpStream itself is dropped once
+// they exist). Dropping a handle is its close, so no number outlives its owner.
 pub struct DapConn {
     child: Option<Child>,
-    // TCP adapters only. The stream owns the socket (closing is dropping it); sockFd is
-    // its fd number, cached so reads need not borrow through the Option. -1 otherwise.
-    sock: Option<TcpStream>,
-    sockFd: i32,
+    // None once closed: dropping the write end is what sends the adapter EOF.
+    inp: Option<OwnedFd>,
+    out: Option<OwnedFd>,
 }
 
 impl DapConn {
+    fn spawned(c: Child): DapConn {
+        var cc = c
+        let inp = cc.takeStdin()
+        let out = cc.takeStdout()
+        return DapConn {
+            child: Option.Some(cc), inp: Option.Some(inp), out: Option.Some(out)
+        }
+    }
+
+    fn connected(s: TcpStream): Result<DapConn, string> {
+        let Result.Ok(inp) = OwnedFd.dup(s) else {
+            return Result.Err("dup of the adapter socket failed")
+        }
+        let Result.Ok(out) = OwnedFd.dup(s) else {
+            return Result.Err("dup of the adapter socket failed")
+        }
+        return Result.Ok(DapConn {
+            child: Option.None, inp: Option.Some(inp), out: Option.Some(out)
+        })
+    }
+
     fn pid(self: &Self): i32 {
         if let Option.Some(c) = self.child {
             return c.pid()
@@ -60,18 +81,30 @@ impl DapConn {
         return -1
     }
 
-    fn stdinFd(self: &Self): i32 {
-        if let Option.Some(c) = self.child {
-            unsafe { return c.stdinFd() }
+    // A second write handle on the adapter's input, for a task that sends requests
+    // while this conn's owner reads. The adapter sees EOF only once it is dropped too.
+    fn dupIn(self: &Self): Option<OwnedFd> {
+        if let Option.Some(w) = self.inp {
+            if let Result.Ok(d) = OwnedFd.dup(w) {
+                return Option.Some(d)
+            }
         }
-        return self.sockFd
+        return Option.None
     }
 
-    fn stdoutFd(self: &Self): i32 {
-        if let Option.Some(c) = self.child {
-            unsafe { return c.stdoutFd() }
+    // Frame and send one message; < 0 on failure (see writeFrame).
+    fn write(self: &Self, payload: &string): i64 {
+        if let Option.Some(w) = self.inp {
+            return writeFrame(w, payload)
         }
-        return self.sockFd
+        return -1
+    }
+
+    fn read(self: &Self): Result<string, FrameError> {
+        if let Option.Some(r) = self.out {
+            return readFrameWith(FdReader.attach(r))
+        }
+        return Result.Err(FrameError.Eof)
     }
 
     // None for a TCP adapter, which has no stderr. Child is Copy, so each &mut
@@ -88,13 +121,13 @@ impl DapConn {
 
     // Idempotent, like Child.close.
     fn close(self: &mut Self): void {
+        self.inp = Option.None
+        self.out = Option.None
         if let Option.Some(c) = self.child {
             var cc = c
             cc.close()
             self.child = Option.Some(cc)
         }
-        self.sock = Option.None
-        self.sockFd = -1
     }
 
     fn wait(self: &Self): Result<i32> {
@@ -135,9 +168,7 @@ impl DapClient {
     // caller must drain stderrFd (server pumps it) or the child deadlocks on a full
     // pipe; the captured text is surfaced if the adapter dies before the handshake.
     fn startArgs(program: &string, args: Vec<string>): Result<DapClient> {
-        let child = DapConn {
-            child: Option.Some(Child.spawn(program, args, false)?), sock: Option.None, sockFd: -1
-        }
+        let child = DapConn.spawned(Child.spawn(program, args, false)?)
         return Result.Ok(DapClient {
             child: child, seq: 0
         }
@@ -146,9 +177,9 @@ impl DapClient {
 
     // Connect to an already-listening DAP adapter over TCP (e.g. `dlv dap
     // --listen=host:port`, or a js-debug server) — the user runs the server, we
-    // just attach. The socket is bidirectional, so it presents as a synthetic
-    // DapConn whose in and out are the SAME fd; every downstream path
-    // (writeFrame, recv, the server's gDapIn) then works with zero changes.
+    // just attach. The socket is bidirectional, so its DapConn's in and out are
+    // two dups of it; every downstream path (writes, recv, the server's
+    // proc.dapIn) then works as for a spawned adapter.
     // pid -1 marks "no spawned process": nothing to reap on teardown.
     fn startTcp(host: &string, port: i64): Result<DapClient> {
         let Result.Ok(ip) = resolve(host) else {
@@ -157,20 +188,15 @@ impl DapClient {
         let Result.Ok(s) = TcpStream.connect(ip, port as u16) else {
             return Result.Err("cannot connect to DAP adapter at " + host.clone() + ":" + port.toString())
         }
-        var fd: i32 = -1
-        // DapConn keeps `s` in `sock`, so the number stays owned while it is used.
-        unsafe { fd = s.rawFd() }
-        let child = DapConn {
-            child: Option.None, sock: Option.Some(s), sockFd: fd
-        }
+        let child = DapConn.connected(s)?
         return Result.Ok(DapClient {
             child: child, seq: 0
         }
         )
     }
 
-    // Even seqs only: the web server's WS-reader task sends requests on the
-    // same fd with odd seqs, so the two writers can never collide on a seq.
+    // Even seqs only: the web server's WS-reader task sends requests to the
+    // same adapter with odd seqs, so the two writers can never collide on a seq.
     fn _nextSeq(self: &mut Self): i64 {
         self.seq = self.seq + 2
         return self.seq
@@ -182,7 +208,7 @@ impl DapClient {
         let payload = Json.obj().int("seq", s).str("type", "response")
             .int("request_seq", requestSeq).bool("success", true)
             .str("command", command).raw("body", bodyJson).build()
-        let _w = writeFrame(self.child.stdinFd(), payload)
+        let _w = self.child.write(payload)
     }
 
     // Frame and send a request. Returns the seq assigned, for response matching.
@@ -190,7 +216,7 @@ impl DapClient {
         let s = self._nextSeq()
         let payload = Json.obj().int("seq", s).str("type", "request")
             .str("command", command).raw("arguments", argsJson).build()
-        let w = writeFrame(self.child.stdinFd(), payload)
+        let w = self.child.write(payload)
         if w < 0 {
             return -1
         }
@@ -205,7 +231,7 @@ impl DapClient {
     // WHICH happened; the old hand-rolled framing reported a clean adapter exit
     // and a corrupt header with the same "eof or bad header".
     fn recv(self: &Self): Result<DapMsg> {
-        match readFrame(self.child.stdoutFd()) {
+        match self.child.read() {
             Result.Ok(raw) => {
                 return _decode(raw)
             }

@@ -109,7 +109,7 @@ from "./persist" import {
     absSourcePath, adapterId, applyConfig, mergeCliDefaults, loadHistory, loadBps, recordConfig, firstHistoryConfig, sessionNameSeeds, registerSession, unregisterSession
 }
 from "./dap_reader" import {
-    Pending, sendReqFd, disconnectArgs, endRunForExit, killOwnedForExit
+    Pending, sendReq, disconnectArgs, endRunForExit, killOwnedForExit
 }
 from "./dispatch" import {
     apiRunCmd, handleDebugWs
@@ -310,7 +310,7 @@ fn apiWho(req: &Request): string {
 fn reaperLoop(tickMs: i64, pendCh: Channel<Pending>): void {
     while true {
         sleepMs(tickMs)
-        let Option.Some(dfd) = gSession.proc.dapIn else {
+        if gSession.proc.dapIn.isNone() {
             continue
         }
         if gSession.peers.count > 0 {
@@ -325,7 +325,7 @@ fn reaperLoop(tickMs: i64, pendCh: Channel<Pending>): void {
             seq: seq, kind: "disc", id: 0, extra: ""
         }
         )
-        sendReqFd(dfd, seq, "disconnect", disconnectArgs())
+        sendReq(seq, "disconnect", disconnectArgs())
     }
 }
 
@@ -364,16 +364,12 @@ fn exitOnSignals(pendCh: &Channel<Pending>): void {
 // `conn` owns the socket for the whole request: every return below closes it by
 // dropping the stream, except a websocket upgrade, which hands it to the WsConn.
 fn handleConnection(conn: TcpStream, bus: Channel<string>, pendCh: Channel<Pending>): void {
-    var stream = conn
-    // readRequest/sendHttp work on the number; `stream` owns it until this returns
-    // or the upgrade below hands it to the WsConn.
-    var fd: i32 = -1
-    unsafe { fd = stream.rawFd() }
-    let Option.Some(req) = readRequest(fd) else {
+    let stream = conn
+    let Option.Some(req) = readRequest(stream) else {
         return
     }
     if !requestAllowed(req) {
-        sendHttp(fd, 403, "text/plain", "forbidden: dapweb only answers localhost, same-origin")
+        sendHttp(stream, 403, "text/plain", "forbidden: dapweb only answers localhost, same-origin")
         return
     }
     if sealedWith(req.buf, (raw: &string): bool => isWsUpgrade(raw)) {
@@ -402,7 +398,7 @@ fn handleConnection(conn: TcpStream, bus: Channel<string>, pendCh: Channel<Pendi
     // ── HTTP API (same command vocabulary as the WS the browser speaks) ──
     let apiPath = req.path.clone()
     if apiPath == "/api/state" {
-        sendHttp(fd, 200, "application/json", apiStateJson())
+        sendHttp(stream, 200, "application/json", apiStateJson())
         return
     }
     // The recorded calls of a replay session's trace, for the Timeline tab.
@@ -411,19 +407,19 @@ fn handleConnection(conn: TcpStream, bus: Channel<string>, pendCh: Channel<Pendi
         if limit <= 0 {
             limit = 2000
         }
-        sendHttp(fd, 200, "application/json", traceJson(gSession.target.spec.replay, req.param("offset").parseInt() ?? 0, limit))
+        sendHttp(stream, 200, "application/json", traceJson(gSession.target.spec.replay, req.param("offset").parseInt() ?? 0, limit))
         return
     }
     if apiPath == "/api/adapters" {
-        sendHttp(fd, 200, "application/json", adaptersJson())
+        sendHttp(stream, 200, "application/json", adaptersJson())
         return
     }
     if apiPath == "/api/infer" {
-        sendHttp(fd, 200, "application/json", inferJson(req.param("program")))
+        sendHttp(stream, 200, "application/json", inferJson(req.param("program")))
         return
     }
     if apiPath == "/api/processes" {
-        sendHttp(fd, 200, "application/json", processListJson())
+        sendHttp(stream, 200, "application/json", processListJson())
         return
     }
     // Every live dapweb on this machine, for the /sessions dashboard. Reads
@@ -431,7 +427,7 @@ fn handleConnection(conn: TcpStream, bus: Channel<string>, pendCh: Channel<Pendi
     // The vocabulary, so a caller can discover it over the same port it
     // drives the session on rather than by reading the source.
     if apiPath == "/api/commands" {
-        sendHttp(fd, 200, "application/json", commandsJson())
+        sendHttp(stream, 200, "application/json", commandsJson())
         return
     }
     // What this machine's sessions have done. Same rows `dapweb log` prints,
@@ -463,47 +459,47 @@ fn handleConnection(conn: TcpStream, bus: Channel<string>, pendCh: Channel<Pendi
         for r in arr {
             rows = rows.raw(r)
         }
-        sendHttp(fd, 200, "application/json", Json.obj().bool("ok", true).arr("rows", rows).build())
+        sendHttp(stream, 200, "application/json", Json.obj().bool("ok", true).arr("rows", rows).build())
         return
     }
     if apiPath == "/api/sessions" {
-        sendHttp(fd, 200, "application/json", sessionsJson(gSession.server.sessionId))
+        sendHttp(stream, 200, "application/json", sessionsJson(gSession.server.sessionId))
         return
     }
     if apiPath == "/api/spawn" {
         if req.method != "POST" {
-            sendHttp(fd, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
+            sendHttp(stream, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
             return
         }
-        sendHttp(fd, 200, "application/json", spawnSessionJson())
+        sendHttp(stream, 200, "application/json", spawnSessionJson())
         return
     }
     // Reports on the configured target only, with no path parameter; a typed
     // path is /api/infer's job, which carries its own limits.
     if apiPath == "/api/binfo" {
-        sendHttp(fd, 200, "application/json", binInfoJson(gSession.target.spec.binPath))
+        sendHttp(stream, 200, "application/json", binInfoJson(gSession.target.spec.binPath))
         return
     }
     if apiPath == "/api/cmd" {
         if req.method != "POST" {
-            sendHttp(fd, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
+            sendHttp(stream, 405, "application/json", Json.obj().bool("ok", false).str("error", "POST required").build())
             return
         }
-        let body = readBody(fd, req)
+        let body = readBody(stream, req)
         var timeoutMs = req.param("timeout").parseInt() ?? 0
         if timeoutMs <= 0 {
             timeoutMs = 5000
         }
         let reply = apiRunCmd(body, req.param("await"), timeoutMs, apiWho(req), bus, pendCh)
-        sendHttp(fd, 200, "application/json", reply)
+        sendHttp(stream, 200, "application/json", reply)
         return
     }
 
     if req.method == "GET" {
         // requestAllowed has already pinned Host to a loopback name.
-        serveStatic(fd, req.path, "http://" + req.header("host"))
+        serveStatic(stream, req.path, "http://" + req.header("host"))
     } else {
-        sendHttp(fd, 404, "text/plain", "not found")
+        sendHttp(stream, 404, "text/plain", "not found")
     }
 }
 

@@ -1,8 +1,8 @@
 // HTTP/1.1 for the one-request-per-connection server: read and parse a request
 // head once, the gate every route sits behind, and the UI bundle.
 
-from "std/os" import {
-    close, sendFd, recvFd
+from "std/net" import {
+    TcpStream
 }
 from "std/seal" import {
     Sealed, seal, Span
@@ -206,29 +206,21 @@ fn parseRequest(raw: string): Request {
 }
 
 // Read and parse one request head; None if the peer sent nothing.
-pub fn readRequest(fd: i32): Option<Request> {
-    var chunk: [u8; 8192] = [0; 8192]
-    var n: i64 = 0
-    unsafe { n = recvFd(fd, chunk, 8192) }
-    if n <= 0 {
+pub fn readRequest(conn: &TcpStream): Option<Request> {
+    // recvOnce is one read (parking under the green runtime); "" is EOF or an error.
+    var raw = conn.recvOnce()
+    if raw.len == 0 {
         return Option.None
-    }
-    var raw: string = ""
-    for i in 0..n {
-        raw.push(chunk[i])
     }
     // Headers can arrive split across TCP segments. Read to the blank line
     // before judging them: requestAllowed would otherwise refuse a request
     // whose Host has not arrived yet. Capped so a client cannot grow it forever.
     while !raw.contains("\r\n\r\n") && raw.len < 65536 {
-        var more: i64 = 0
-        unsafe { more = recvFd(fd, chunk, 8192) }
-        if more <= 0 {
+        let more = conn.recvOnce()
+        if more.len == 0 {
             break
         }
-        for i in 0..more {
-            raw.push(chunk[i])
-        }
+        raw.pushStr(more)
     }
     return Option.Some(parseRequest(raw))
 }
@@ -236,19 +228,15 @@ pub fn readRequest(fd: i32): Option<Request> {
 // The body: whatever arrived with the head, then further reads while it is
 // shorter than Content-Length. An absent or garbage length reads as 0, so the
 // body is what already arrived.
-pub fn readBody(fd: i32, req: &Request): string {
+pub fn readBody(conn: &TcpStream, req: &Request): string {
     var body = req.buf.text(req.buf.spanOf(req.bodyStart, req.buf.len() - req.bodyStart))
     let want = req.header("content-length").parseInt() ?? 0
     while body.len < want {
-        var more: [u8; 8192] = [0; 8192]
-        var n: i64 = 0
-        unsafe { n = recvFd(fd, more, 8192) }
-        if n <= 0 {
+        let more = conn.recvOnce()
+        if more.len == 0 {
             break
         }
-        for j in 0..n {
-            body.push(more[j])
-        }
+        body.pushStr(more)
     }
     return body
 }
@@ -292,7 +280,7 @@ pub fn requestAllowed(req: &Request): bool {
 
 // ── HTTP plumbing ──
 
-pub fn sendHttp(fd: i32, status: i32, contentType: &string, body: &string): void {
+pub fn sendHttp(conn: &TcpStream, status: i32, contentType: &string, body: &string): void {
     var statusText: string = "200 OK"
     if status == 403 {
         statusText = "403 Forbidden"
@@ -312,8 +300,8 @@ pub fn sendHttp(fd: i32, status: i32, contentType: &string, body: &string): void
     resp = resp + body
     // Accepted fds are non-blocking under the green runtime: a single write()
     // stops at the socket buffer (~half a MB of app.js got dropped this way).
-    // sendFd parks until the whole response is out.
-    unsafe { let _n = sendFd(fd, resp, resp.len) }
+    // TcpStream.send parks until the whole response is out.
+    let _n = conn.send(resp)
 }
 
 // UI assets are embedded, so the binary is self-contained: a downloaded release
@@ -412,7 +400,7 @@ fn replaceAll(s: &string, needle: &string, repl: &string): string {
     return out
 }
 
-pub fn serveStatic(fd: i32, reqPath: &string, origin: &string): void {
+pub fn serveStatic(conn: &TcpStream, reqPath: &string, origin: &string): void {
     var p = reqPath.clone()
     // The dashboard is a route of the same single-page bundle, so it resolves to
     // index.html and App.tsx branches on the pathname. A second HTML entry point
@@ -424,7 +412,7 @@ pub fn serveStatic(fd: i32, reqPath: &string, origin: &string): void {
     var di: i64 = 0
     while di + 1 < p.len {
         if p[di] == '.' && p[di + 1] == '.' {
-            sendHttp(fd, 404, "text/plain", "not found")
+            sendHttp(conn, 404, "text/plain", "not found")
             return
         }
         di = di + 1
@@ -438,7 +426,7 @@ pub fn serveStatic(fd: i32, reqPath: &string, origin: &string): void {
                 body = disk
             }
             Result.Err(_e) => {
-                sendHttp(fd, 404, "text/plain", "not found")
+                sendHttp(conn, 404, "text/plain", "not found")
                 return
             }
         }
@@ -448,7 +436,7 @@ pub fn serveStatic(fd: i32, reqPath: &string, origin: &string): void {
                 body = embedded
             }
             Option.None => {
-                sendHttp(fd, 404, "text/plain", "not found")
+                sendHttp(conn, 404, "text/plain", "not found")
                 return
             }
         }
@@ -457,8 +445,8 @@ pub fn serveStatic(fd: i32, reqPath: &string, origin: &string): void {
         // og:image/og:url need absolute URLs (unfurlers reject
         // relative) but the host varies (localhost/LAN/tunnel):
         // inject the request's own origin.
-        sendHttp(fd, 200, mimeFor(p), replaceAll(body, "__ORIGIN__", origin))
+        sendHttp(conn, 200, mimeFor(p), replaceAll(body, "__ORIGIN__", origin))
     } else {
-        sendHttp(fd, 200, mimeFor(p), body)
+        sendHttp(conn, 200, mimeFor(p), body)
     }
 }

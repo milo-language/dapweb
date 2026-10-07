@@ -18,7 +18,7 @@ from "./rewind" import {
     rrOn, rrRewinding, rrLog, rrPrevStop, rrCannotReach, rrBegin, rrAbort, rrLaunchStopAtMain
 }
 from "./dap_reader" import {
-    Pending, sendReqFd, excArgs, startRun, dataBpArgs, dropRunDataBps
+    Pending, sendReq, sendParentReq, excArgs, startRun, dataBpArgs, dropRunDataBps
 }
 from "./peers" import {
     logEvent, peerCountStr, wsPush, peerPush, wsWriterLoop, sinkRegister, sinkUnregister, pushHelloState, configErrMsg, cmdErrorMsg, bpAckMsg
@@ -83,13 +83,13 @@ impl Cmd {
 // the entry must exist before the adapter can possibly reply, or the response
 // is dropped unmatched.
 fn sendPending(pendCh: &Channel<Pending>, kind: &string, id: i64, extra: string, command: &string, args: &string): void {
-    if let Option.Some(dfd) = gSession.proc.dapIn {
+    if gSession.proc.dapIn.isSome() {
         let seq = gSession.proc.nextSeq()
         let _p = pendCh.trySend(Pending {
             seq: seq, kind: kind.clone(), id: id, extra: extra
         }
         )
-        sendReqFd(dfd, seq, command, args)
+        sendReq(seq, command, args)
     }
 }
 
@@ -419,7 +419,7 @@ fn cmdStep(cmd: &Cmd): void {
     if !pause {
         gSession.stop.resume()
     }
-    let Option.Some(dfd) = gSession.proc.dapIn else {
+    if gSession.proc.dapIn.isNone() {
         return
     }
     let t = cmd.int("tid", stoppedTid)
@@ -441,7 +441,7 @@ fn cmdStep(cmd: &Cmd): void {
     }
     rrLog(cmd.name, gran, "", 0)
     let seq = gSession.proc.nextSeq()
-    sendReqFd(dfd, seq, dapCmd, b.build())
+    sendReq(seq, dapCmd, b.build())
 }
 
 // Continue to a line, VS Code's one-shot: the line is armed as an extra
@@ -468,10 +468,10 @@ fn cmdRunToCursor(cmd: &Cmd): void {
     )
     sendPending(cmd.pendCh, "bpLive", 0, "", "setBreakpoints", buildBpArgsForPath(gSession.persisted.bps, path))
     gSession.stop.resume()
-    let Option.Some(dfd) = gSession.proc.dapIn else {
+    if gSession.proc.dapIn.isNone() {
         return
     }
-    sendReqFd(dfd, gSession.proc.nextSeq(), "continue", Json.obj().int("threadId", t).build())
+    sendReq(gSession.proc.nextSeq(), "continue", Json.obj().int("threadId", t).build())
 }
 
 // The thread of the current stop, for callers that name none.
@@ -555,9 +555,7 @@ fn cmdKill(cmd: &Cmd): void {
     // The child session debugs the process; the PARENT is what spawned it.
     // Disconnecting only the child leaves the program running with nobody
     // attached, which reads in the UI as "killed" and is not.
-    if let Option.Some(pfd) = gSession.proc.parentIn {
-        sendReqFd(pfd, gSession.proc.oddSeq + 1, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
-    }
+    sendParentReq(gSession.proc.oddSeq + 1, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
 }
 
 // ── Reverse debugging (replay sessions; the engine is ./rewind) ──

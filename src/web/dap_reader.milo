@@ -31,11 +31,11 @@ from "./reaper" import {
 from "./state" import {
     gSession, Bp, DataBp, cloneDataBp, dataBpsMsg, OutLine, ChildLaunch, StopInfo, ThreadList, Attribution, PendingRun, sourceMsg, capsMsg, stoppedMsg, threadsMsg, regionsMsg, replayStateMsg
 }
-from "json-rpc/frame" import {
-    writeFrame as writeFrameFd
+from "../dap/protocol" import {
+    writeFrame
 }
 from "std/io" import {
-    OwnedFd, fdChannel
+    OwnedFd
 }
 from "std/json" import {
     Json
@@ -249,17 +249,20 @@ fn respErrText(doc: &Json): string {
     return "the adapter refused the request and said nothing about why"
 }
 
-// P: pty master → browser terminal. fdChannel owns the read/EAGAIN pump; we just
+// P: pty master → browser terminal. OwnedFd.channel owns the read/EAGAIN pump; we just
 // wrap each chunk and forward.
 //
 // `reader` is this task's own dup of the master, and dropping it at the end is the
-// only close it gets. fdChannel's reader parks in schedulerWaitRead on that number;
+// only close it gets. The channel's reader parks in schedulerWaitRead on that number;
 // had anything else closed it, the reader would sit parked on a free descriptor and
 // the next pipe() to reuse the number would get its bytes stolen by a task from a
 // dead session (which showed up as a second debug run hanging with its DAP responses
 // vanishing into the previous run's stderr log). The Pty in proc.pty owns the
 // original master, used by the stdin and resize commands; see closePty.
-fn ptyPumpLoop(reader: OwnedFd, master: i32, ch: Channel<string>): void {
+// `ptyPid` tells this pump's pty apart from a newer one in proc.pty: the child is
+// not reaped while its pty is there (closePty only parks it in ptyGone), so its pid
+// cannot have been reused.
+fn ptyPumpLoop(reader: OwnedFd, ptyPid: i32, ch: Channel<string>): void {
     for chunk in reader.channel() {
         // A count re-runs to where the program already is: its output is what
         // the terminal already shows.
@@ -269,7 +272,7 @@ fn ptyPumpLoop(reader: OwnedFd, master: i32, ch: Channel<string>): void {
     }
     // The debuggee is gone: stdin typed from now on is buffered for the next run.
     if let Option.Some(p) = replace(gSession.proc.pty, Option.None) {
-        if p.fd() != master {
+        if p.pid() != ptyPid {
             gSession.proc.pty = Option.Some(p)
         } else {
             closePty(p)
@@ -315,13 +318,29 @@ fn outputMsg(doc: &Json): string {
 
 // ── DAP request framing for R (odd seqs; D's DapClient uses even) ──
 
-pub fn sendReqFd(fd: i32, seq: i64, command: &string, argsJson: &string): void {
+// R's request into the live run's adapter; a no-op with no run live. The borrow of
+// proc.dapIn lasts only for the write, so a caller takes its seq (nextSeq mutates
+// gSession) before calling, never while holding the handle.
+pub fn sendReq(seq: i64, command: &string, argsJson: &string): void {
+    if let Option.Some(w) = gSession.proc.dapIn {
+        sendReqFd(w, seq, command, argsJson)
+    }
+}
+
+// The same into the js-debug parent session, when there is one.
+pub fn sendParentReq(seq: i64, command: &string, argsJson: &string): void {
+    if let Option.Some(w) = gSession.proc.parentIn {
+        sendReqFd(w, seq, command, argsJson)
+    }
+}
+
+fn sendReqFd(fd: &OwnedFd, seq: i64, command: &string, argsJson: &string): void {
     let payload = Json.obj().int("seq", seq).str("type", "request")
         .str("command", command).raw("arguments", argsJson).build()
     // Deliberately unchecked, as before: R has no path to report a short write
     // to, and a failed write here surfaces as the adapter going quiet, which D
     // already handles.
-    let _w = writeFrameFd(fd, payload)
+    let _w = writeFrame(fd, payload)
 }
 
 // Session-init bundle: [{"args": <setBreakpoints-json>}] — one entry per file
@@ -641,8 +660,7 @@ fn handleRunInTerminal(cl: &mut DapClient, doc: &Json, reqSeq: i64, ch: &Channel
             // to end it (js-debug's server does not).
             gSession.proc.debuggeePid = Option.Some(pid as i64)
             cl.respond(reqSeq, "runInTerminal", Json.obj().int("processId", pid as i64).build())
-            let master = pty.fd()
-            let reader = match OwnedFd.dup(pty) {
+            let reader = match pty.dupMaster() {
                 Result.Ok(r) => {
                     r
                 }
@@ -667,10 +685,10 @@ fn handleRunInTerminal(cl: &mut DapClient, doc: &Json, reqSeq: i64, ch: &Channel
             // call, so it gets its own retained handle rather than ours.
             let ptyCh = ch.clone()
             Task.spawn(move(): void => {
-                ptyPumpLoop(reader, master, ptyCh)
+                ptyPumpLoop(reader, pid, ptyCh)
             }
             )
-            return master
+            return pid
         }
         Result.Err(e) => {
             eprint($"[srv] pty spawn failed: {e}\n")
@@ -1123,13 +1141,13 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     Task.spawn(move(): void => {
                         sleepMs(300)
                         if gSession.stop.stop.isSome() {
-                            if let Option.Some(dfd) = gSession.proc.dapIn {
+                            if gSession.proc.dapIn.isSome() {
                                 let seq = gSession.proc.nextSeq()
                                 let _p = pollPend.trySend(Pending {
                                     seq: seq, kind: "thr", id: att, extra: ""
                                 }
                                 )
-                                sendReqFd(dfd, seq, "threads", "{}")
+                                sendReq(seq, "threads", "{}")
                             }
                         }
                     }
@@ -1354,12 +1372,12 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                             }
                             )
                             var parentCl = cl
-                            gSession.proc.parentIn = Option.Some(parentCl.child.stdinFd())
+                            gSession.proc.parentIn = parentCl.child.dupIn()
                             cl = childCl
                             // parent pendings can never match child seqs — drop
                             // them (the drain task ignores stray responses).
                             pend = []
-                            gSession.proc.dapIn = Option.Some(cl.child.stdinFd())
+                            gSession.proc.dapIn = cl.child.dupIn()
                             let dch = ch.clone()
                             Task.spawn(move(): void => {
                                 parentDrainLoop(parentCl, dch)
@@ -1383,6 +1401,10 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
     }
 
     reaperForget(cl.child.pid() as i64)
+    // R's dup first: with it open, closing D's end below would not EOF the adapter,
+    // and cl.close() waits for the adapter to exit. A peer acting while D is parked
+    // in that wait finds no run to write to.
+    gSession.proc.dapIn = Option.None
     cl.close()
     var durSecs = (epochMillis() - gSession.proc.runStartMs) / 1000
     if let Option.Some(code) = gSession.proc.lastExit {
@@ -1622,16 +1644,14 @@ pub fn disconnectArgs(): string {
 // adapter would leave stopped), then end by handle whatever we launched that
 // is still there. Parks while D's teardown runs, so call it from a green task.
 pub fn endRunForExit(pendCh: &Channel<Pending>): void {
-    if let Option.Some(dfd) = gSession.proc.dapIn {
+    if gSession.proc.dapIn.isSome() {
         let seq = gSession.proc.nextSeq()
         let _p = pendCh.trySend(Pending {
             seq: seq, kind: "disc", id: 0, extra: ""
         }
         )
-        sendReqFd(dfd, seq, "disconnect", disconnectArgs())
-        if let Option.Some(pfd) = gSession.proc.parentIn {
-            sendReqFd(pfd, gSession.proc.oddSeq + 1, "disconnect", disconnectArgs())
-        }
+        sendReq(seq, "disconnect", disconnectArgs())
+        sendParentReq(gSession.proc.oddSeq + 1, "disconnect", disconnectArgs())
         var waited: i64 = 0
         while gSession.proc.started && waited < 3000 {
             sleepMs(50)
@@ -1667,8 +1687,8 @@ pub fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
     // spawnTcpAdapter, and a reset after it would wipe an early crash capture.
     gSession.proc.adapterStderr = ""
     // Transport: TCP connects to a running adapter (spec.port>0); stdio spawns
-    // the resolved adapter command. Both yield a DapClient whose child.stdinFd
-    // is the DAP write fd — the rest of the handshake is identical.
+    // the resolved adapter command. Both yield a DapClient whose conn takes DAP
+    // writes the same way, so the rest of the handshake is identical.
     var startRes: Result<DapClient> = Result.Err("uninitialized")
     var label: string = ""
     if gSession.target.spec.port > 0 {
@@ -1738,8 +1758,7 @@ pub fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
             // TCP clients have no process (pid -1); a spawned TCP server is tracked
             // in spawnTcpAdapter.
             reaperTrack(cl.child.pid() as i64, "a")
-            let dfd = cl.child.stdinFd()
-            gSession.proc.dapIn = Option.Some(dfd)
+            gSession.proc.dapIn = cl.child.dupIn()
             // Drain + capture adapter stderr (stdio spawns only; TCP has no child
             // stderr, so None). Must start before cl moves into the reader task.
             // The pump owns the descriptor from here (takeStderr leaves -1 behind,
@@ -1764,7 +1783,7 @@ pub fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
                 seq: seq, kind: "initialize", id: 0, extra: buildAllBpArgs(launchBps),
             }
             )
-            sendReqFd(dfd, seq, "initialize", initArgs())
+            sendReq(seq, "initialize", initArgs())
             let readerBus = bus.clone()
             let readerPend = pendCh.clone()
             Task.spawn(move(): void => {

@@ -15,7 +15,7 @@ from "std/json" import {
     Json
 }
 from "std/io" import {
-    readFile
+    readFile, OwnedFd
 }
 from "./ptychild" import {
     DebuggeePty
@@ -144,8 +144,11 @@ pub struct PendingRun {
 // when the run ends.
 pub struct RunState {
     started: bool,
-    // R's write fd into the adapter; Some exactly while a run is live.
-    dapIn: Option<i32>,
+    // R's write handle into the adapter (its own dup of the input, so D closing
+    // its end never leaves R writing to a freed number); Some exactly while a run
+    // is live. D clears it before closing its own end: the adapter sees EOF only
+    // once both are gone.
+    dapIn: Option<OwnedFd>,
     // The live debuggee pty, for stdin and resize.
     pty: Option<DebuggeePty>,
     // A closed pty kept for its child pid until the child is reaped: see closePty.
@@ -170,10 +173,10 @@ pub struct RunState {
     // Behind a spawned TCP adapter the debuggee is our grandchild: killing the
     // adapter server orphans it instead of ending it, so teardown checks this pid.
     debuggeePid: Option<i64>,
-    // Write fd of the PARENT session after a js-debug child handoff.
+    // Write handle of the PARENT session after a js-debug child handoff.
     // The parent is the session that owns the launched process: a disconnect sent
     // only to the child ends the debug connection and leaves the program running.
-    parentIn: Option<i32>,
+    parentIn: Option<OwnedFd>,
     child: Option<ChildLaunch>,
     pendingRun: Option<PendingRun>,
     // The line a runToCursor is heading for. Kept out of persisted.bps so no
