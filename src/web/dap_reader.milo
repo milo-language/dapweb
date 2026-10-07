@@ -7,7 +7,14 @@ from "../dap/client" import {
     DapClient
 }
 from "../dap/session" import {
-    initArgsFor, launchRequestOf, adapterArgvOf, launchArgsFor, tcpListenArgs, mainSymbolFor
+    initArgsFor, launchRequestOf, adapterArgvOf, launchArgsFor, tcpListenArgs, mainSymbolFor, withReplayEnv
+}
+from "./bpargs" import {
+    buildBpArgsForPath
+}
+from "./rewind" import {
+    RrReq, RrStep, rrOn, rrRewinding, rrMode, rrWhy, rrAdapterBps, rrLaunchStopAtMain, rrLaunchSeek, rrLaunching,
+    rrStopped, rrNoteWhere, rrOutput, rrEnded, rrSeekFrames, rrWithStepBack
 }
 from "./jsonaccess" import {
     bodyI64, bodyStr, frame0Field, frame0Path, scopes0Ref
@@ -19,7 +26,7 @@ from "./persist" import {
     applyConfig, loadBps, appendHistory
 }
 from "./state" import {
-    gSession, Bp, DataBp, cloneDataBp, dataBpsMsg, OutLine, ChildLaunch, StopInfo, ThreadList, Attribution, sourceMsg, capsMsg, stoppedMsg, threadsMsg, regionsMsg
+    gSession, Bp, DataBp, cloneDataBp, dataBpsMsg, OutLine, ChildLaunch, StopInfo, ThreadList, Attribution, PendingRun, sourceMsg, capsMsg, stoppedMsg, threadsMsg, regionsMsg, replayStateMsg
 }
 from "json-rpc/frame" import {
     writeFrame as writeFrameFd
@@ -251,7 +258,11 @@ fn respErrText(doc: &Json): string {
 // original master, used by the stdin and resize commands; see closePty.
 fn ptyPumpLoop(reader: OwnedFd, master: i32, ch: Channel<string>): void {
     for chunk in reader.channel() {
-        wsPush(ch, Json.obj().str("type", "ptyData").str("data", chunk).build())
+        // A count re-runs to where the program already is: its output is what
+        // the terminal already shows.
+        if rrMode() != "count" {
+            wsPush(ch, Json.obj().str("type", "ptyData").str("data", chunk).build())
+        }
     }
     // The debuggee is gone: stdin typed from now on is buffered for the next run.
     if let Option.Some(p) = replace(gSession.proc.pty, Option.None) {
@@ -268,6 +279,22 @@ fn ptyPumpLoop(reader: OwnedFd, master: i32, ch: Channel<string>): void {
 fn closePty(p: Pty): void {
     var pty = p
     pty.close()
+    // The debuggee runInTerminal launched is our child: kept until reaped.
+    if let Option.Some(old) = replace(gSession.proc.ptyGone, Option.Some(pty)) {
+        reapPtyChild(old)
+    }
+}
+
+// Reap a pty's child once the adapter is done with it (it killed it, or the run
+// ended). Unreaped, it stays a zombie, and a zombie passes processAlive, so
+// reapDebuggee waited its full 500ms on every run (and every step back
+// relaunches). SIGKILL is a no-op on a zombie and cannot be ignored by a live
+// child, so the wait after it returns at once.
+fn reapPtyChild(p: Pty): void {
+    if p.pid() > 0 {
+        p.kill()
+        let _st = p.wait()
+    }
 }
 
 // Drain the adapter's stderr so the pipe never fills (mergeStderr=false) and
@@ -302,47 +329,6 @@ pub fn sendReqFd(fd: i32, seq: i64, command: &string, argsJson: &string): void {
     // to, and a failed write here surfaces as the adapter going quiet, which D
     // already handles.
     let _w = writeFrameFd(fd, payload)
-}
-
-// DAP keys breakpoints on (source, line), so a second entry at a line the user
-// already holds would be a duplicate the adapter may reject.
-fn bpEnabledAt(bps: &Vec<Bp>, path: &string, line: i64): bool {
-    for bp in bps {
-        if bp.path == path && bp.line == line && bp.enabled {
-            return true
-        }
-    }
-    return false
-}
-
-// setBreakpoints args for one file (breakpoints are per-source in DAP), plus
-// the in-flight runToCursor line when it is in this file.
-pub fn buildBpArgsForPath(bps: &Vec<Bp>, path: &string): string {
-    var arr = Json.arr()
-    for bp in bps {
-        if bp.path == path && bp.enabled {
-            var o = Json.obj().int("line", bp.line)
-            if bp.condition.len > 0 {
-                o = o.str("condition", bp.condition)
-            }
-            if bp.hitCondition.len > 0 {
-                o = o.str("hitCondition", bp.hitCondition)
-            }
-            if bp.logMessage.len > 0 {
-                o = o.str("logMessage", bp.logMessage)
-            }
-            arr = arr.obj(o)
-        }
-    }
-    if let Option.Some(t) = gSession.proc.runTo {
-        if t.path == path && !bpEnabledAt(bps, path, t.line) {
-            arr = arr.obj(Json.obj().int("line", t.line))
-        }
-    }
-    return Json.obj()
-        .obj("source", Json.obj().str("path", path))
-        .arr("breakpoints", arr)
-        .build()
 }
 
 // Session-init bundle: [{"args": <setBreakpoints-json>}] — one entry per file
@@ -482,6 +468,9 @@ fn launchRequest(): string {
 
 fn launchArgs(): string {
     let body = launchArgsFor(gSession.target.spec, gSession.target.stopAtMain)
+    if rrOn() {
+        return withReplayEnv(body, gSession.target.spec.replay, rrLaunchSeek())
+    }
     if gSession.target.spec.adapterKind == "node" && gSession.target.spec.request == "attach" {
         return withInspectorPort(body)
     }
@@ -596,8 +585,9 @@ fn requestStopDetails(cl: &mut DapClient, pend: &mut Vec<Pending>, tid: i64): vo
     let stArgs = Json.obj().int("threadId", tid)
         .int("startFrame", 0).int("levels", 20).build()
     let s = cl.send("stackTrace", stArgs)
+    // The stop's number rides along, so the replay timeline learns where it was.
     pend.push(Pending {
-        seq: s, kind: "st", id: 0, extra: ""
+        seq: s, kind: "st", id: 0, extra: gSession.replay.cur.toString()
     }
     )
     let ts = cl.send("threads", "{}")
@@ -743,6 +733,58 @@ fn parentDrainLoop(client: DapClient, ch: Channel<string>): void {
     cl.child.close()
 }
 
+// Send what the rewind engine asked for. A gotoTargets carries the thread its
+// goto will need, as R's setNextStatement does.
+fn rrSendReqs(cl: &mut DapClient, pend: &mut Vec<Pending>, reqs: &Vec<RrReq>): void {
+    for r in reqs {
+        let s = cl.send(r.command, r.args)
+        if r.kind.startsWith("gotoT:") {
+            pend.push(Pending {
+                seq: s, kind: "gotoT", id: 0, extra: r.kind.substr(6, r.kind.len)
+            }
+            )
+        } else if r.kind.len > 0 {
+            pend.push(Pending {
+                seq: s, kind: r.kind.clone(), id: 0, extra: ""
+            }
+            )
+        }
+    }
+}
+
+// Carry out the engine's decision about a stop. True when the stop is to be
+// shown like any other.
+fn rrApplyStep(cl: &mut DapClient, pend: &mut Vec<Pending>, ch: &Channel<string>, step: &RrStep, why: &string): bool {
+    rrSendReqs(&mut cl, &mut pend, step.reqs)
+    if step.error.len > 0 {
+        logEvent("rewind failed", step.error)
+        wsPush(ch, cmdErrorMsg(why, step.error))
+        wsPush(ch, replayStateMsg(gSession))
+    }
+    if step.relaunch {
+        // Teardown sees pendingRun and launches again; the rewind stays armed.
+        gSession.proc.pendingRun = Option.Some(PendingRun {
+            config: Option.None, stopAtMain: rrLaunchStopAtMain(),
+        }
+        )
+        let s = cl.send("disconnect", Json.obj().bool("terminateDebuggee", true).build())
+        pend.push(Pending {
+            seq: s, kind: "disc", id: 0, extra: ""
+        }
+        )
+        return false
+    }
+    if step.seekStack {
+        let s = cl.send("stackTrace", Json.obj().int("threadId", gSession.replay.tid).int("startFrame", 0).int("levels", 40).build())
+        pend.push(Pending {
+            seq: s, kind: "seekSt", id: 0, extra: ""
+        }
+        )
+        return false
+    }
+    return step.show
+}
+
 fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending>): void {
     var cl = client
     var pend: Vec<Pending> = []
@@ -885,8 +927,11 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 }
             } else if kind == "initialize" {
                 initOk = true
-                gSession.stop.caps = Option.Some(msg.raw.clone())
-                wsPush(ch, capsMsg(msg.raw))
+                let caps = rrWithStepBack(msg.raw)
+                gSession.stop.caps = Option.Some(caps.clone())
+                if !rrRewinding() {
+                    wsPush(ch, capsMsg(caps))
+                }
                 // a js-debug child session launches with the configuration the
                 // startDebugging request handed us, not our built launch args;
                 // "childLaunch" so its ack doesn't re-append history.
@@ -907,7 +952,9 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 // running; next signal is a stopped/terminated event.
                 // Launch ack'd: this config actually ran, so record it (single
                 // writer — clients never save) and tell every peer.
-                wsPush(ch, appendHistory())
+                if !rrRewinding() {
+                    wsPush(ch, appendHistory())
+                }
             } else if kind == "gotoT" {
                 // The first target is the line itself; adapters list more only
                 // when one line maps to several code locations.
@@ -979,6 +1026,9 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 stopLine = frame0Field(msg.doc, "line")
                 frame0 = frame0Field(msg.doc, "id")
                 let path = frame0Path(msg.doc)
+                if rrOn() {
+                    rrNoteWhere(pextra.parseInt() ?? 0, path, stopLine)
+                }
                 if path.len > 0 && path != lastSrc {
                     wsPush(ch, sourceMsg(path))
                     lastSrc = path
@@ -1025,6 +1075,9 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 }
                 wsPush(ch, stoppedMsg(info))
                 gSession.stop.stop = Option.Some(info)
+                if rrOn() {
+                    wsPush(ch, replayStateMsg(gSession))
+                }
             } else if kind == "regions" {
                 // Kept + replayed like the stop so a tab that reloads mid-stop
                 // keeps its region colors instead of going grey until the next step.
@@ -1093,6 +1146,12 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     }
                     )
                 }
+            } else if kind == "seekSt" {
+                let why = rrWhy()
+                let step = rrSeekFrames(msg.doc)
+                if rrApplyStep(&mut cl, &mut pend, ch, step, why) {
+                    requestStopDetails(&mut cl, &mut pend, tid)
+                }
             } else if kind == "tst" {
                 // stack for a user-selected thread; tid rides in extra.
                 var t: string = "0"
@@ -1114,7 +1173,12 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 // is long past and the breakpoint would never hit. There the same
                 // toggle means "stop on attach" and rides in the attach body's
                 // stopOnEntry — see launchArgsFor().
-                if gSession.target.stopAtMain && gSession.target.spec.adapterKind != "python" && gSession.target.spec.adapterKind != "node" && gSession.target.spec.request != "attach" {
+                // A seek stops at its trace record by breaking where the replay
+                // calls out to a debugger (seek launches never stop at main).
+                if rrLaunchSeek() > 0 {
+                    let fb = Json.obj().arr("breakpoints", Json.arr().obj(Json.obj().str("name", "miloReplayStop"))).build()
+                    let _fs = cl.send("setFunctionBreakpoints", fb)
+                } else if gSession.target.stopAtMain && gSession.target.spec.adapterKind != "python" && gSession.target.spec.adapterKind != "node" && gSession.target.spec.request != "attach" {
                     let fb = Json.obj().arr("breakpoints", Json.arr().obj(Json.obj().str("name", mainSymbolFor(gSession.target.spec.adapterKind)))).build()
                     let fs = cl.send("setFunctionBreakpoints", fb)
                     pend.push(Pending {
@@ -1166,6 +1230,12 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                     )
                 }
             } else if msg.event == "output" {
+                // A rewind's launch chatter is not news, and in a count the
+                // logpoint lines are its hits.
+                if rrRewinding() {
+                    let _hit = rrOutput(bodyStr(msg.doc, "output"))
+                    continue
+                }
                 // Buffer for late-join replay — skip telemetry (adapter-internal,
                 // never displayed). Bounded FIFO; a non-pty adapter floods here.
                 let ocat = bodyStr(msg.doc, "category")
@@ -1205,7 +1275,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                 // breakpoint hit on the way leaves the temporary line armed
                 // otherwise, and a later continue would stop there unasked.
                 if let Option.Some(t) = replace(gSession.proc.runTo, Option.None) {
-                    let rs = cl.send("setBreakpoints", buildBpArgsForPath(gSession.persisted.bps, t.path))
+                    let rs = cl.send("setBreakpoints", buildBpArgsForPath(rrAdapterBps(), t.path))
                     pend.push(Pending {
                         seq: rs, kind: "bpLive", id: 0, extra: ""
                     }
@@ -1224,6 +1294,13 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                         }
                         hi = hi + 1
                     }
+                }
+                // A replay session counts every stop; a rewind passes through the
+                // ones before the stop it is going to, sending what came next.
+                let why = rrWhy()
+                let step = rrStopped(stopReason, tid)
+                if !rrApplyStep(&mut cl, &mut pend, ch, step, why) {
+                    continue
                 }
                 // delve paused through its placeholder thread (see thrPause)
                 // reports the stop on thread -1, which has no stack. Ask for
@@ -1346,8 +1423,28 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
             }
         }
     }
-    if announceEnd {
+    // A rewind whose process ended on its own (not relaunched by it) either
+    // counted to the end, or did not reach its stop.
+    if rrRewinding() && gSession.proc.pendingRun.isNone() {
+        let why = rrWhy()
+        let step = rrEnded()
+        if step.error.len > 0 {
+            logEvent("rewind failed", step.error)
+            wsPush(ch, cmdErrorMsg(why, step.error))
+        }
+        if step.relaunch {
+            gSession.proc.pendingRun = Option.Some(PendingRun {
+                config: Option.None, stopAtMain: rrLaunchStopAtMain(),
+            }
+            )
+        }
+    }
+    // Ending one process of a rewind is not the session ending.
+    if announceEnd && !rrRewinding() {
         wsPush(ch, terminatedMsg(gSession.proc.lastExit))
+        if rrOn() {
+            wsPush(ch, replayStateMsg(gSession))
+        }
     }
     // A forced run killed the old debuggee; auto-rerun here with its config
     // (a new config can't ride a live adapter — it caches launch args).
@@ -1470,6 +1567,28 @@ fn killAdapterSrv(): void {
 fn reapDebuggee(): void {
     if let Option.Some(dpid) = gSession.proc.debuggeePid {
         let pid = dpid as i32
+        // A debuggee launched in our pty is our own child: reaped, not waited
+        // out (see reapPtyChild).
+        var ptyChild = false
+        if let Option.Some(p) = gSession.proc.pty {
+            ptyChild = p.pid() == pid
+        }
+        if let Option.Some(g) = gSession.proc.ptyGone {
+            ptyChild = ptyChild || g.pid() == pid
+        }
+        if ptyChild {
+            if let Option.Some(p) = gSession.proc.pty {
+                if p.pid() == pid {
+                    p.kill()
+                    let _st = p.wait()
+                }
+            }
+            if let Option.Some(g) = replace(gSession.proc.ptyGone, Option.None) {
+                reapPtyChild(g)
+            }
+            gSession.proc.debuggeePid = Option.None
+            return
+        }
         // blocking for the same reason as killAdapterSrv
         var waited: i64 = 0
         while waited < 500 && processAlive(pid) {
@@ -1576,9 +1695,16 @@ pub fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
                     )
                 }
             }
+            let launchBps = rrLaunching()
+            // A rewind that walks back to an earlier stop shows the program's
+            // output up to it, so the terminal starts over (a count stays quiet).
+            if rrRewinding() && rrMode() != "count" {
+                gSession.output = []
+                wsPush(bus, Json.obj().str("type", "rewind").str("mode", rrMode()).bool("clear", true).build())
+            }
             let seq = gSession.proc.nextSeq()
             let _p = pendCh.trySend(Pending {
-                seq: seq, kind: "initialize", id: 0, extra: buildAllBpArgs(gSession.persisted.bps),
+                seq: seq, kind: "initialize", id: 0, extra: buildAllBpArgs(launchBps),
             }
             )
             sendReqFd(dfd, seq, "initialize", initArgs())

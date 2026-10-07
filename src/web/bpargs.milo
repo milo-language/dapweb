@@ -1,0 +1,50 @@
+// setBreakpoints bodies from a breakpoint list. Shared by D (dap_reader), R
+// (dispatch) and the rewind engine, which arms lists other than the user's own.
+
+from "./state" import {
+    gSession, Bp
+}
+from "std/json" import {
+    Json
+}
+
+// DAP keys breakpoints on (source, line), so a second entry at a line the user
+// already holds would be a duplicate the adapter may reject.
+pub fn bpEnabledAt(bps: &Vec<Bp>, path: &string, line: i64): bool {
+    for bp in bps {
+        if bp.path == path && bp.line == line && bp.enabled {
+            return true
+        }
+    }
+    return false
+}
+
+// setBreakpoints args for one file (breakpoints are per-source in DAP), plus
+// the in-flight runToCursor line when it is in this file.
+pub fn buildBpArgsForPath(bps: &Vec<Bp>, path: &string): string {
+    var arr = Json.arr()
+    for bp in bps {
+        if bp.path == path && bp.enabled {
+            var o = Json.obj().int("line", bp.line)
+            if bp.condition.len > 0 {
+                o = o.str("condition", bp.condition)
+            }
+            if bp.hitCondition.len > 0 {
+                o = o.str("hitCondition", bp.hitCondition)
+            }
+            if bp.logMessage.len > 0 {
+                o = o.str("logMessage", bp.logMessage)
+            }
+            arr = arr.obj(o)
+        }
+    }
+    if let Option.Some(t) = gSession.proc.runTo {
+        if t.path == path && !bpEnabledAt(bps, path, t.line) {
+            arr = arr.obj(Json.obj().int("line", t.line))
+        }
+    }
+    return Json.obj()
+        .obj("source", Json.obj().str("path", path))
+        .arr("breakpoints", arr)
+        .build()
+}

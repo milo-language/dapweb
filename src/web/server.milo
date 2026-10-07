@@ -93,8 +93,11 @@ from "std/time" import {
 from "std/path" import {
     Path
 }
+from "./trace" import {
+    traceJson
+}
 from "./state" import {
-    gSession, stoppedMsg, threadsMsg, dataBpsJson
+    gSession, stoppedMsg, threadsMsg, dataBpsJson, replayStateMsg
 }
 from "../dap/session" import {
     resolveAdapterCmd, adaptersJson, inferType
@@ -275,6 +278,9 @@ fn apiStateJson(): string {
     if let Option.Some(t) = gSession.stop.threads {
         b = b.raw("threads", threadsMsg(t))
     }
+    if gSession.target.spec.replay.len > 0 {
+        b = b.raw("replay", replayStateMsg(gSession))
+    }
     return b.build()
 }
 
@@ -361,6 +367,15 @@ fn handleConnection(conn: TcpStream, bus: Channel<string>, pendCh: Channel<Pendi
     let apiPath = req.path.clone()
     if apiPath == "/api/state" {
         sendHttp(fd, 200, "application/json", apiStateJson())
+        return
+    }
+    // The recorded calls of a replay session's trace, for the Timeline tab.
+    if apiPath == "/api/trace" {
+        var limit = req.param("limit").parseInt() ?? 0
+        if limit <= 0 {
+            limit = 2000
+        }
+        sendHttp(fd, 200, "application/json", traceJson(gSession.target.spec.replay, req.param("offset").parseInt() ?? 0, limit))
         return
     }
     if apiPath == "/api/adapters" {
@@ -515,6 +530,27 @@ fn openBrowser(url: &string): void {
     }
 }
 
+// --replay as the config's `replay` key, unless the config names one itself
+// (or is a whole launch.json, which is taken as written).
+fn withReplayKey(text: string, trace: &string): string {
+    if trace.len == 0 {
+        return text
+    }
+    let Result.Ok(d) = Json.parseJsonc(text) else {
+        return text
+    }
+    if !d.isObject() || d.get("configurations").isSome() || d.get("replay").isSome() {
+        return text
+    }
+    var b = Json.obj()
+    for k in d.keys() {
+        if let Option.Some(v) = d.get(k) {
+            b = b.raw(k, v.rawStr())
+        }
+    }
+    return b.str("replay", trace).build()
+}
+
 // Subcommand entrypoint: dispatched from src/main.milo as `dapweb web ...`.
 // argv[0] is the display name (skipped by parseFrom); the rest are the web flags.
 pub fn webMain(argv: Vec<string>): i32 {
@@ -538,6 +574,7 @@ pub fn webMain(argv: Vec<string>): i32 {
     // a single config or a whole {version, configurations:[...]} launch.json).
     parser.addString("launch", "l", "launch configuration (inline JSON object or path to a JSON file): a VS Code launch config — \"type\"/\"request\"/\"program\"/\"args\"/\"env\"/\"cwd\" plus any adapter-specific keys, or a full {version, configurations:[...]} launch.json", "")
     parser.addString("config", "c", "configuration name to select when --launch is a {configurations:[...]} file (default: first entry)", "")
+    parser.addString("replay", "", "a Milo record/replay trace (MILO_RECORD=<file> ./prog): run the program on it, which lets you step backwards", "")
     let args = parser.parseFrom(argv)
     // getString is None only when the flag is absent AND its registered default
     // is empty, so `?? ""` is exactly the value the old string-returning API gave.
@@ -566,6 +603,11 @@ pub fn webMain(argv: Vec<string>): i32 {
     // Read + syntax-check --launch now (fail fast); applied via applyConfig
     // after the session globals are initialized below.
     let launchArg = args.getString("launch") ?? ""
+    let replayArg = args.getString("replay") ?? ""
+    if replayArg.len > 0 && !pathExists(replayArg) {
+        eprint($"error: --replay trace not found: {replayArg}\n")
+        return 1
+    }
     var launchText: string = ""
     if launchArg.len > 0 {
         launchText = launchArg.clone()
@@ -617,7 +659,7 @@ pub fn webMain(argv: Vec<string>): i32 {
     // Apply a --launch config through the same path as every other config
     // (wrapper unwrap + --config name select + validation), CLI flags gap-filled.
     if launchText.len > 0 {
-        let err = applyConfig(mergeCliDefaults(launchText, gSession.target.spec.binPath, gSession.target.spec.srcPath), args.getString("config") ?? "")
+        let err = applyConfig(withReplayKey(mergeCliDefaults(launchText, gSession.target.spec.binPath, gSession.target.spec.srcPath), replayArg), args.getString("config") ?? "")
         if err.len > 0 {
             eprint($"error: --launch: {err}\n")
             return 1
@@ -630,6 +672,9 @@ pub fn webMain(argv: Vec<string>): i32 {
         var b = Json.obj().str("program", gSession.target.spec.binPath)
         if gSession.target.spec.srcPath.len > 0 {
             b = b.str("source", gSession.target.spec.srcPath)
+        }
+        if replayArg.len > 0 {
+            b = b.str("replay", replayArg)
         }
         let err = applyConfig(b.build(), "")
         if err.len > 0 {

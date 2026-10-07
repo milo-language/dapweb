@@ -41,6 +41,11 @@ pub fn commandSpecs(): Vec<CmdSpec> {
     v.push(CmdSpec { name: "stepOver", args: "tid?, granularity?", summary: "step one line, over calls", awaits: "stopped", dap: "next", verb: "stepOver" })
     v.push(CmdSpec { name: "stepIn", args: "tid?, granularity?", summary: "step into the call at the current line", awaits: "stopped", dap: "stepIn", verb: "stepIn" })
     v.push(CmdSpec { name: "stepOut", args: "tid?, granularity?", summary: "run to the caller and stop there", awaits: "stopped", dap: "stepOut", verb: "stepOut" })
+    // dap "": DAP has stepBack/reverseContinue requests, but they are served here,
+    // by re-running the replay, not by the adapter.
+    v.push(CmdSpec { name: "stepBack", args: "", summary: "go back to the previous stop (replay sessions: relaunches on the trace and re-sends every command up to it)", awaits: "stopped", dap: "", verb: "step back" })
+    v.push(CmdSpec { name: "reverseContinue", args: "", summary: "go back to the last time a breakpoint was hit before this point (replay sessions)", awaits: "stopped", dap: "", verb: "reverse continue" })
+    v.push(CmdSpec { name: "seek", args: "record", summary: "relaunch on the trace and stop in user code where trace record N is answered (replay sessions)", awaits: "stopped", dap: "", verb: "seek to a trace record" })
     v.push(CmdSpec { name: "runToCursor", args: "line, path?, tid?", summary: "continue and stop at a line, leaving the breakpoint list alone", awaits: "stopped", dap: "setBreakpoints+continue", verb: "run to a line" })
     v.push(CmdSpec { name: "setNextStatement", args: "line, path?, tid?", summary: "move the next statement to a line without running (adapter must support goto)", awaits: "stopped", dap: "gotoTargets+goto", verb: "move the next statement" })
     v.push(CmdSpec { name: "restart", args: "", summary: "restart the debuggee, keeping breakpoints", awaits: "stopped", dap: "restart", verb: "restart the program" })

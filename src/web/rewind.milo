@@ -1,0 +1,754 @@
+// Reverse debugging for replay sessions: step back, reverse continue, and
+// seek to a trace record.
+//
+// A Milo program launched with MILO_REPLAY answers every clock read, file read,
+// socket read and scheduler wake from its trace, so it computes the same thing
+// every time it runs. dapweb logs each command that moved the program (with the
+// breakpoints armed when it was sent) and counts stops. Stop k is then
+// reachable again by launching anew and re-sending the first commands: the
+// process is identical at every stop along the way, so the k-th stop is the
+// same stop, same locals, same output so far.
+//
+// The engine is pure bookkeeping over gSession.replay. D (dap_reader) calls it
+// on every stop and hands back the DAP requests it returns; R (dispatch) starts
+// rewinds. Nothing a rewind passes through reaches a peer: D shows only the stop
+// it lands on.
+//
+// Every name here starts with rr: Milo merges same-named functions across modules.
+
+from "./bpargs" import {
+    buildBpArgsForPath, bpEnabledAt
+}
+from "./state" import {
+    gSession, Bp, cloneBp, cloneBps, RrEntry, cloneEntry, RrStop, cloneStop, RrHit, Rewind
+}
+from "std/json" import {
+    Json
+}
+from "std/time" import {
+    epochMillis
+}
+
+// A request for D to send, and the pending kind its response routes as ("" = none).
+pub struct RrReq {
+    command: string,
+    args: string,
+    kind: string,
+}
+
+// What D does with a stop.
+pub struct RrStep {
+    show: bool, // fetch its details and broadcast it, as for any stop
+    reqs: Vec<RrReq>, // send these first
+    relaunch: bool, // end this process and launch again (pendingRun is set)
+    seekStack: bool, // fetch its stack and hand it to rrSeekFrames
+    error: string, // tell the peers this (a rewind that could not finish)
+}
+
+fn rrStepShow(): RrStep {
+    return RrStep { show: true, reqs: [], relaunch: false, seekStack: false, error: "" }
+}
+
+fn rrStepQuiet(reqs: Vec<RrReq>): RrStep {
+    return RrStep { show: false, reqs: reqs, relaunch: false, seekStack: false, error: "" }
+}
+
+// The logpoint text count mode arms; the number is the breakpoint's index in Rewind.current.
+let RR_HIT_TAG: string = "dapweb-rr-hit "
+
+pub fn rrOn(): bool {
+    return gSession.target.spec.replay.len > 0
+}
+
+pub fn rrRewinding(): bool {
+    return gSession.replay.rewind.isSome()
+}
+
+pub fn rrMode(): string {
+    if let Option.Some(r) = gSession.replay.rewind {
+        return r.mode.clone()
+    }
+    return ""
+}
+
+fn rrTarget(): i64 {
+    if let Option.Some(r) = gSession.replay.rewind {
+        return r.target
+    }
+    return 0
+}
+
+pub fn rrWhy(): string {
+    if let Option.Some(r) = gSession.replay.rewind {
+        return r.why.clone()
+    }
+    return ""
+}
+
+// The breakpoints the adapter should hold right now: the user's, except while a
+// rewind re-sends commands under the breakpoints each one was sent with.
+pub fn rrAdapterBps(): Vec<Bp> {
+    if rrRewinding() {
+        return cloneBps(gSession.replay.sent)
+    }
+    return cloneBps(gSession.persisted.bps)
+}
+
+// The launch's breakpoints and stop-at-main for a rewind's relaunch.
+pub fn rrLaunchStopAtMain(): bool {
+    if gSession.replay.log.len > 0 {
+        return gSession.replay.log[0].stopAtMain
+    }
+    return gSession.target.stopAtMain
+}
+
+// The trace record this launch stops at (MILO_REPLAY_STOP), 0 for none.
+pub fn rrLaunchSeek(): i64 {
+    if rrOn() && gSession.replay.log.len > 0 {
+        return gSession.replay.log[0].seek
+    }
+    return 0
+}
+
+// Called by startRun before it builds the initialize bundle. A launch that is
+// not a rewind starts a new timeline; a rewind's launch walks the old one again.
+// Returns the breakpoints to arm at launch.
+pub fn rrLaunching(): Vec<Bp> {
+    if !rrOn() {
+        return cloneBps(gSession.persisted.bps)
+    }
+    gSession.replay.cur = 0
+    gSession.replay.tid = -1
+    let mode = rrMode()
+    if mode.len > 0 && mode != "seek" {
+        gSession.target.stopAtMain = rrLaunchStopAtMain()
+        let bps = rrEffectiveBps(0)
+        gSession.replay.sent = cloneBps(bps)
+        return bps
+    }
+    var seek: i64 = 0
+    var bps = cloneBps(gSession.persisted.bps)
+    if let Option.Some(r) = gSession.replay.rewind {
+        // A seek runs to the record unhindered: the user's breakpoints are armed
+        // once it lands.
+        seek = r.record
+        bps = []
+        gSession.target.stopAtMain = false
+    }
+    gSession.replay.log = []
+    gSession.replay.log.push(RrEntry {
+        cmd: "run", granularity: "", path: "", line: 0, atStop: 0, bps: cloneBps(bps),
+        stopAtMain: gSession.target.stopAtMain, seek: seek,
+    }
+    )
+    gSession.replay.stops = []
+    gSession.replay.sent = cloneBps(bps)
+    if seek == 0 {
+        gSession.replay.seekedTo = 0
+    }
+    return bps
+}
+
+// Log a command that moves the program, as R sends it. Only a live, stopped or
+// running replay session that is not itself rewinding has a timeline to add to.
+pub fn rrLog(cmd: &string, granularity: &string, path: &string, line: i64): void {
+    if !rrOn() || rrRewinding() || !gSession.proc.started {
+        return
+    }
+    gSession.replay.log.push(RrEntry {
+        cmd: cmd.clone(), granularity: granularity.clone(), path: path.clone(), line: line,
+        atStop: gSession.replay.cur, bps: cloneBps(gSession.persisted.bps), stopAtMain: false, seek: 0,
+    }
+    )
+}
+
+// The breakpoints log entry i is sent with. A count arms the user's current
+// breakpoints too, as logpoints that report each pass without stopping; a land
+// arms the breakpoint it lands on, on the one command that reaches it.
+fn rrEffectiveBps(i: i64): Vec<Bp> {
+    if i < 0 || i >= gSession.replay.log.len {
+        return cloneBps(gSession.persisted.bps)
+    }
+    let e = cloneEntry(gSession.replay.log[i])
+    var out = cloneBps(e.bps)
+    if let Option.Some(r) = gSession.replay.rewind {
+        if r.mode == "count" {
+            var j: i64 = 0
+            for c in r.current {
+                // A user logpoint never stops, so it is nothing to reverse to.
+                if c.enabled && c.logMessage.len == 0 && !bpEnabledAt(e.bps, c.path, c.line) {
+                    out.push(Bp {
+                        path: c.path.clone(), line: c.line, condition: c.condition.clone(),
+                        hitCondition: "", logMessage: RR_HIT_TAG.clone() + j.toString(), enabled: true,
+                    }
+                    )
+                }
+                j = j + 1
+            }
+        } else if r.mode == "land" && e.atStop == r.landAt {
+            if let Option.Some(lb) = r.landBp {
+                var keep: Vec<Bp> = []
+                for b in out {
+                    if b.path != lb.path || b.line != lb.line {
+                        keep.push(cloneBp(b))
+                    }
+                }
+                keep.push(cloneBp(lb))
+                out = keep
+            }
+        }
+    }
+    return out
+}
+
+// setBreakpoints for every file whose list differs between what the adapter
+// holds and what it should.
+fn rrBpSync(from: &Vec<Bp>, to: &Vec<Bp>): Vec<RrReq> {
+    var paths: Vec<string> = []
+    for b in from {
+        if !paths.contains(b.path) {
+            paths.push(b.path.clone())
+        }
+    }
+    for b in to {
+        if !paths.contains(b.path) {
+            paths.push(b.path.clone())
+        }
+    }
+    var out: Vec<RrReq> = []
+    for p in paths {
+        let want = buildBpArgsForPath(to, p)
+        if buildBpArgsForPath(from, p) != want {
+            out.push(RrReq { command: "setBreakpoints", args: want, kind: "bpLive" })
+        }
+    }
+    return out
+}
+
+// The request that re-sends entry e on thread tid. Thread ids are the OS's and
+// differ per launch, so the stop's own thread stands in for the recorded one.
+fn rrCmdReqs(e: &RrEntry, tid: i64): Vec<RrReq> {
+    var out: Vec<RrReq> = []
+    if e.cmd == "runToCursor" {
+        gSession.proc.runTo = Option.Some(Bp {
+            path: e.path.clone(), line: e.line, condition: "", hitCondition: "", logMessage: "", enabled: true,
+        }
+        )
+        out.push(RrReq { command: "setBreakpoints", args: buildBpArgsForPath(gSession.replay.sent, e.path), kind: "bpLive" })
+        out.push(RrReq { command: "continue", args: Json.obj().int("threadId", tid).build(), kind: "" })
+        return out
+    }
+    if e.cmd == "setNextStatement" {
+        out.push(RrReq {
+            command: "gotoTargets",
+            args: Json.obj().obj("source", Json.obj().str("path", e.path)).int("line", e.line).build(),
+            kind: "gotoT:" + tid.toString(),
+        }
+        )
+        return out
+    }
+    var dap = e.cmd.clone()
+    if e.cmd == "stepOver" {
+        dap = "next"
+    }
+    var b = Json.obj().int("threadId", tid)
+    if e.granularity.len > 0 {
+        b = b.str("granularity", e.granularity)
+    }
+    out.push(RrReq { command: dap, args: b.build(), kind: "" })
+    return out
+}
+
+fn rrEntryAt(stop: i64): i64 {
+    var i: i64 = 0
+    while i < gSession.replay.log.len {
+        if gSession.replay.log[i].atStop == stop && gSession.replay.log[i].cmd != "pause" && gSession.replay.log[i].cmd != "run" {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Re-send whatever moved the program on from stop n, under its breakpoints.
+fn rrNext(n: i64): RrStep {
+    let i = rrEntryAt(n)
+    if i < 0 {
+        return rrFail(n, $"the command log has nothing after stop {n}")
+    }
+    let want = rrEffectiveBps(i)
+    var reqs = rrBpSync(gSession.replay.sent, want)
+    gSession.replay.sent = cloneBps(want)
+    let e = cloneEntry(gSession.replay.log[i])
+    for r in rrCmdReqs(e, gSession.replay.tid) {
+        reqs.push(RrReq { command: r.command.clone(), args: r.args.clone(), kind: r.kind.clone() })
+    }
+    return rrStepQuiet(reqs)
+}
+
+// Give up on a rewind at stop n: show where it got to, with why.
+fn rrFail(n: i64, why: &string): RrStep {
+    let w = rrWhy()
+    var step = rrFinish(n, false)
+    step.error = $"{w}: {why}"
+    return step
+}
+
+// A stop arrived. Counts it, and decides whether it is shown or passed through.
+pub fn rrStopped(reason: &string, tid: i64): RrStep {
+    if !rrOn() {
+        return rrStepShow()
+    }
+    gSession.replay.cur = gSession.replay.cur + 1
+    gSession.replay.tid = tid
+    let n = gSession.replay.cur
+    // Read through rrMode/rrTarget, not a let-else on the global: the compiler
+    // mis-lowers `let Option.Some(r) = <global Option<struct> field> else`.
+    let mode = rrMode()
+    if mode.len == 0 {
+        gSession.replay.stops.push(RrStop { reason: reason.clone(), visible: true, path: "", line: 0 })
+        return rrStepShow()
+    }
+    let target = rrTarget()
+    if mode == "seek" {
+        gSession.replay.stops.push(RrStop { reason: reason.clone(), visible: false, path: "", line: 0 })
+        return RrStep { show: false, reqs: [], relaunch: false, seekStack: true, error: "" }
+    }
+    if n > gSession.replay.stops.len {
+        // Past every stop the run made the first time: it did not go the same way.
+        return rrFail(n, $"the replay went past stop {gSession.replay.stops.len} without reaching stop {target}")
+    }
+    if mode == "count" {
+        rrCountStop(n)
+        if n == target {
+            return rrCountVerdict(n)
+        }
+        return rrNext(n)
+    }
+    if n == target {
+        return rrFinish(n, true)
+    }
+    return rrNext(n)
+}
+
+// Land: the rewind ends at stop n. The timeline is cut back to n, and the
+// adapter's breakpoints go back to the user's.
+fn rrFinish(n: i64, ok: bool): RrStep {
+    let mode = rrMode()
+    var started: i64 = epochMillis()
+    var landAt: i64 = -1
+    if let Option.Some(r) = gSession.replay.rewind {
+        started = r.startedMs
+        landAt = r.landAt
+    }
+    if ok && mode == "land" {
+        // The command that reached the landing is kept with the landing
+        // breakpoint armed, so a later step back re-reaches it the same way.
+        let i = rrEntryAt(landAt)
+        if i >= 0 {
+            let want = rrEffectiveBps(i)
+            var e = cloneEntry(gSession.replay.log[i])
+            e.bps = want
+            gSession.replay.log[i] = e
+        }
+    }
+    var keepLog: Vec<RrEntry> = []
+    for e in gSession.replay.log {
+        if e.atStop < n {
+            keepLog.push(cloneEntry(e))
+        }
+    }
+    gSession.replay.log = keepLog
+    var keepStops: Vec<RrStop> = []
+    var i: i64 = 0
+    while i < gSession.replay.stops.len && i < n {
+        keepStops.push(cloneStop(gSession.replay.stops[i]))
+        i = i + 1
+    }
+    if ok && mode == "land" {
+        // The landing is a stop the first run never made: everything after landAt
+        // is replaced by it.
+        keepStops = []
+        var j: i64 = 0
+        while j < gSession.replay.stops.len && j < landAt {
+            keepStops.push(cloneStop(gSession.replay.stops[j]))
+            j = j + 1
+        }
+        keepStops.push(RrStop { reason: "breakpoint", visible: true, path: "", line: 0 })
+    }
+    gSession.replay.stops = keepStops
+    gSession.replay.cur = gSession.replay.stops.len
+    let from = cloneBps(gSession.replay.sent)
+    gSession.replay.rewind = Option.None
+    gSession.replay.sent = []
+    gSession.replay.lastMs = epochMillis() - started
+    // The stop is the user's again: so are the breakpoints.
+    gSession.proc.runTo = Option.None
+    let reqs = rrBpSync(from, gSession.persisted.bps)
+    var step = rrStepShow()
+    step.reqs = reqs
+    return step
+}
+
+// Where the top frame of stop n is, once D has its stack.
+pub fn rrNoteWhere(n: i64, path: &string, line: i64): void {
+    if n >= 1 && n <= gSession.replay.stops.len {
+        var s = cloneStop(gSession.replay.stops[n - 1])
+        s.path = path.clone()
+        s.line = line
+        gSession.replay.stops[n - 1] = s
+    }
+}
+
+// ── count: which breakpoint passed last ──
+
+fn rrCurrentIdxAt(path: &string, line: i64): i64 {
+    if let Option.Some(r) = gSession.replay.rewind {
+        var j: i64 = 0
+        for c in r.current {
+            if c.enabled && c.logMessage.len == 0 && c.path == path && c.line == line {
+                return j
+            }
+            j = j + 1
+        }
+    }
+    return -1
+}
+
+fn rrPushHit(h: RrHit): void {
+    if let Option.Some(r) = replace(gSession.replay.rewind, Option.None) {
+        var rw = r
+        rw.hits.push(h)
+        gSession.replay.rewind = Option.Some(rw)
+    }
+}
+
+// A stop the run makes at one of the user's breakpoints is a hit too.
+fn rrCountStop(n: i64): void {
+    let s = cloneStop(gSession.replay.stops[n - 1])
+    if s.reason != "breakpoint" || s.path.len == 0 {
+        return
+    }
+    let j = rrCurrentIdxAt(s.path, s.line)
+    if j >= 0 {
+        rrPushHit(RrHit { interval: n, isStop: true, bp: j, bpOrd: 0 })
+    }
+}
+
+// A console line from the adapter while rewinding. In count mode a logpoint's
+// line is a hit. Returns whether it was one.
+pub fn rrOutput(text: &string): bool {
+    if rrMode() != "count" || !text.startsWith(RR_HIT_TAG) {
+        return false
+    }
+    let j = text.substr(RR_HIT_TAG.len, text.len).trim().parseInt() ?? -1
+    if j < 0 {
+        return false
+    }
+    let interval = gSession.replay.cur
+    var ord: i64 = 1
+    if let Option.Some(r) = gSession.replay.rewind {
+        for h in r.hits {
+            if !h.isStop && h.interval == interval && h.bp == j {
+                ord = ord + 1
+            }
+        }
+    }
+    rrPushHit(RrHit { interval: interval, isStop: false, bp: j, bpOrd: ord })
+    return true
+}
+
+fn rrStopIs(n: i64, path: &string, line: i64): bool {
+    if n < 1 || n > gSession.replay.stops.len {
+        return false
+    }
+    return gSession.replay.stops[n - 1].path == path && gSession.replay.stops[n - 1].line == line
+}
+
+// The count reached position k (a stop number; the end of the run counts as
+// one past the last stop). Pick the latest breakpoint pass before k and start
+// the rewind that lands on it.
+//
+// A logpoint's trap fires the one time execution passes its line, but lldb runs
+// it either as a step arrives on the line or as the next command leaves it. So
+// a hit that is the first thing after stop s, at stop s's line, IS stop s, and
+// one that is the last thing before stop s+1, at that stop's line, is stop s+1.
+// Without this, reverse continue from a stop on a breakpoint line would land
+// where it already is.
+fn rrPick(k: i64): RrHit {
+    var best = RrHit { interval: -1, isStop: true, bp: -1, bpOrd: 0 }
+    var bestMinor: i64 = -1
+    var hits: Vec<RrHit> = []
+    var current: Vec<Bp> = []
+    if let Option.Some(r) = gSession.replay.rewind {
+        for h0 in r.hits {
+            hits.push(RrHit { interval: h0.interval, isStop: h0.isStop, bp: h0.bp, bpOrd: h0.bpOrd })
+        }
+        current = cloneBps(r.current)
+    }
+    var idx: i64 = 0
+    while idx < hits.len {
+        let h = hits[idx]
+        var major = h.interval
+        var minor: i64 = 0
+        var asStop = h.isStop
+        if !h.isStop {
+            var pos: i64 = 1
+            var total: i64 = 0
+            var q: i64 = 0
+            while q < hits.len {
+                if !hits[q].isStop && hits[q].interval == h.interval {
+                    total = total + 1
+                    if q < idx {
+                        pos = pos + 1
+                    }
+                }
+                q = q + 1
+            }
+            let c = cloneBp(current[h.bp])
+            if pos == 1 && rrStopIs(h.interval, c.path, c.line) {
+                asStop = true
+            } else if pos == total && rrStopIs(h.interval + 1, c.path, c.line) {
+                asStop = true
+                major = h.interval + 1
+            } else {
+                minor = pos
+            }
+        }
+        let before = major < k
+        let later = major > best.interval || (major == best.interval && minor > bestMinor)
+        if before && later {
+            if asStop {
+                best = RrHit { interval: major, isStop: true, bp: h.bp, bpOrd: 0 }
+            } else {
+                best = RrHit { interval: major, isStop: false, bp: h.bp, bpOrd: h.bpOrd }
+            }
+            bestMinor = minor
+        }
+        idx = idx + 1
+    }
+    return best
+}
+
+// Count mode ended at position k. Either nothing was passed (land back on k),
+// or a rewind to the pick starts.
+fn rrCountVerdict(k: i64): RrStep {
+    let pick = rrPick(k)
+    if pick.interval < 0 || (pick.isStop && pick.interval < 1) {
+        if k > gSession.replay.stops.len {
+            // Counted to the end: there is no stop to put the user back on.
+            gSession.replay.rewind = Option.None
+            gSession.replay.sent = []
+            var step = rrStepQuiet([])
+            step.error = "reverseContinue: no breakpoint was hit before the end of the run"
+            return step
+        }
+        return rrFail(k, "no breakpoint was hit before this stop")
+    }
+    let Option.Some(r) = replace(gSession.replay.rewind, Option.None) else {
+        return rrStepShow()
+    }
+    var rw = r
+    rw.hits = []
+    if pick.isStop {
+        rw.mode = "back"
+        rw.target = pick.interval
+    } else {
+        let c = cloneBp(rw.current[pick.bp])
+        rw.mode = "land"
+        rw.landAt = pick.interval
+        rw.target = pick.interval + 1
+        rw.landBp = Option.Some(Bp {
+            path: c.path.clone(), line: c.line, condition: c.condition.clone(),
+            hitCondition: pick.bpOrd.toString(), logMessage: "", enabled: true,
+        }
+        )
+    }
+    gSession.replay.rewind = Option.Some(rw)
+    gSession.replay.sent = []
+    return RrStep { show: false, reqs: [], relaunch: true, seekStack: false, error: "" }
+}
+
+// The process ended while rewinding. A count to the end decides here; anything
+// else did not reach its stop.
+pub fn rrEnded(): RrStep {
+    if rrMode() == "count" {
+        let k = gSession.replay.stops.len + 1
+        return rrCountVerdict(k)
+    }
+    var target: i64 = 0
+    var record: i64 = 0
+    if let Option.Some(r) = gSession.replay.rewind {
+        target = r.target
+        record = r.record
+    }
+    let mode = rrMode()
+    let w = rrWhy()
+    gSession.replay.rewind = Option.None
+    gSession.replay.sent = []
+    var step = rrStepQuiet([])
+    if mode == "seek" {
+        step.error = $"seek: the program ended before trace record {record}"
+    } else {
+        step.error = $"{w}: the program ended before stop {target}"
+    }
+    return step
+}
+
+// ── seek: out of std to the code that made the call ──
+
+fn rrDirOf(p: &string): string {
+    let Option.Some(slash) = p.lastIndexOf("/") else {
+        return ""
+    }
+    return p.substr(0, slash)
+}
+
+// The stack of a stop on the way out of miloReplayStop. Steps out until the top
+// frame is the program's own code, which is where the user wanted to be: at the
+// call whose answer is record N.
+pub fn rrSeekFrames(doc: &Json): RrStep {
+    let frames = doc.curPath("body.stackFrames")
+    let nf = doc.curLen(frames)
+    var stdDir: string = ""
+    if let Option.Some(r) = gSession.replay.rewind {
+        stdDir = r.stdDir.clone()
+    }
+    if stdDir.len == 0 && nf > 0 {
+        // The first seek stop is in miloReplayStop, whose own file is std/replay.milo.
+        stdDir = rrDirOf(doc.curStr(doc.curField(doc.curField(doc.curChild(frames, 0), "source"), "path")) ?? "")
+        if let Option.Some(r) = replace(gSession.replay.rewind, Option.None) {
+            var rw = r
+            rw.stdDir = stdDir.clone()
+            gSession.replay.rewind = Option.Some(rw)
+        }
+    }
+    var user: i64 = -1
+    var i: i64 = 0
+    while i < nf && user < 0 {
+        let p = doc.curStr(doc.curField(doc.curField(doc.curChild(frames, i), "source"), "path")) ?? ""
+        if p.len > 0 && !p.contains("`") && !(stdDir.len > 0 && p.startsWith(stdDir + "/")) {
+            user = i
+        }
+        i = i + 1
+    }
+    let n = gSession.replay.cur
+    if user <= 0 {
+        // At user code, or none on the stack at all (a record read before main):
+        // this is as close as it gets.
+        return rrSeekLand(n)
+    }
+    gSession.replay.log.push(RrEntry {
+        cmd: "stepOut", granularity: "", path: "", line: 0, atStop: n, bps: [], stopAtMain: false, seek: 0,
+    }
+    )
+    var reqs: Vec<RrReq> = []
+    reqs.push(RrReq { command: "stepOut", args: Json.obj().int("threadId", gSession.replay.tid).build(), kind: "" })
+    return rrStepQuiet(reqs)
+}
+
+fn rrSeekLand(n: i64): RrStep {
+    var started: i64 = epochMillis()
+    var record: i64 = 0
+    if let Option.Some(r) = gSession.replay.rewind {
+        started = r.startedMs
+        record = r.record
+    }
+    if n >= 1 && n <= gSession.replay.stops.len {
+        var s = cloneStop(gSession.replay.stops[n - 1])
+        s.visible = true
+        gSession.replay.stops[n - 1] = s
+    }
+    gSession.replay.rewind = Option.None
+    gSession.replay.seekedTo = record
+    gSession.replay.lastMs = epochMillis() - started
+    let from = cloneBps(gSession.replay.sent)
+    gSession.replay.sent = []
+    var step = rrStepShow()
+    step.reqs = rrBpSync(from, gSession.persisted.bps)
+    return step
+}
+
+// ── starting a rewind (R) ──
+
+// The stop step back goes to: the latest shown stop before where the program is.
+pub fn rrPrevStop(): i64 {
+    var limit = gSession.replay.cur
+    if !gSession.proc.started {
+        // The run is over: its last stop is the one before "now".
+        limit = gSession.replay.stops.len + 1
+    }
+    var best: i64 = 0
+    var i: i64 = 0
+    while i < gSession.replay.stops.len {
+        if gSession.replay.stops[i].visible && i + 1 < limit {
+            best = i + 1
+        }
+        i = i + 1
+    }
+    return best
+}
+
+// Why stop `target` cannot be reached again, or "" when it can.
+pub fn rrCannotReach(target: i64): string {
+    for e in gSession.replay.log {
+        if e.cmd == "pause" && e.atStop < target {
+            return $"a pause (at stop {e.atStop}) stopped wherever the program happened to be, which cannot be replayed exactly"
+        }
+    }
+    var i: i64 = 0
+    while i < gSession.replay.stops.len && i < target {
+        if gSession.replay.stops[i].reason == "data breakpoint" {
+            return $"stop {i + 1} was a watchpoint, and watchpoints do not survive a relaunch"
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+pub fn rrBegin(mode: &string, target: i64, why: &string, record: i64): void {
+    gSession.replay.rewind = Option.Some(Rewind {
+        mode: mode.clone(), target: target, current: cloneBps(gSession.persisted.bps), hits: [],
+        landAt: -1, landBp: Option.None, why: why.clone(), record: record,
+        startedMs: epochMillis(), stdDir: "",
+    }
+    )
+}
+
+// Abandon a rewind (the user killed the session mid-way).
+pub fn rrAbort(): void {
+    gSession.replay.rewind = Option.None
+    gSession.replay.sent = []
+}
+
+// The supportsStepBack capability, added to the adapter's own initialize
+// response: the program is what makes stepping back possible here, not the
+// adapter, so a replay session advertises it on the adapter's behalf.
+pub fn rrWithStepBack(raw: &string): string {
+    if !rrOn() {
+        return raw.clone()
+    }
+    let Result.Ok(doc) = Json.parse(raw) else {
+        return raw.clone()
+    }
+    var b = Json.obj()
+    for k in doc.keys() {
+        let Option.Some(v) = doc.get(k) else {
+            continue
+        }
+        if k == "body" && v.isObject() {
+            var bb = Json.obj()
+            for bk in v.keys() {
+                if bk != "supportsStepBack" {
+                    if let Option.Some(bv) = v.get(bk) {
+                        bb = bb.raw(bk, bv.rawStr())
+                    }
+                }
+            }
+            b = b.raw("body", bb.bool("supportsStepBack", true).build())
+        } else {
+            b = b.raw(k, v.rawStr())
+        }
+    }
+    return b.build()
+}

@@ -1,0 +1,87 @@
+// Totals a day's orders the way a small service drains a queue: a green task
+// feeds orders in as they "arrive" (a short sleep each), the main task keeps a
+// running total, and the day's ledger trailer says what the total must be.
+//
+// It has a bug that only shows at the end: one amount is parsed wrong a few
+// orders in, and nothing notices until the closing check. The point of the demo
+// is finding that order by debugging BACKWARDS from the failure, on a recording,
+// so the data file can be gone by the time anyone looks.
+
+from "std/fs" import {
+    readLines
+}
+from "std/runtime" import {
+    Task
+}
+from "std/sync" import {
+    Channel
+}
+from "std/time" import {
+    epochMillis, sleepMs
+}
+
+struct Order {
+    id: i64,
+    amount: string, // as written in the ledger, e.g. "12.50"
+}
+
+// "12.50" -> 1250 cents.
+fn parseCents(amount: &string): i64 {
+    let parts = amount.split(".")
+    let dollars = parts[0].parseInt() ?? 0
+    var cents: i64 = 0
+    if parts.len > 1 {
+        cents = parts[1].parseInt() ?? 0
+    }
+    return dollars * 100 + cents
+}
+
+fn money(cents: i64): string {
+    let c = cents % 100
+    if c < 10 {
+        return $"{cents / 100}.0{c}"
+    }
+    return $"{cents / 100}.{c}"
+}
+
+fn main() {
+    let path = "examples/replay-demo/orders.txt"
+    let lines = readLines(path) ?? []
+    var expected: i64 = -1
+    var orders: Vec<Order> = []
+    for line in lines {
+        let f = line.trim().split(" ")
+        if f.len == 2 && f[0] == "total" {
+            expected = parseCents(f[1])
+        } else if f.len == 2 && !line.startsWith("#") {
+            orders.push(Order { id: f[0].parseInt() ?? 0, amount: f[1].clone() })
+        }
+    }
+    let started = epochMillis()
+    let queue = Channel<Order>.new(4)!
+    let feed = queue.clone()
+    let n = orders.len
+    let feeder = Task.spawn(move(): void => {
+        for o in orders {
+            sleepMs(25)
+            let _s = feed.send(Order { id: o.id, amount: o.amount.clone() })
+        }
+        feed.close()
+    })
+
+    var total: i64 = 0
+    var count: i64 = 0
+    while true {
+        let Result.Ok(order) = queue.recv() else {
+            break
+        }
+        let cents = parseCents(order.amount)
+        total = total + cents
+        count = count + 1
+        print($"order {order.id}: {order.amount} -> running total {money(total)}")
+    }
+    feeder.join()
+    print($"{count} of {n} orders in {epochMillis() - started} ms")
+    assert(total == expected, $"ledger says {money(expected)}, we got {money(total)}")
+    print("ledger balanced")
+}

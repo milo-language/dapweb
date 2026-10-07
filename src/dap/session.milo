@@ -45,6 +45,10 @@ pub struct LaunchSpec {
     // the user's dapPath verbatim (adapterCmd above is the resolved abs-path
     // command). Kept so a config echo round-trips what the user actually wrote.
     dapPath: string,
+    // A Milo record/replay trace (`replay` in the config, absolute once applied):
+    // the program runs on the recorded answers (MILO_REPLAY), which is what makes
+    // stepping backwards possible. "" = a live run.
+    replay: string,
 }
 
 // a resolved adapter: its dialect kind + the spawnable (abs-path) command line.
@@ -65,6 +69,7 @@ fn isMetaKey(k: &string): bool {
     || k == "port" || k == "host" // TCP transport routing, not DAP body fields
     || k == "cmd" // WS envelope field on setConfig
     || k == "lastRunAt" // history stamp — present when a history entry is re-applied
+    || k == "replay" // lowered to MILO_REPLAY in the launch env, see withReplayEnv
 }
 
 // ── Dialect registry ──
@@ -609,6 +614,7 @@ fn resolveConfigDoc(doc: Json, selectName: string): Result<LaunchSpec> {
     let name = cfg.str("name") ?? ""
     let stopMain = cfg.bool("stopAtMain") ?? false
     let port = cfg.i64("port") ?? 0
+    let replay = cfg.str("replay") ?? ""
     var host = cfg.str("host") ?? ""
     if port > 0 && host.len == 0 {
         host = "127.0.0.1"
@@ -640,6 +646,16 @@ fn resolveConfigDoc(doc: Json, selectName: string): Result<LaunchSpec> {
     }
     if src.len > 0 && !pathExists(src) {
         return Result.Err("source not found: " + src)
+    }
+    if replay.len > 0 {
+        if !pathExists(replay) {
+            return Result.Err("replay trace not found: " + replay)
+        }
+        // A trace is answered by the program's own std, which only exists in a
+        // launched Milo program: an attach would join a process already running live.
+        if req == "attach" {
+            return Result.Err("\"replay\" needs a launch: an attached process is already running on live answers")
+        }
     }
 
     // Transport split: TCP (port>0) connects to a running adapter — no spawn, no
@@ -675,7 +691,7 @@ fn resolveConfigDoc(doc: Json, selectName: string): Result<LaunchSpec> {
         binPath: prog, srcPath: src,
         adapterCmd: selCmd, adapterKind: selKind,
         launchExtra: b.build(), stopAtMain: stopMain,
-        request: req, host: host, port: port, name: name, dapPath: dapPath,
+        request: req, host: host, port: port, name: name, dapPath: dapPath, replay: replay,
     }
     )
 }
@@ -892,6 +908,79 @@ pub fn launchArgsFor(spec: &LaunchSpec, stopMain: bool): string {
     return b.build()
 }
 
+// A launch body with the replay variables added to its `env`: MILO_REPLAY names
+// the trace, MILO_REPLAY_STOP (when stopAt > 0) the record at which the program
+// calls miloReplayStop. A user `env` is kept, in either form lldb-dap accepts (an
+// object, or an array of "K=V" strings).
+//
+// A stop at a record also gets `process handle SIGTRAP` set to neither stop nor
+// pass: miloReplayStop raises SIGTRAP after its breakpoint, for a debugger that
+// set none, and passed through it would end the program the user is seeking into.
+pub fn withReplayEnv(body: string, trace: &string, stopAt: i64): string {
+    let Result.Ok(doc) = Json.parse(body) else {
+        return body
+    }
+    var b = Json.obj()
+    var sawEnv = false
+    var sawPre = false
+    for k in doc.keys() {
+        let Option.Some(v) = doc.get(k) else {
+            continue
+        }
+        if k == "env" && v.isObject() {
+            sawEnv = true
+            var e = Json.obj()
+            for ek in v.keys() {
+                if let Option.Some(ev) = v.get(ek) {
+                    e = e.raw(ek, ev.rawStr())
+                }
+            }
+            e = e.str("MILO_REPLAY", trace)
+            if stopAt > 0 {
+                e = e.str("MILO_REPLAY_STOP", stopAt.toString())
+            }
+            b = b.raw("env", e.build())
+        } else if k == "env" && v.isArray() {
+            sawEnv = true
+            var e = Json.arr()
+            for i in 0..v.len() {
+                if let Option.Some(ev) = v.at(i) {
+                    e = e.raw(ev.rawStr())
+                }
+            }
+            e = e.str("MILO_REPLAY=" + trace.clone())
+            if stopAt > 0 {
+                e = e.str($"MILO_REPLAY_STOP={stopAt}")
+            }
+            b = b.raw("env", e.build())
+        } else if k == "preRunCommands" && v.isArray() && stopAt > 0 {
+            sawPre = true
+            var e = Json.arr()
+            for i in 0..v.len() {
+                if let Option.Some(ev) = v.at(i) {
+                    e = e.raw(ev.rawStr())
+                }
+            }
+            b = b.raw("preRunCommands", e.str(SIGTRAP_QUIET).build())
+        } else {
+            b = b.raw(k, v.rawStr())
+        }
+    }
+    if !sawEnv {
+        var e = Json.arr().str("MILO_REPLAY=" + trace.clone())
+        if stopAt > 0 {
+            e = e.str($"MILO_REPLAY_STOP={stopAt}")
+        }
+        b = b.raw("env", e.build())
+    }
+    if !sawPre && stopAt > 0 {
+        b = b.raw("preRunCommands", Json.arr().str(SIGTRAP_QUIET).build())
+    }
+    return b.build()
+}
+
+let SIGTRAP_QUIET: string = "process handle SIGTRAP --pass false --stop false --notify false"
+
 // ── Config history (server-side; §4) ──
 
 // The canonical launch-config object a resolved spec round-trips to: `type`
@@ -928,6 +1017,9 @@ pub fn specConfigJson(spec: &LaunchSpec, includeDapPath: bool, lastRunAt: i64): 
     }
     if spec.stopAtMain {
         b = b.bool("stopAtMain", true)
+    }
+    if spec.replay.len > 0 {
+        b = b.str("replay", spec.replay)
     }
     match launchExtraDoc(spec.launchExtra) {
         Option.Some(d) => {
@@ -1024,7 +1116,9 @@ fn histIdentity(item: &string): string {
                 let dport = d.i64("port") ?? 0
                 tgt = $"attach\t{pid}\t{conn}\t{host}\t{dport}"
             }
-            return typ + "\t" + prog + "\t" + argsStr + "\t" + tgt
+            // A replay of a program and a live run of it are two different things
+            // to come back to.
+            return typ + "\t" + prog + "\t" + argsStr + "\t" + tgt + "\t" + (d.str("replay") ?? "")
         }
         Result.Err(_e) => {
             return item.clone()

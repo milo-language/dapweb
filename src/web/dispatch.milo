@@ -11,8 +11,14 @@ from "../journal" import {
 from "../sessions" import {
     newSessionName
 }
+from "./bpargs" import {
+    buildBpArgsForPath
+}
+from "./rewind" import {
+    rrOn, rrRewinding, rrLog, rrPrevStop, rrCannotReach, rrBegin, rrAbort, rrLaunchStopAtMain
+}
 from "./dap_reader" import {
-    Pending, sendReqFd, buildBpArgsForPath, excArgs, startRun, dataBpArgs, dropRunDataBps
+    Pending, sendReqFd, excArgs, startRun, dataBpArgs, dropRunDataBps
 }
 from "./peers" import {
     logEvent, peerCountStr, wsPush, peerPush, wsWriterLoop, sinkRegister, sinkUnregister, pushHelloState, configErrMsg, cmdErrorMsg, bpAckMsg
@@ -21,7 +27,7 @@ from "./persist" import {
     absSourcePath, applyConfig, persistBps, loadBps, persistHistory, recordConfig, historyChangedMsg, sessionNameSeeds, journalHere
 }
 from "./state" import {
-    gSession, Bp, cloneBp, DataBp, cloneDataBp, dataBpsMsg, PendingRun, Attribution, attributionFor, sourceMsgBy
+    gSession, Bp, cloneBp, DataBp, cloneDataBp, dataBpsMsg, PendingRun, Attribution, attributionFor, sourceMsgBy, replayStateMsg
 }
 from "std/json" import {
     Json
@@ -121,6 +127,9 @@ fn activityText(cmd: &Cmd): string {
     if cmd.name == "setNextStatement" {
         return $"move the next statement to line {cmd.int("line", 0)}"
     }
+    if cmd.name == "seek" {
+        return $"seek to trace record {cmd.int("record", 0)}"
+    }
     return cmdVerb(cmd.name)
 }
 
@@ -160,6 +169,9 @@ fn cmdHandler(name: string): Option<(&Cmd) => void> {
         "stepOut" => { return Option.Some(cmdStep) }
         "pause" => { return Option.Some(cmdStep) }
         "runToCursor" => { return Option.Some(cmdRunToCursor) }
+        "stepBack" => { return Option.Some(cmdStepBack) }
+        "reverseContinue" => { return Option.Some(cmdReverseContinue) }
+        "seek" => { return Option.Some(cmdSeek) }
         "setNextStatement" => { return Option.Some(cmdSetNextStatement) }
         "restart" => { return Option.Some(cmdRestart) }
         "kill" => { return Option.Some(cmdKill) }
@@ -200,6 +212,13 @@ fn dispatchClientCmd(payload: string, peerKind: string, peerLabel: string, bus: 
     let Option.Some(run) = handler else {
         journalCmd(c, peerKind, peerLabel, false, "not a dapweb command", payload, "")
         return Option.Some(c.clone())
+    }
+    // A rewind re-sends commands of its own and owns the adapter until it lands;
+    // anything else touching the adapter now would change where it lands.
+    if rrRewinding() && c != "kill" && c != "openSource" && c != "resize" && c != "stdin" && c != "newSession" {
+        journalCmd(c, peerKind, peerLabel, false, "rewinding", payload, "")
+        wsPush(bus, cmdErrorMsg(c, "the session is rewinding; try again once it stops"))
+        return Option.None
     }
     journalCmd(c, peerKind, peerLabel, true, "", payload, cmdPath(c, doc))
     let cmd = Cmd {
@@ -416,6 +435,7 @@ fn cmdStep(cmd: &Cmd): void {
     if gran.len > 0 {
         b = b.str("granularity", gran)
     }
+    rrLog(cmd.name, gran, "", 0)
     let seq = gSession.proc.nextSeq()
     sendReqFd(dfd, seq, dapCmd, b.build())
 }
@@ -437,6 +457,7 @@ fn cmdRunToCursor(cmd: &Cmd): void {
         return
     }
     let t = cmd.int("tid", stopTid())
+    rrLog(cmd.name, "", path, line)
     gSession.proc.runTo = Option.Some(Bp {
         path: path.clone(), line: line, condition: "", hitCondition: "", logMessage: "", enabled: true,
     }
@@ -487,6 +508,7 @@ fn cmdSetNextStatement(cmd: &Cmd): void {
         return
     }
     let t = cmd.int("tid", stopTid())
+    rrLog(cmd.name, "", path, line)
     sendPending(cmd.pendCh, "gotoT", 0, t.toString(), "gotoTargets", Json.obj().obj("source", Json.obj().str("path", path)).int("line", line).build())
 }
 
@@ -495,6 +517,17 @@ fn cmdSetNextStatement(cmd: &Cmd): void {
 // supportsRestartRequest (kill+rerun is its fallback). A config change is a Run
 // (force-kills), not a restart.
 fn cmdRestart(cmd: &Cmd): void {
+    // A replay session restarts as a relaunch: the run it replaces may have been
+    // a seek, whose MILO_REPLAY_STOP a native restart would launch with again.
+    if rrOn() && gSession.proc.dapIn.isSome() {
+        gSession.stop.resume()
+        gSession.proc.pendingRun = Option.Some(PendingRun {
+            config: Option.None, stopAtMain: gSession.target.stopAtMain,
+        }
+        )
+        sendPending(cmd.pendCh, "disc", 0, "", "disconnect", Json.obj().bool("terminateDebuggee", true).build())
+        return
+    }
     gSession.stop.resume()
     // The new process gets new addresses, so the old dataIds go, in the adapter
     // too: cleared before the restart, on the same fd, in order.
@@ -510,6 +543,10 @@ fn cmdRestart(cmd: &Cmd): void {
 // loop's terminated/EOF path re-arms `run`.
 fn cmdKill(cmd: &Cmd): void {
     logEvent("kill requested", $"(by {cmd.peerKind} peer)")
+    if rrRewinding() {
+        rrAbort()
+        gSession.proc.pendingRun = Option.None
+    }
     sendPending(cmd.pendCh, "disc", 0, "", "disconnect", Json.obj().bool("terminateDebuggee", true).build())
     // The child session debugs the process; the PARENT is what spawned it.
     // Disconnecting only the child leaves the program running with nobody
@@ -517,6 +554,112 @@ fn cmdKill(cmd: &Cmd): void {
     if let Option.Some(pfd) = gSession.proc.parentIn {
         sendReqFd(pfd, gSession.proc.oddSeq + 1, "disconnect", Json.obj().bool("terminateDebuggee", true).build())
     }
+}
+
+// ── Reverse debugging (replay sessions; the engine is ./rewind) ──
+
+fn rrRefuse(cmd: &Cmd): bool {
+    if !rrOn() {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "stepping backwards needs a replay session: launch the Milo program with \"replay\": \"<trace>\" in its config (dapweb --replay <trace> <program>)"))
+        return true
+    }
+    if gSession.replay.log.len == 0 {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "nothing has run yet: Run first"))
+        return true
+    }
+    return false
+}
+
+// Start the rewind's first launch: end the live process (D's teardown launches
+// again, pendingRun) or, with the run already over, launch now.
+fn rrRelaunch(cmd: &Cmd): void {
+    gSession.stop.resume()
+    wsPush(cmd.bus, replayStateMsg(gSession))
+    gSession.proc.pendingRun = Option.None
+    if gSession.proc.started && gSession.proc.dapIn.isSome() {
+        gSession.proc.pendingRun = Option.Some(PendingRun {
+            config: Option.None, stopAtMain: rrLaunchStopAtMain(),
+        }
+        )
+        sendPending(cmd.pendCh, "disc", 0, "", "disconnect", Json.obj().bool("terminateDebuggee", true).build())
+        return
+    }
+    if gSession.proc.started {
+        // Between processes (a launch in flight): nothing to end, and starting a
+        // second adapter now would race the first.
+        rrAbort()
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "the program is starting; try again once it stops"))
+        wsPush(cmd.bus, replayStateMsg(gSession))
+        return
+    }
+    gSession.target.stopAtMain = rrLaunchStopAtMain()
+    let _ok = startRun(cmd.bus, cmd.pendCh)
+}
+
+fn cmdStepBack(cmd: &Cmd): void {
+    if rrRefuse(cmd) {
+        return
+    }
+    let target = rrPrevStop()
+    if target <= 0 {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "this is the first stop of the run: there is nothing before it to go back to"))
+        return
+    }
+    let why = rrCannotReach(target)
+    if why.len > 0 {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, $"cannot go back to stop {target}: {why}"))
+        return
+    }
+    logEvent("step back", $"to stop {target}  (by {cmd.peerKind} peer)")
+    rrBegin("back", target, cmd.name, 0)
+    rrRelaunch(cmd)
+}
+
+// Counts first: a re-run to where the program is, with the user's breakpoints
+// armed as logpoints, finds the last one passed; a second re-run lands on it.
+fn cmdReverseContinue(cmd: &Cmd): void {
+    if rrRefuse(cmd) {
+        return
+    }
+    var armed = false
+    for b in gSession.persisted.bps {
+        if b.enabled && b.logMessage.len == 0 {
+            armed = true
+        }
+    }
+    if !armed {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "set a breakpoint first: reverse continue runs back to the last one hit"))
+        return
+    }
+    var k = gSession.replay.cur
+    var target = gSession.replay.cur
+    if !gSession.proc.started {
+        k = gSession.replay.stops.len + 1
+        target = -1
+    }
+    let why = rrCannotReach(k)
+    if why.len > 0 {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, $"cannot replay this run: {why}"))
+        return
+    }
+    logEvent("reverse continue", $"from stop {gSession.replay.cur}  (by {cmd.peerKind} peer)")
+    rrBegin("count", target, cmd.name, 0)
+    rrRelaunch(cmd)
+}
+
+fn cmdSeek(cmd: &Cmd): void {
+    if !rrOn() {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "seek needs a replay session: launch the Milo program with \"replay\": \"<trace>\" in its config"))
+        return
+    }
+    let record = cmd.int("record", 0)
+    if record <= 0 {
+        wsPush(cmd.bus, cmdErrorMsg(cmd.name, "seek needs a record number (from 1, as `milo trace` numbers them)"))
+        return
+    }
+    logEvent("seek", $"to trace record {record}  (by {cmd.peerKind} peer)")
+    rrBegin("seek", -1, cmd.name, record)
+    rrRelaunch(cmd)
 }
 
 fn cmdEvaluate(cmd: &Cmd): void {

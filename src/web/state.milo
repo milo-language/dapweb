@@ -148,6 +148,8 @@ pub struct RunState {
     dapIn: Option<i32>,
     // The live debuggee pty, for stdin and resize.
     pty: Option<Pty>,
+    // A closed pty kept for its child pid until the child is reaped: see reapPtyChild.
+    ptyGone: Option<Pty>,
     // The browser sizes its terminal on mount, before any pty exists, so the
     // last size asked for is kept and applied at spawn.
     term: Option<TermSize>,
@@ -281,6 +283,97 @@ impl StopState {
     }
 }
 
+// ── Reverse debugging (replay sessions only; the engine is ../rewind) ──
+//
+// A replayed Milo program is deterministic: every OS answer comes from the
+// trace. So the same commands, sent again from launch, stop at the same places
+// with the same state, and "go back to stop k" is "launch again and re-send the
+// commands that led to stop k". These are those commands.
+
+// One command that moved the program, as it will be sent again.
+pub struct RrEntry {
+    cmd: string, // run | continue | stepOver | stepIn | stepOut | runToCursor | setNextStatement | pause
+    granularity: string,
+    path: string, // runToCursor, setNextStatement
+    line: i64,
+    atStop: i64, // the stop it was sent at; 0 = before the first (the launch)
+    // The breakpoints armed when it was sent. Re-applied before it is sent again,
+    // since a breakpoint set between two steps changes where the second stops.
+    bps: Vec<Bp>,
+    stopAtMain: bool, // launch only
+    seek: i64, // launch only: MILO_REPLAY_STOP record, 0 = none
+}
+
+pub fn cloneBps(v: &Vec<Bp>): Vec<Bp> {
+    var out: Vec<Bp> = []
+    for b in v {
+        out.push(cloneBp(b))
+    }
+    return out
+}
+
+pub fn cloneEntry(e: &RrEntry): RrEntry {
+    return RrEntry {
+        cmd: e.cmd.clone(), granularity: e.granularity.clone(), path: e.path.clone(), line: e.line,
+        atStop: e.atStop, bps: cloneBps(e.bps), stopAtMain: e.stopAtMain, seek: e.seek,
+    }
+}
+
+// One stop of this run, numbered from 1 by its position in `stops`.
+pub struct RrStop {
+    reason: string,
+    // Shown to peers. A seek's stops inside std on the way out to user code are
+    // not, and stepping back skips them.
+    visible: bool,
+    path: string, // top frame, once known
+    line: i64,
+}
+
+pub fn cloneStop(s: &RrStop): RrStop {
+    return RrStop { reason: s.reason.clone(), visible: s.visible, path: s.path.clone(), line: s.line }
+}
+
+// One passing of a breakpoint seen while counting (rewind mode "count").
+pub struct RrHit {
+    interval: i64, // after stop `interval`, before the next
+    isStop: bool, // the stop `interval` itself, at a breakpoint
+    bp: i64, // index into Rewind.current (hits only)
+    bpOrd: i64, // the how-many-th hit of that breakpoint in this interval
+}
+
+// A re-run in progress. Nothing it does reaches a peer until it lands.
+pub struct Rewind {
+    // back: re-send the log up to stop `target`.
+    // count: same, with the user's breakpoints armed as logpoints, to find the
+    //   last one hit before `target` (-1 = the end of the run).
+    // land: re-send up to stop `landAt`, then the command there with `landBp`
+    //   armed, which stops on its hit; the stop after it is `target`.
+    // seek: a launch stopped at a trace record, stepping out to user code.
+    mode: string,
+    target: i64,
+    current: Vec<Bp>, // count/land: the user's breakpoints when it began
+    hits: Vec<RrHit>, // count
+    landAt: i64,
+    landBp: Option<Bp>,
+    why: string, // the command it serves, for errors: stepBack | reverseContinue | seek
+    record: i64, // seek: the trace record to stop at
+    startedMs: i64,
+    stdDir: string, // seek: the directory miloReplayStop's own file is in
+}
+
+pub struct Replay {
+    log: Vec<RrEntry>,
+    stops: Vec<RrStop>,
+    cur: i64, // stops of the running process so far (counts up again during a rewind)
+    rewind: Option<Rewind>,
+    // The breakpoint list the adapter holds while a rewind re-sends commands,
+    // which is the entry's, not the user's.
+    sent: Vec<Bp>,
+    tid: i64, // the thread of the last stop: what a re-sent step steps
+    seekedTo: i64, // the record the last seek landed at, for the timeline
+    lastMs: i64, // how long the last rewind took
+}
+
 pub struct Session {
     target: Target,
     proc: RunState,
@@ -295,19 +388,20 @@ pub struct Session {
     // late join. Bounded — a non-pty adapter routes ALL program output here.
     output: Vec<OutLine>,
     server: ServerInfo,
+    replay: Replay,
 }
 
 pub var gSession: Session = Session {
     target: Target {
         spec: LaunchSpec {
             binPath: "", srcPath: "", adapterCmd: "", adapterKind: "", launchExtra: "",
-            stopAtMain: false, request: "", host: "", port: 0, name: "", dapPath: "",
+            stopAtMain: false, request: "", host: "", port: 0, name: "", dapPath: "", replay: "",
         },
         stopAtMain: false,
         excFilters: Option.None,
     },
     proc: RunState {
-        started: false, dapIn: Option.None, pty: Option.None, term: Option.None,
+        started: false, dapIn: Option.None, pty: Option.None, ptyGone: Option.None, term: Option.None,
         oddSeq: -1, stdinBuf: "", adapterStderr: "", srv: Option.None,
         srvPort: Option.None, debuggeePid: Option.None, parentIn: Option.None,
         child: Option.None, pendingRun: Option.None, runTo: Option.None, runStartMs: 0, lastExit: Option.None,
@@ -327,6 +421,9 @@ pub var gSession: Session = Session {
     server: ServerInfo {
         sessionId: "", listenPort: Option.None, startedAt: 0, noBrowser: false,
         idleTtlSecs: 0, logLevel: 0, webroot: Option.None, restored: false, update: "",
+    },
+    replay: Replay {
+        log: [], stops: [], cur: 0, rewind: Option.None, sent: [], tid: -1, seekedTo: 0, lastMs: 0,
     },
 }
 
@@ -362,6 +459,9 @@ impl Session {
         if let Option.Some(r) = self.stop.regions {
             out.push(seal(regionsMsg(r)).share())
         }
+        if self.target.spec.replay.len > 0 {
+            out.push(seal(replayStateMsg(self)).share())
+        }
         // Flagged so a same-session reconnect (which kept its scrollback) can
         // drop it; a fresh/new-session tab renders it.
         for o in self.output {
@@ -382,6 +482,7 @@ pub fn helloMsg(s: &Session): string {
         .str("adapterId", adapterIdForKind(s.target.spec.adapterKind))
         .str("sessionId", s.server.sessionId)
         .raw("config", specConfigJson(s.target.spec, true, 0))
+        .str("replay", s.target.spec.replay)
     // late joiners need to know a session is live (kill-confirm on Run etc.);
     // a replayed stopped snapshot then refines running → stopped.
     if s.proc.started {
@@ -492,4 +593,33 @@ pub fn threadsMsg(t: &ThreadList): string {
 
 pub fn regionsMsg(regions: &string): string {
     return Json.obj().str("type", "regions").raw("regions", regions).build()
+}
+
+// Where a replay session is on its own timeline: stop `at` of the `stops` this
+// run has made, which of them can be stepped back to, and whether a rewind is
+// under way. Sent after every stop and every rewind change, and on late join.
+pub fn replayStateMsg(s: &Session): string {
+    var visible: i64 = 0
+    var prev: i64 = 0
+    var i: i64 = 0
+    while i < s.replay.stops.len {
+        if s.replay.stops[i].visible {
+            visible = visible + 1
+            if i + 1 < s.replay.cur || (!s.proc.started && i + 1 <= s.replay.cur) {
+                prev = i + 1
+            }
+        }
+        i = i + 1
+    }
+    var b = Json.obj().str("type", "replayState")
+        .str("trace", s.target.spec.replay)
+        .int("at", s.replay.cur)
+        .int("stops", visible)
+        .int("prev", prev)
+        .int("seekedTo", s.replay.seekedTo)
+        .int("lastMs", s.replay.lastMs)
+    if let Option.Some(r) = s.replay.rewind {
+        b = b.str("rewinding", r.why).int("target", r.target).str("mode", r.mode)
+    }
+    return b.build()
 }

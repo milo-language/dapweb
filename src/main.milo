@@ -51,8 +51,9 @@ from "update" import {
 // whose remaining tokens are forwarded verbatim to the chosen subcommand.
 fn topParser(): ArgParser {
     var p = ArgParser.new("dapweb", "web + programmatic interface for any DAP debugger\n\n" + "commands:\n" + "  web     browser debugger UI + shared co-debug session server\n" + "  api     drive a running session from the CLI (list/state/request/eval/...)\n" + "  start   start a session in the background and print its id/port/url\n"
-        + "  log     read the journal: what every session was asked to do, and answered\n" + "  update  replace this binary with the latest release (alias: upgrade)\n\n" + "run 'dapweb <command> --help' for that command's options\n\n" + "quick start (the 90% invocation — path to a binary implies `web`):\n" + "  dapweb /tmp/a.out --those --args\n" + "or boot idle and configure the target in the browser:\n" + "  dapweb web --port 8080\n" + "coordinate from an agent or a shell (same live session the browser shows):\n" + "  dapweb api request --await stopped '{\"cmd\":\"run\"}'")
+        + "  log     read the journal: what every session was asked to do, and answered\n" + "  update  replace this binary with the latest release (alias: upgrade)\n\n" + "run 'dapweb <command> --help' for that command's options\n\n" + "quick start (the 90% invocation — path to a binary implies `web`):\n" + "  dapweb /tmp/a.out --those --args\n" + "debug a recorded Milo run, backwards too (MILO_RECORD=run.mrr ./prog records one):\n" + "  dapweb --replay run.mrr ./prog\n" + "or boot idle and configure the target in the browser:\n" + "  dapweb web --port 8080\n" + "coordinate from an agent or a shell (same live session the browser shows):\n" + "  dapweb api request --await stopped '{\"cmd\":\"run\"}'")
     p.addOptionalPositional("command", "web | api | start | log | update")
+    p.addString("replay", "", "with a program path: run it on this Milo record/replay trace (same as `web --replay`)", "")
     p.enableTrailingArgs() // stop parsing at the command; forward the rest as-is
     return p
 }
@@ -71,6 +72,7 @@ fn main(): i32 {
     }
     var parser = topParser()
     let top = parser.parseFrom(args()) // auto-handles a leading --help
+    let replayFlag = top.getString("replay") ?? ""
     let pos = top.positional
     if pos.len == 0 {
         print(parser.helpText())
@@ -114,6 +116,11 @@ fn main(): i32 {
         webArgv.push("dapweb web")
         webArgv.push("--program")
         webArgv.push(sub.clone())
+        let replay = replayFlag.clone()
+        if replay.len > 0 {
+            webArgv.push("--replay")
+            webArgv.push(replay)
+        }
         if pos.len > 1 {
             var arr = Json.arr()
             var j: i64 = 1

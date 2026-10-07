@@ -1,0 +1,95 @@
+// A Milo record/replay trace (format v1, milo's docs/record-replay.md), read for
+// the Timeline tab: which calls the recorded run made, in order, so a row can be
+// clicked to seek there. Parsed here rather than by shelling out to `milo trace
+// --json`, so a replay session needs no compiler on the machine.
+//
+//   milo-trace 1\n
+//   <seq> <kind> <argLen> <payloadLen>\n<arg bytes>\n<payload bytes>\n   (repeated)
+//
+// Names start with trc: Milo merges same-named functions across modules.
+
+from "std/fs" import {
+    readFile
+}
+from "std/json" import {
+    Json
+}
+
+let TRC_HEADER: string = "milo-trace 1\n"
+let TRC_PREVIEW: i64 = 48
+
+// Up to `max` bytes of `s` from `at` as one readable line: newlines and tabs
+// spelled out, other control and non-ASCII bytes as a middle dot.
+fn trcPreview(s: &string, at: i64, len: i64, max: i64): string {
+    var out = ""
+    var i: i64 = 0
+    while i < len && i < max {
+        let c = s[at + i]
+        if c == '\n' {
+            out = out + "\\n"
+        } else if c == '\t' {
+            out = out + "\\t"
+        } else if c >= ' ' && c <= '~' {
+            out = out + s.substr(at + i, at + i + 1)
+        } else {
+            out = out + "·"
+        }
+        i = i + 1
+    }
+    if len > max {
+        out = out + "…"
+    }
+    return out
+}
+
+fn trcErr(path: &string, msg: &string): string {
+    return Json.obj().bool("ok", false).str("path", path).str("error", msg).build()
+}
+
+// Records [offset, offset + limit) of the trace at `path`, with the total count.
+pub fn traceJson(path: &string, offset: i64, limit: i64): string {
+    if path.len == 0 {
+        return trcErr(path, "not a replay session: no trace")
+    }
+    let Result.Ok(s) = readFile(path) else {
+        return trcErr(path, "cannot read the trace")
+    }
+    if !s.startsWith(TRC_HEADER) {
+        return trcErr(path, "not a milo-trace 1 file")
+    }
+    var recs = Json.arr()
+    var pos = TRC_HEADER.len
+    var total: i64 = 0
+    while pos < s.len {
+        var eol = pos
+        while eol < s.len && s[eol] != '\n' {
+            eol = eol + 1
+        }
+        if eol >= s.len {
+            break // a record cut short by a crash mid-write: the ones before it stand
+        }
+        let head = s.substr(pos, eol).split(" ")
+        if head.len != 4 {
+            return trcErr(path, $"corrupt record header at byte {pos}")
+        }
+        let seq = head[0].parseInt() ?? -1
+        let argLen = head[2].parseInt() ?? -1
+        let payLen = head[3].parseInt() ?? -1
+        let argAt = eol + 1
+        let payAt = argAt + argLen + 1
+        let next = payAt + payLen + 1
+        if seq < 0 || argLen < 0 || payLen < 0 || next > s.len {
+            break
+        }
+        if total >= offset && total < offset + limit {
+            recs = recs.obj(Json.obj().int("seq", seq).str("kind", head[1])
+                .str("arg", trcPreview(s, argAt, argLen, 80))
+                .int("payloadLen", payLen)
+                .str("preview", trcPreview(s, payAt, payLen, TRC_PREVIEW)))
+        }
+        total = total + 1
+        pos = next
+    }
+    return Json.obj().bool("ok", true).str("path", path).int("version", 1)
+        .int("total", total).int("offset", offset).arr("records", recs).build()
+}

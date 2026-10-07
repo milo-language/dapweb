@@ -109,8 +109,11 @@ pub fn applyConfig(raw: string, selectName: string): string {
     match resolveConfig(raw, selectName) {
         Result.Ok(spec) => {
             let src = absSourcePath(spec.srcPath)
+            // Absolute: the debuggee's cwd is the adapter's to choose.
+            let trace = absSourcePath(spec.replay)
             var s = spec
             s.srcPath = src
+            s.replay = trace
             gSession.target.spec = s
             gSession.persisted.bps = []
             gSession.output = []
