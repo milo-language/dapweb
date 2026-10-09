@@ -27,7 +27,7 @@
 // multi-process sqlite: WAL plus a busy timeout.
 
 from "std/sqlite" import {
-    Database, Statement, dbOpen, dbClose, dbExec, dbQuery, dbStep, dbFinalize,
+    Database, Statement, dbOpen, dbExec, dbQuery, dbStep, dbFinalize,
     dbReset, dbBindText, dbBindInt64, dbBindNull, dbColumnText, dbColumnInt64,
     dbColumnIsNull
 }
@@ -220,14 +220,10 @@ fn jrnExecFatal(sql: string): bool {
 // Closing does not disable the journal: a CLI process writes, closes, and then
 // reads, and `dapweb log` opens on its first query.
 pub fn journalClose(): void {
-    if gIns.len > 0 {
-        dbFinalize(gIns[0])
-        gIns = []
-    }
-    if gDb.len > 0 {
-        dbClose(gDb[0])
-        gDb = []
-    }
+    // Statement and Database finalize/close themselves on drop; the statement goes first
+    // so it is finalized before its connection closes.
+    gIns = []
+    gDb = []
 }
 
 // A session's identity row. Called at boot, whenever the target is retargeted,
