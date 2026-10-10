@@ -637,11 +637,14 @@ fn resolveConfigDoc(doc: Json, selectName: string): Result<LaunchSpec> {
         }
     } else {
         // attach needs a target: pid (lldb), processId (debugpy/delve),
-        // connect{} (debugpy remote), or waitFor+program (lldb wait-attach).
+        // connect{} (debugpy remote), waitFor+program (lldb wait-attach), or
+        // one lldb-dap reaches itself: attachCommands (e.g. `gdb-remote :1234`
+        // to a QEMU or OpenOCD gdbstub), gdb-remote-port, or coreFile.
         let hasPid = cfgHas(cfg, "pid") || cfgHas(cfg, "processId")
         let waitFor = cfg.bool("waitFor") ?? false
-        if !hasPid && !cfgHas(cfg, "connect") && !(waitFor && prog.len > 0) {
-            return Result.Err("attach needs a target: \"pid\"/\"processId\", \"connect\", or \"waitFor\" + \"program\"")
+        let lldbTarget = cfgHas(cfg, "attachCommands") || cfgHas(cfg, "gdb-remote-port") || cfgHas(cfg, "coreFile")
+        if !hasPid && !cfgHas(cfg, "connect") && !(waitFor && prog.len > 0) && !lldbTarget {
+            return Result.Err("attach needs a target: \"pid\"/\"processId\", \"connect\", \"waitFor\" + \"program\", \"attachCommands\", \"gdb-remote-port\" or \"coreFile\"")
         }
     }
     if src.len > 0 && !pathExists(src) {
@@ -802,6 +805,7 @@ pub fn launchArgsFor(spec: &LaunchSpec, stopMain: bool): string {
     var b = Json.obj()
     // attach targets a pid, not a program — never inject binPath into an attach
     // body (it's usually "" for attach anyway, and confuses strict adapters).
+    // The lldb branch below is the exception, for attaches that need symbols.
     if spec.request != "attach" && !extraHas(extra, "program") {
         b = b.str("program", spec.binPath)
     }
@@ -882,6 +886,12 @@ pub fn launchArgsFor(spec: &LaunchSpec, stopMain: bool): string {
         // process at configurationDone and the user gets no stop at all.
         if !extraHas(extra, "stopOnEntry") {
             b = b.bool("stopOnEntry", spec.request == "attach" && stopMain)
+        }
+        // An lldb attach that has no pid to read the executable from (a gdbstub
+        // via attachCommands, a core file, waitFor) loads symbols from
+        // `program`; without it every frame is a bare address.
+        if spec.request == "attach" && spec.binPath.len > 0 && !extraHas(extra, "program") {
+            b = b.str("program", spec.binPath)
         }
         if !extraHas(extra, "runInTerminal") {
             b = b.bool("runInTerminal", true)

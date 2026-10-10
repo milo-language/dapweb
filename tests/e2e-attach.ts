@@ -46,9 +46,9 @@ class Peer {
   }
 }
 
-async function spawnSrv(log: string): Promise<any> {
+async function spawnSrv(log: string, extra: string[] = []): Promise<any> {
   const p = await freePort();
-  const srv = own(Bun.spawn([bin, "web", "--port", String(p), "--quiet"], {
+  const srv = own(Bun.spawn([bin, "web", "--port", String(p), "--quiet", ...extra], {
     cwd: root, stdout: "pipe", stderr: "pipe",
     env: { ...process.env, DAPWEB_NO_OPEN: "1", XDG_STATE_HOME: xdg, STUB_LOG: log },
   }));
@@ -93,6 +93,41 @@ const dapPath = `bun ${root}/tests/stub-adapter.ts`;
   ok(!sent.some(r => r.command === "setFunctionBreakpoints"),
      "no `main` function breakpoint on an attach (main already ran)",
      sent.filter(r => r.command === "setFunctionBreakpoints").map(r => r.arguments));
+
+  a.send({ cmd: "kill" });
+  await a.wait(m => m.type === "terminated").catch(() => null);
+  srv.kill();
+}
+
+// ── attach to a gdbstub from a launch.json: no pid, lldb-dap connects itself ──
+// The shape a bare-metal target (QEMU -s, OpenOCD) needs: attachCommands does
+// the connecting and `program` is where the symbols come from. Given through
+// --launch so the launch.json path is what is under test.
+
+{
+  const log = `/tmp/dapweb_attach_log_${process.pid}_g.jsonl`;
+  const cfgFile = `/tmp/dapweb_attach_cfg_${process.pid}.json`;
+  await Bun.write(log, "");
+  await Bun.write(cfgFile, JSON.stringify({ version: "0.2.0", configurations: [
+    { name: "other", type: "lldb", request: "attach", pid: 1, dapPath },
+    { name: "qemu", type: "lldb", request: "attach", program: nested, dapPath,
+      attachCommands: ["gdb-remote localhost:1234"] },
+  ] }));
+  const { srv, port: p } = await spawnSrv(log, ["--launch", cfgFile, "--config", "qemu"]);
+  const a = new Peer(); await a.connect(p);
+  await a.wait(m => m.type === "hello");
+
+  a.send({ cmd: "run", stopAtMain: true });
+  await a.wait(m => m.type === "stopped");
+
+  const sent = await reqs(log);
+  const attach = sent.find(r => r.command === "attach");
+  ok(attach, "a launch.json gdbstub config sends `attach`", sent.map(r => r.command));
+  ok(JSON.stringify(attach?.arguments?.attachCommands) === JSON.stringify(["gdb-remote localhost:1234"]),
+     "the attach body carries attachCommands through", attach?.arguments);
+  ok(attach?.arguments?.program === nested,
+     "the attach body carries program, where lldb reads symbols from", attach?.arguments);
+  ok(attach?.arguments?.pid === undefined, "--config picked the named entry, not the first", attach?.arguments);
 
   a.send({ cmd: "kill" });
   await a.wait(m => m.type === "terminated").catch(() => null);
