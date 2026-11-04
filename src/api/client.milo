@@ -29,7 +29,7 @@ pub fn httpRequest(port: i64, method: string, path: string, body: string): Resul
             return Result.Err($"no server on port {port} (is `dapweb web` running there?)")
         }
     }
-    var s = stream
+    let s = stream
     var req = $"{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
     if body.len > 0 {
         req = req + $"Content-Type: application/json\r\nContent-Length: {body.len}\r\n"

@@ -78,7 +78,7 @@ fn main(): i32 {
         }
         vi = vi + 1
     }
-    var parser = topParser()
+    let parser = topParser()
     let top = parser.parseFrom(args()) // auto-handles a leading --help
     let replayFlag = top.getString("replay") ?? ""
     let pos = top.positional

@@ -167,7 +167,7 @@ fn processListJson(): string {
     let cmd = Command.new("ps").arg("-axo").arg("pid=,args=").stdout(Stdio.Pipe)
     match cmd.spawn() {
         Result.Ok(child) => {
-            var ch = child
+            let ch = child
             var out: string = ""
             // Stdio.Pipe above, so the Child has a stdout pipe to stream.
             for chunk in ch.stdout() {
@@ -504,7 +504,7 @@ fn handleConnection(conn: TcpStream, bus: Channel<string>, pendCh: Channel<Pendi
 }
 
 fn acceptLoop(listener: TcpListener, bus: Channel<string>, pendCh: Channel<Pending>): void {
-    var l = listener
+    let l = listener
     while true {
         match l.accept() {
             Result.Ok(conn) => {
@@ -763,7 +763,7 @@ pub fn webMain(argv: Vec<string>): i32 {
     exitOnSignals(pendCh)
     match listenLocal(port) {
         Result.Ok(listener) => {
-            var l = listener
+            let l = listener
             print($"dapweb web UI → http://localhost:{port}")
             if gSession.target.spec.binPath.len > 0 {
                 if gSession.server.restored {

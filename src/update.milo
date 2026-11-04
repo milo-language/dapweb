@@ -187,7 +187,7 @@ pub fn checkInBackground(): Channel<string> {
 fn runCapture(cmd: Command): Result<string> {
     match cmd.stdout(Stdio.Pipe).spawn() {
         Result.Ok(child) => {
-            var ch = child
+            let ch = child
             var out: string = ""
             // Stdio.Pipe above, so the Child has a stdout pipe to stream.
             for chunk in ch.stdout() {
@@ -236,7 +236,7 @@ fn updateParser(): ArgParser {
 // rename works in a scratch dir next to the binary (same filesystem, so the
 // rename is atomic), and a failure anywhere leaves the old binary untouched.
 pub fn updateMain(argv: Vec<string>): i32 {
-    var parser = updateParser()
+    let parser = updateParser()
     let a = parser.parseFrom(argv)
     let local = buildId()
     if a.getBool("check") {

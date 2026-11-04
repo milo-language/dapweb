@@ -141,7 +141,7 @@ fn renderBreakpoint(row: &string): string {
 }
 
 pub fn logMain(argv: Vec<string>): i32 {
-    var parser = logParser()
+    let parser = logParser()
     let args = parser.parseFrom(argv)
     let asJson = args.getBool("json")
 

@@ -652,7 +652,7 @@ fn handleRunInTerminal(cl: &mut DapClient, doc: &Json, reqSeq: i64, ch: &Channel
     }
     match DebuggeePty.spawn(program, args, rows, cols) {
         Result.Ok(p) => {
-            var pty = p
+            let pty = p
             let pid = pty.pid()
             logEvent("debuggee spawned", $"pid {pid}")
             // Ours to reap: an adapter that routes the debuggee through
@@ -1371,7 +1371,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
                                 body: childCfg, request: childReq
                             }
                             )
-                            var parentCl = cl
+                            let parentCl = cl
                             gSession.proc.parentIn = parentCl.child.dupIn()
                             cl = childCl
                             // parent pendings can never match child seqs — drop
@@ -1406,7 +1406,7 @@ fn dapReaderLoop(client: DapClient, ch: Channel<string>, pendCh: Channel<Pending
     // in that wait finds no run to write to.
     gSession.proc.dapIn = Option.None
     cl.close()
-    var durSecs = (epochMillis() - gSession.proc.runStartMs) / 1000
+    let durSecs = (epochMillis() - gSession.proc.runStartMs) / 1000
     if let Option.Some(code) = gSession.proc.lastExit {
         logEvent("run exited", $"code {code}  ({durSecs}s)")
     } else {
@@ -1703,14 +1703,14 @@ pub fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
         // A socket-only adapter (js-debug, dlv): spawn it asking for port 0,
         // read the port it bound off stdout, connect. From here the handshake is
         // the same as any TCP adapter.
-        var argv = adapterArgvOf(gSession.target.spec.adapterCmd)
+        let argv = adapterArgvOf(gSession.target.spec.adapterCmd)
         if argv.len == 0 {
             eprint("[srv] no adapter configured\n")
             gSession.proc.started = false
             wsPush(bus, terminatedMsg(Option.None))
             return false
         }
-        var prog: string = argv[0].clone()
+        let prog: string = argv[0].clone()
         var rest: Vec<string> = []
         var ai: i64 = 1
         while ai < argv.len {
@@ -1731,7 +1731,7 @@ pub fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
             }
         }
     } else {
-        var argv = adapterArgvOf(gSession.target.spec.adapterCmd)
+        let argv = adapterArgvOf(gSession.target.spec.adapterCmd)
         // adapterCmd is always set by config-apply before a stdio run reaches here.
         if argv.len == 0 {
             eprint("[srv] no adapter configured\n")
@@ -1739,7 +1739,7 @@ pub fn startRun(bus: &Channel<string>, pendCh: &Channel<Pending>): bool {
             wsPush(bus, terminatedMsg(Option.None))
             return false
         }
-        var prog: string = argv[0].clone()
+        let prog: string = argv[0].clone()
         var rest: Vec<string> = []
         var ai: i64 = 1
         while ai < argv.len {

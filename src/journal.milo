@@ -504,7 +504,7 @@ pub fn journalRows(f: &LogFilter): Vec<string> {
         sql = sql + " AND dir = ?"
     }
     sql = sql + " ORDER BY seq DESC LIMIT ?"
-    var st = match dbQuery(gDb[0], sql) {
+    let st = match dbQuery(gDb[0], sql) {
         Result.Ok(s) => s,
         Result.Err(_e) => {
             return out
@@ -580,7 +580,7 @@ pub fn journalSessions(limit: i64): Vec<string> {
     if lim <= 0 {
         lim = 50
     }
-    var st = match dbQuery(gDb[0], "SELECT s.id, s.started_ms, s.ended_ms, s.pid, s.port, s.program, s.adapter, s.cwd, (SELECT count(*) FROM events e WHERE e.session = s.id) FROM sessions s ORDER BY s.started_ms DESC LIMIT ?") {
+    let st = match dbQuery(gDb[0], "SELECT s.id, s.started_ms, s.ended_ms, s.pid, s.port, s.program, s.adapter, s.cwd, (SELECT count(*) FROM events e WHERE e.session = s.id) FROM sessions s ORDER BY s.started_ms DESC LIMIT ?") {
         Result.Ok(s) => s,
         Result.Err(_e) => {
             return out
@@ -628,7 +628,7 @@ pub fn journalBreakpoints(program: &string, limit: i64): Vec<string> {
         sql = sql + " AND s.program = ?"
     }
     sql = sql + " GROUP BY s.program, e.session, e.path, e.line) SELECT bp.program, bp.path, bp.line, count(*) AS setIn, sum(CASE WHEN EXISTS(SELECT 1 FROM events st WHERE st.session = bp.session AND st.dir = 'out' AND st.kind = 'stopped' AND st.path = bp.path AND st.line = bp.line) THEN 1 ELSE 0 END) AS hitIn FROM bp GROUP BY bp.program, bp.path, bp.line ORDER BY setIn DESC, hitIn ASC LIMIT ?"
-    var st = match dbQuery(gDb[0], sql) {
+    let st = match dbQuery(gDb[0], sql) {
         Result.Ok(s) => s,
         Result.Err(_e) => {
             return out

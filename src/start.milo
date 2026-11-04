@@ -106,7 +106,7 @@ fn fail(msg: &string): i32 {
 
 pub fn startMain(argv: Vec<string>): i32 {
     if wantsHelp(argv) {
-        var parser = startParser()
+        let parser = startParser()
         print(parser.helpText())
         return 0
     }
